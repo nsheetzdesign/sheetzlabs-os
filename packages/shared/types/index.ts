@@ -4,3 +4,5 @@ export type ApiResponse<T> =
   | { data: null; error: string };
 
 // Add domain types here as the project grows
+
+export * from "./database.types";
