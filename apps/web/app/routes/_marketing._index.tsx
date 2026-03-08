@@ -1,5 +1,13 @@
-import type { MetaFunction } from "react-router";
+import { redirect, type LoaderFunctionArgs, type MetaFunction } from "react-router";
 import { Zap, Box, Cpu, ArrowUpRight, ChevronRight } from "lucide-react";
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const host = request.headers.get("host") ?? "";
+  if (host.startsWith("app.")) {
+    return redirect("/dashboard");
+  }
+  return null;
+}
 
 export const meta: MetaFunction = () => [
   { title: "Sheetz Labs — Operator-Built Software" },
