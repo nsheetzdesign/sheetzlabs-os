@@ -8,6 +8,7 @@ import {
   CheckSquare,
   BookOpen,
   Brain,
+  Settings2,
   LogOut,
   Search,
 } from "lucide-react";
@@ -21,6 +22,7 @@ const navItems = [
   { icon: CheckSquare, label: "Tasks", to: "/dashboard/tasks" },
   { icon: BookOpen, label: "Knowledge", to: "/dashboard/knowledge" },
   { icon: Brain, label: "AI Agents", to: "/dashboard/agents" },
+  { icon: Settings2, label: "Settings", to: "/dashboard/settings/stripe" },
 ];
 
 interface SidebarProps {

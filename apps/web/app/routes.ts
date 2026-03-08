@@ -41,5 +41,8 @@ export default [
       index("routes/dashboard.agents._index.tsx"),
       route(":id", "routes/dashboard.agents.$id.tsx"),
     ]),
+    route("settings", "routes/dashboard.settings.tsx", [
+      route("stripe", "routes/dashboard.settings.stripe.tsx"),
+    ]),
   ]),
 ] satisfies RouteConfig;

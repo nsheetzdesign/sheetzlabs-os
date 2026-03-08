@@ -274,6 +274,8 @@ export type Database = {
           period_end: string | null
           period_start: string | null
           recorded_at: string | null
+          stripe_connection_id: string | null
+          stripe_invoice_id: string | null
           type: Database["public"]["Enums"]["revenue_type"]
           venture_id: string | null
         }
@@ -286,6 +288,8 @@ export type Database = {
           period_end?: string | null
           period_start?: string | null
           recorded_at?: string | null
+          stripe_connection_id?: string | null
+          stripe_invoice_id?: string | null
           type: Database["public"]["Enums"]["revenue_type"]
           venture_id?: string | null
         }
@@ -298,12 +302,84 @@ export type Database = {
           period_end?: string | null
           period_start?: string | null
           recorded_at?: string | null
+          stripe_connection_id?: string | null
+          stripe_invoice_id?: string | null
           type?: Database["public"]["Enums"]["revenue_type"]
           venture_id?: string | null
         }
         Relationships: [
           {
+            foreignKeyName: "revenue_stripe_connection_id_fkey"
+            columns: ["stripe_connection_id"]
+            isOneToOne: false
+            referencedRelation: "stripe_connections"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "revenue_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      stripe_connections: {
+        Row: {
+          account_key: string
+          created_at: string | null
+          id: string
+          is_active: boolean | null
+          name: string
+        }
+        Insert: {
+          account_key: string
+          created_at?: string | null
+          id?: string
+          is_active?: boolean | null
+          name: string
+        }
+        Update: {
+          account_key?: string
+          created_at?: string | null
+          id?: string
+          is_active?: boolean | null
+          name?: string
+        }
+        Relationships: []
+      }
+      stripe_product_mappings: {
+        Row: {
+          created_at: string | null
+          id: string
+          stripe_connection_id: string | null
+          stripe_product_id: string
+          venture_id: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          stripe_connection_id?: string | null
+          stripe_product_id: string
+          venture_id?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          stripe_connection_id?: string | null
+          stripe_product_id?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "stripe_product_mappings_stripe_connection_id_fkey"
+            columns: ["stripe_connection_id"]
+            isOneToOne: false
+            referencedRelation: "stripe_connections"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "stripe_product_mappings_venture_id_fkey"
             columns: ["venture_id"]
             isOneToOne: false
             referencedRelation: "ventures"

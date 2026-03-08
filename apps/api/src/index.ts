@@ -1,11 +1,16 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import agents from "./routes/agents";
+import stripeRouter from "./routes/stripe";
 
 type Bindings = {
   ENVIRONMENT: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  STRIPE_PERSONAL_KEY: string;
+  STRIPE_PERSONAL_WEBHOOK_SECRET: string;
+  STRIPE_COLAB_KEY: string;
+  STRIPE_COLAB_WEBHOOK_SECRET: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -21,5 +26,6 @@ app.get("/health", (c) => {
 });
 
 app.route("/agents", agents);
+app.route("/stripe", stripeRouter);
 
 export default app;
