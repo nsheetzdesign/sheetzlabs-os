@@ -1,3 +1,4 @@
+Using workdir /Users/nick/Documents/Development/sheetz-labs
 export type Json =
   | string
   | number
@@ -218,6 +219,47 @@ export type Database = {
           },
         ]
       }
+      venture_connections: {
+        Row: {
+          config: Json | null
+          created_at: string | null
+          credentials_key: string | null
+          id: string
+          is_active: boolean | null
+          last_sync_at: string | null
+          provider: string
+          venture_id: string | null
+        }
+        Insert: {
+          config?: Json | null
+          created_at?: string | null
+          credentials_key?: string | null
+          id?: string
+          is_active?: boolean | null
+          last_sync_at?: string | null
+          provider: string
+          venture_id?: string | null
+        }
+        Update: {
+          config?: Json | null
+          created_at?: string | null
+          credentials_key?: string | null
+          id?: string
+          is_active?: boolean | null
+          last_sync_at?: string | null
+          provider?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "venture_connections_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       ventures: {
         Row: {
           churn_rate: number | null
@@ -228,6 +270,7 @@ export type Database = {
           id: string
           mrr_cents: number | null
           name: string
+          parent_venture_id: string | null
           slug: string
           stage: Database["public"]["Enums"]["venture_stage"] | null
           status: Database["public"]["Enums"]["venture_status"] | null
@@ -243,6 +286,7 @@ export type Database = {
           id?: string
           mrr_cents?: number | null
           name: string
+          parent_venture_id?: string | null
           slug: string
           stage?: Database["public"]["Enums"]["venture_stage"] | null
           status?: Database["public"]["Enums"]["venture_status"] | null
@@ -258,13 +302,22 @@ export type Database = {
           id?: string
           mrr_cents?: number | null
           name?: string
+          parent_venture_id?: string | null
           slug?: string
           stage?: Database["public"]["Enums"]["venture_stage"] | null
           status?: Database["public"]["Enums"]["venture_status"] | null
           tagline?: string | null
           updated_at?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "ventures_parent_venture_id_fkey"
+            columns: ["parent_venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
       }
     }
     Views: {

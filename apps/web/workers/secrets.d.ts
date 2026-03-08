@@ -3,4 +3,11 @@
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
+  // Product Supabase connections
+  BOHP_SUPABASE_URL?: string;
+  BOHP_SUPABASE_KEY?: string;
+  TELOSI_SUPABASE_URL?: string;
+  TELOSI_SUPABASE_KEY?: string;
+  HOLIX_SUPABASE_URL?: string;
+  HOLIX_SUPABASE_KEY?: string;
 }

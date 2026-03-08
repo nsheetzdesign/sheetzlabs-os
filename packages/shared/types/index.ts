@@ -15,3 +15,5 @@ export type PipelineItem = Database["public"]["Tables"]["pipeline"]["Row"];
 export type Task = Database["public"]["Tables"]["tasks"]["Row"];
 export type Relationship = Database["public"]["Tables"]["relationships"]["Row"];
 export type Revenue = Database["public"]["Tables"]["revenue"]["Row"];
+export type VentureConnection =
+  Database["public"]["Tables"]["venture_connections"]["Row"];
