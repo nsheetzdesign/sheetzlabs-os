@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import agents from "./routes/agents";
 import stripeRouter from "./routes/stripe";
+import expensesRouter from "./routes/expenses";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -27,5 +28,6 @@ app.get("/health", (c) => {
 
 app.route("/agents", agents);
 app.route("/stripe", stripeRouter);
+app.route("/expenses", expensesRouter);
 
 export default app;

@@ -22,6 +22,11 @@ export default [
       index("routes/dashboard.revenue._index.tsx"),
       route("new", "routes/dashboard.revenue.new.tsx"),
     ]),
+    route("expenses", "routes/dashboard.expenses.tsx", [
+      index("routes/dashboard.expenses._index.tsx"),
+      route("new", "routes/dashboard.expenses.new.tsx"),
+      route(":id", "routes/dashboard.expenses.$id.tsx"),
+    ]),
     route("relationships", "routes/dashboard.relationships.tsx", [
       index("routes/dashboard.relationships._index.tsx"),
       route("new", "routes/dashboard.relationships.new.tsx"),
@@ -43,6 +48,7 @@ export default [
     ]),
     route("settings", "routes/dashboard.settings.tsx", [
       route("stripe", "routes/dashboard.settings.stripe.tsx"),
+      route("expenses", "routes/dashboard.settings.expenses.tsx"),
     ]),
   ]),
 ] satisfies RouteConfig;

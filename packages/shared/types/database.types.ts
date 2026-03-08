@@ -59,6 +59,97 @@ export type Database = {
         }
         Relationships: []
       }
+      expense_connections: {
+        Row: {
+          created_at: string | null
+          id: string
+          is_active: boolean | null
+          last_sync_at: string | null
+          provider: string
+          venture_id: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          is_active?: boolean | null
+          last_sync_at?: string | null
+          provider: string
+          venture_id?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          is_active?: boolean | null
+          last_sync_at?: string | null
+          provider?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expense_connections_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      expenses: {
+        Row: {
+          amount_cents: number
+          category: Database["public"]["Enums"]["expense_category"]
+          created_at: string | null
+          description: string | null
+          expense_date: string
+          external_id: string | null
+          id: string
+          is_recurring: boolean | null
+          receipt_filename: string | null
+          receipt_url: string | null
+          source: string | null
+          vendor: string
+          venture_id: string | null
+        }
+        Insert: {
+          amount_cents: number
+          category: Database["public"]["Enums"]["expense_category"]
+          created_at?: string | null
+          description?: string | null
+          expense_date: string
+          external_id?: string | null
+          id?: string
+          is_recurring?: boolean | null
+          receipt_filename?: string | null
+          receipt_url?: string | null
+          source?: string | null
+          vendor: string
+          venture_id?: string | null
+        }
+        Update: {
+          amount_cents?: number
+          category?: Database["public"]["Enums"]["expense_category"]
+          created_at?: string | null
+          description?: string | null
+          expense_date?: string
+          external_id?: string | null
+          id?: string
+          is_recurring?: boolean | null
+          receipt_filename?: string | null
+          receipt_url?: string | null
+          source?: string | null
+          vendor?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expenses_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       interactions: {
         Row: {
           created_at: string | null
@@ -542,6 +633,19 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
+      expense_category:
+        | "software"
+        | "hosting"
+        | "ai_usage"
+        | "contractor"
+        | "hardware"
+        | "office"
+        | "marketing"
+        | "legal"
+        | "banking"
+        | "travel"
+        | "subscriptions"
+        | "other"
       pipeline_stage:
         | "idea"
         | "researching"
@@ -709,6 +813,20 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      expense_category: [
+        "software",
+        "hosting",
+        "ai_usage",
+        "contractor",
+        "hardware",
+        "office",
+        "marketing",
+        "legal",
+        "banking",
+        "travel",
+        "subscriptions",
+        "other",
+      ],
       pipeline_stage: [
         "idea",
         "researching",

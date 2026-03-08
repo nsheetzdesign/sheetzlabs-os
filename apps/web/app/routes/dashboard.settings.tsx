@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router";
 
 const settingsTabs = [
   { label: "Stripe", to: "/dashboard/settings/stripe" },
+  { label: "Expenses", to: "/dashboard/settings/expenses" },
 ];
 
 export default function SettingsLayout() {

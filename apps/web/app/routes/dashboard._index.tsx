@@ -27,21 +27,24 @@ export async function loader({ context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env;
   const supabase = getSupabaseClient(env);
 
-  const [venturesRes, pipelineRes, tasksRes, liveMetrics] = await Promise.all([
-    supabase.from("ventures").select("*").order("created_at"),
-    supabase
-      .from("pipeline")
-      .select("*")
-      .is("venture_id", null)
-      .order("total_score", { ascending: false }),
-    supabase
-      .from("tasks")
-      .select("*")
-      .neq("status", "done")
-      .order("due_date")
-      .limit(5),
-    getAllVentureMetrics(env),
-  ]);
+  const [venturesRes, pipelineRes, tasksRes, liveMetrics, revenueRes, expensesRes] =
+    await Promise.all([
+      supabase.from("ventures").select("*").order("created_at"),
+      supabase
+        .from("pipeline")
+        .select("*")
+        .is("venture_id", null)
+        .order("total_score", { ascending: false }),
+      supabase
+        .from("tasks")
+        .select("*")
+        .neq("status", "done")
+        .order("due_date")
+        .limit(5),
+      getAllVentureMetrics(env),
+      supabase.from("revenue").select("amount_cents"),
+      supabase.from("expenses").select("amount_cents"),
+    ]);
 
   // Merge live metrics into ventures.
   // Live data overrides seed values; _live=true signals real-time data.
@@ -55,10 +58,20 @@ export async function loader({ context }: LoaderFunctionArgs) {
     };
   });
 
+  const totalRevenueCents = (revenueRes.data ?? []).reduce(
+    (s, r) => s + (r.amount_cents ?? 0),
+    0,
+  );
+  const totalExpenseCents = (expensesRes.data ?? []).reduce(
+    (s, e) => s + (e.amount_cents ?? 0),
+    0,
+  );
+
   return {
     ventures,
     pipeline: pipelineRes.data ?? [],
     tasks: tasksRes.data ?? [],
+    financials: { totalRevenueCents, totalExpenseCents },
   };
 }
 
@@ -142,9 +155,11 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 function PortfolioOverview({
   ventures,
   taskCount,
+  financials,
 }: {
   ventures: VentureRow[];
   taskCount: number;
+  financials: { totalRevenueCents: number; totalExpenseCents: number };
 }) {
   const activeVentures = ventures.filter(
     (v) => v.status !== "sunset" && v.status !== "sold",
@@ -179,6 +194,16 @@ function PortfolioOverview({
       up: totalCustomers > 0,
     },
     {
+      label: "Net Revenue",
+      value: (() => {
+        const net = financials.totalRevenueCents - financials.totalExpenseCents;
+        const abs = Math.abs(net / 100).toLocaleString();
+        return net >= 0 ? `+$${abs}` : `-$${abs}`;
+      })(),
+      delta: `$${(financials.totalExpenseCents / 100).toLocaleString()} expenses`,
+      up: financials.totalRevenueCents >= financials.totalExpenseCents,
+    },
+    {
       label: "Open Tasks",
       value: String(taskCount),
       delta: taskCount > 0 ? `${taskCount} open` : "all clear",
@@ -191,7 +216,7 @@ function PortfolioOverview({
       <SectionTitle>Portfolio Overview</SectionTitle>
 
       {/* Metric tiles */}
-      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         {metrics.map((m) => (
           <div
             key={m.label}
@@ -466,14 +491,14 @@ function QuickActions() {
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function CommandCenter() {
-  const { ventures, pipeline, tasks } = useLoaderData<typeof loader>();
+  const { ventures, pipeline, tasks, financials } = useLoaderData<typeof loader>();
 
   return (
     <div className="flex flex-1 flex-col">
       <Header title="Command Center" />
       <main className="flex-1 p-6">
         <div className="grid grid-cols-12 gap-4">
-          <PortfolioOverview ventures={ventures} taskCount={tasks.length} />
+          <PortfolioOverview ventures={ventures} taskCount={tasks.length} financials={financials} />
           <Alerts />
           <TodaysTasks tasks={tasks} />
           <Pipeline pipeline={pipeline} />
