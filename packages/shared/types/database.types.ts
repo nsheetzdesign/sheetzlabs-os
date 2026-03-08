@@ -14,6 +14,51 @@ export type Database = {
   }
   public: {
     Tables: {
+      agent_runs: {
+        Row: {
+          agent_name: string
+          completed_at: string | null
+          created_at: string | null
+          duration_ms: number | null
+          error_message: string | null
+          id: string
+          input_data: Json | null
+          output_data: Json | null
+          started_at: string | null
+          status: string | null
+          tokens_used: number | null
+          trigger_type: string | null
+        }
+        Insert: {
+          agent_name: string
+          completed_at?: string | null
+          created_at?: string | null
+          duration_ms?: number | null
+          error_message?: string | null
+          id?: string
+          input_data?: Json | null
+          output_data?: Json | null
+          started_at?: string | null
+          status?: string | null
+          tokens_used?: number | null
+          trigger_type?: string | null
+        }
+        Update: {
+          agent_name?: string
+          completed_at?: string | null
+          created_at?: string | null
+          duration_ms?: number | null
+          error_message?: string | null
+          id?: string
+          input_data?: Json | null
+          output_data?: Json | null
+          started_at?: string | null
+          status?: string | null
+          tokens_used?: number | null
+          trigger_type?: string | null
+        }
+        Relationships: []
+      }
       interactions: {
         Row: {
           created_at: string | null
@@ -58,6 +103,50 @@ export type Database = {
           },
           {
             foreignKeyName: "interactions_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      knowledge: {
+        Row: {
+          content: string | null
+          created_at: string | null
+          id: string
+          slug: string
+          tags: string[] | null
+          title: string
+          type: string
+          updated_at: string | null
+          venture_id: string | null
+        }
+        Insert: {
+          content?: string | null
+          created_at?: string | null
+          id?: string
+          slug: string
+          tags?: string[] | null
+          title: string
+          type?: string
+          updated_at?: string | null
+          venture_id?: string | null
+        }
+        Update: {
+          content?: string | null
+          created_at?: string | null
+          id?: string
+          slug?: string
+          tags?: string[] | null
+          title?: string
+          type?: string
+          updated_at?: string | null
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "knowledge_venture_id_fkey"
             columns: ["venture_id"]
             isOneToOne: false
             referencedRelation: "ventures"

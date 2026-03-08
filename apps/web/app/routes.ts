@@ -30,7 +30,14 @@ export default [
       route("new", "routes/dashboard.tasks.new.tsx"),
       route(":id", "routes/dashboard.tasks.$id.tsx"),
     ]),
-    route("knowledge", "routes/dashboard.knowledge.tsx"),
-    route("agents", "routes/dashboard.agents.tsx"),
+    route("knowledge", "routes/dashboard.knowledge.tsx", [
+      index("routes/dashboard.knowledge._index.tsx"),
+      route("new", "routes/dashboard.knowledge.new.tsx"),
+      route(":slug", "routes/dashboard.knowledge.$slug.tsx"),
+    ]),
+    route("agents", "routes/dashboard.agents.tsx", [
+      index("routes/dashboard.agents._index.tsx"),
+      route(":id", "routes/dashboard.agents.$id.tsx"),
+    ]),
   ]),
 ] satisfies RouteConfig;
