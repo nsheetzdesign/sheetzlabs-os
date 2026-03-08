@@ -1,4 +1,4 @@
-import { NavLink, Link } from "react-router";
+import { NavLink, Form } from "react-router";
 import {
   LayoutDashboard,
   Box,
@@ -8,7 +8,7 @@ import {
   CheckSquare,
   BookOpen,
   Brain,
-  Settings,
+  LogOut,
   Search,
 } from "lucide-react";
 
@@ -23,7 +23,25 @@ const navItems = [
   { icon: Brain, label: "AI Agents", to: "/dashboard/agents" },
 ];
 
-export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+interface SidebarProps {
+  user?: { email?: string };
+  onOpenPalette: () => void;
+}
+
+function getInitials(email?: string): string {
+  if (!email) return "SL";
+  const local = email.split("@")[0];
+  const parts = local.split(/[._-]/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return local.slice(0, 2).toUpperCase();
+}
+
+export function Sidebar({ user, onOpenPalette }: SidebarProps) {
+  const initials = getInitials(user?.email);
+  const displayEmail = user?.email ?? "";
+
   return (
     <aside className="fixed left-0 top-0 flex h-screen w-64 flex-col border-r border-surface-2/50 bg-surface-0">
       {/* Logo */}
@@ -74,18 +92,21 @@ export function Sidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
       <div className="border-t border-surface-2/50 p-3">
         <div className="flex items-center gap-3 rounded-lg px-2 py-2">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-sm font-semibold text-zinc-300">
-            NS
+            {initials}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">Nick Sheetz</div>
-            <div className="text-xs text-zinc-500">Founder</div>
+            <div className="truncate text-xs text-zinc-400">{displayEmail}</div>
+            <div className="text-xs text-zinc-600">Founder</div>
           </div>
-          <Link
-            to="/dashboard/settings"
-            className="text-zinc-500 transition-colors hover:text-zinc-300"
-          >
-            <Settings className="h-4 w-4" />
-          </Link>
+          <Form method="post" action="/auth/logout">
+            <button
+              type="submit"
+              title="Sign out"
+              className="text-zinc-600 transition-colors hover:text-zinc-300"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          </Form>
         </div>
       </div>
     </aside>

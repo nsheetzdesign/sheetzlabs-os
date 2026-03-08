@@ -4,6 +4,8 @@ export default [
   layout("routes/_marketing.tsx", [
     index("routes/_marketing._index.tsx"),
   ]),
+  route("auth/login", "routes/auth.login.tsx"),
+  route("auth/logout", "routes/auth.logout.tsx"),
   route("dashboard", "routes/dashboard.tsx", [
     index("routes/dashboard._index.tsx"),
     route("ventures", "routes/dashboard.ventures.tsx", [
