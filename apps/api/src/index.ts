@@ -12,6 +12,7 @@ type Bindings = {
   STRIPE_PERSONAL_WEBHOOK_SECRET: string;
   STRIPE_COLAB_KEY: string;
   STRIPE_COLAB_WEBHOOK_SECRET: string;
+  N8N_API_KEY: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
