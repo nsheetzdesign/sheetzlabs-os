@@ -1,0 +1,17 @@
+{
+  "name": "sheetzlabs-os",
+  "private": true,
+  "scripts": {
+    "dev:web": "cd apps/web && pnpm dev",
+    "dev:api": "cd apps/api && pnpm dev",
+    "build:all": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "turbo": "latest"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "sharp", "workerd"]
+  }
+}

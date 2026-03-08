@@ -1,0 +1,9 @@
+name = "sheetzlabs-web"
+main = "./workers/app.ts"
+compatibility_date = "2025-04-04"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+
+# SUPABASE_URL and SUPABASE_ANON_KEY are set via `wrangler secret put`

@@ -1,0 +1,26 @@
+{
+  "name": "api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sheetzlabs/shared": "workspace:*",
+    "@hono/zod-validator": "^0.7.0",
+    "hono": "^4.7.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^22",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

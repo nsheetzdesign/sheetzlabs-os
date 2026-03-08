@@ -1,0 +1,11 @@
+name = "sheetzlabs-api"
+main = "src/index.ts"
+compatibility_date = "2025-04-04"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+
+# Secrets set via `wrangler secret put`:
+# SUPABASE_URL
+# SUPABASE_SERVICE_ROLE_KEY
