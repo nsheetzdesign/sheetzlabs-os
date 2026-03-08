@@ -55,7 +55,12 @@ export default [
     ]),
     route("agents", "routes/dashboard.agents.tsx", [
       index("routes/dashboard.agents._index.tsx"),
-      route(":id", "routes/dashboard.agents.$id.tsx"),
+      route("runs", "routes/dashboard.agents.runs.tsx", [
+        index("routes/dashboard.agents.runs._index.tsx"),
+        route(":id", "routes/dashboard.agents.runs.$id.tsx"),
+      ]),
+      route("content", "routes/dashboard.agents.content.tsx"),
+      route(":slug", "routes/dashboard.agents.$slug.tsx"),
     ]),
     route("settings", "routes/dashboard.settings.tsx", [
       route("stripe", "routes/dashboard.settings.stripe.tsx"),

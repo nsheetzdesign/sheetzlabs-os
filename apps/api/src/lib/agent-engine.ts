@@ -1,0 +1,356 @@
+import Anthropic from "@anthropic-ai/sdk";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+interface Agent {
+  id: string;
+  slug: string;
+  system_prompt: string;
+  user_prompt_template: string;
+  input_sources: string[];
+  output_actions: string[];
+  model: string;
+  max_tokens: number;
+}
+
+interface AgentRun {
+  id: string;
+}
+
+type Env = {
+  SUPABASE_URL: string;
+  SUPABASE_SERVICE_ROLE_KEY: string;
+  ANTHROPIC_API_KEY: string;
+  LINKEDIN_ACCESS_TOKEN?: string;
+  LINKEDIN_PERSON_ID?: string;
+  CLOUDFLARE_BILLING_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+};
+
+export async function executeAgent(
+  agent: Agent,
+  run: AgentRun,
+  userInput: Record<string, unknown>,
+  env: Env,
+  supabase: SupabaseClient
+) {
+  const startTime = Date.now();
+
+  try {
+    const context = await gatherContext(agent.input_sources, supabase, userInput);
+    const userPrompt = buildPrompt(agent.user_prompt_template, { ...context, ...userInput });
+
+    const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+
+    const response = await anthropic.messages.create({
+      model: agent.model,
+      max_tokens: agent.max_tokens,
+      system: agent.system_prompt,
+      messages: [{ role: "user", content: userPrompt }],
+    });
+
+    const output =
+      response.content[0].type === "text" ? response.content[0].text : "";
+    const tokensInput = response.usage.input_tokens;
+    const tokensOutput = response.usage.output_tokens;
+
+    // Claude Sonnet 4 pricing: $3/M input, $15/M output
+    const costCents = (tokensInput * 3 + tokensOutput * 15) / 10000;
+
+    const actions = await executeActions(agent.output_actions, output, supabase, run.id, env);
+
+    await supabase
+      .from("agent_runs")
+      .update({
+        status: "completed",
+        result: { output, actions },
+        input_context: context,
+        tokens_input: tokensInput,
+        tokens_output: tokensOutput,
+        cost_cents: costCents,
+        duration_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    await supabase
+      .from("agent_runs")
+      .update({
+        status: "failed",
+        result: { error: msg },
+        duration_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+  }
+}
+
+async function gatherContext(
+  sources: string[],
+  supabase: SupabaseClient,
+  _userInput: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const context: Record<string, unknown> = {};
+
+  for (const source of sources) {
+    switch (source) {
+      case "ventures": {
+        const { data } = await supabase
+          .from("ventures")
+          .select("id, name, slug, status, stage, domain");
+        context.ventures = data;
+        break;
+      }
+      case "revenue": {
+        const { data } = await supabase
+          .from("revenue")
+          .select("*")
+          .order("date", { ascending: false })
+          .limit(30);
+        context.revenue = data;
+        break;
+      }
+      case "tasks": {
+        const { data } = await supabase
+          .from("tasks")
+          .select("*")
+          .in("status", ["todo", "in_progress"])
+          .order("due_date");
+        context.tasks = data;
+        break;
+      }
+      case "relationships": {
+        const { data } = await supabase
+          .from("relationships")
+          .select("*")
+          .order("last_contact");
+        context.relationships = data;
+        break;
+      }
+      case "pipeline": {
+        const { data } = await supabase.from("pipeline").select("*");
+        context.pipeline = data;
+        break;
+      }
+      case "expenses": {
+        const { data } = await supabase
+          .from("expenses")
+          .select("*")
+          .order("date", { ascending: false })
+          .limit(50);
+        context.expenses = data;
+        break;
+      }
+      case "knowledge": {
+        const { data } = await supabase
+          .from("knowledge")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(20);
+        context.knowledge = data;
+        break;
+      }
+      case "content_queue": {
+        const { data } = await supabase
+          .from("content_queue")
+          .select("*")
+          .in("status", ["draft", "scheduled"])
+          .order("scheduled_for");
+        context.content_queue = data;
+        break;
+      }
+    }
+  }
+
+  return context;
+}
+
+function buildPrompt(template: string, variables: Record<string, unknown>): string {
+  let prompt = template;
+  for (const [key, value] of Object.entries(variables)) {
+    const placeholder = `{{${key}}}`;
+    const stringValue =
+      typeof value === "object" ? JSON.stringify(value, null, 2) : String(value ?? "");
+    prompt = prompt.replaceAll(placeholder, stringValue);
+  }
+  return prompt;
+}
+
+async function executeActions(
+  allowedActions: string[],
+  output: string,
+  supabase: SupabaseClient,
+  runId: string,
+  env: Env
+): Promise<unknown[]> {
+  const actions: unknown[] = [];
+  const actionMatches = output.matchAll(/```action:(\w+)\n([\s\S]*?)```/g);
+
+  for (const match of actionMatches) {
+    const actionType = match[1];
+    const rawPayload = match[2].trim();
+
+    if (!allowedActions.includes(actionType)) continue;
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(rawPayload);
+    } catch {
+      continue;
+    }
+
+    let targetId: string | null = null;
+    let externalId: string | null = null;
+
+    switch (actionType) {
+      case "create_task": {
+        const { data } = await supabase.from("tasks").insert(payload).select().single();
+        targetId = data?.id ?? null;
+        break;
+      }
+      case "create_knowledge": {
+        const { data } = await supabase.from("knowledge").insert(payload).select().single();
+        targetId = data?.id ?? null;
+        break;
+      }
+      case "update_relationship": {
+        const { data } = await supabase
+          .from("relationships")
+          .update(payload)
+          .eq("id", payload.id)
+          .select()
+          .single();
+        targetId = data?.id ?? null;
+        break;
+      }
+      case "queue_linkedin": {
+        const { data } = await supabase
+          .from("content_queue")
+          .insert({
+            platform: "linkedin",
+            status: payload.post_now ? "scheduled" : "draft",
+            content: payload.content,
+            scheduled_for: payload.scheduled_for ?? new Date().toISOString(),
+            agent_run_id: runId,
+          })
+          .select()
+          .single();
+        targetId = data?.id ?? null;
+        break;
+      }
+      case "post_linkedin": {
+        externalId = await postToLinkedIn(payload as { content: string }, env);
+        break;
+      }
+      case "sync_expenses": {
+        await syncExpenses(String(payload.provider), env, supabase);
+        break;
+      }
+    }
+
+    await supabase.from("agent_actions").insert({
+      run_id: runId,
+      action_type: actionType,
+      target_table: actionType
+        .replace("create_", "")
+        .replace("update_", "")
+        .replace("queue_", "")
+        .replace("post_", ""),
+      target_id: targetId,
+      external_id: externalId,
+      payload,
+    });
+
+    actions.push({ type: actionType, target_id: targetId, external_id: externalId });
+  }
+
+  return actions;
+}
+
+export async function postToLinkedIn(
+  payload: { content: string },
+  env: Env
+): Promise<string | null> {
+  if (!env.LINKEDIN_ACCESS_TOKEN || !env.LINKEDIN_PERSON_ID) {
+    console.warn("LinkedIn credentials not configured");
+    return null;
+  }
+
+  try {
+    const response = await fetch("https://api.linkedin.com/v2/ugcPosts", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.LINKEDIN_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
+      },
+      body: JSON.stringify({
+        author: `urn:li:person:${env.LINKEDIN_PERSON_ID}`,
+        lifecycleState: "PUBLISHED",
+        specificContent: {
+          "com.linkedin.ugc.ShareContent": {
+            shareCommentary: { text: payload.content },
+            shareMediaCategory: "NONE",
+          },
+        },
+        visibility: { "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC" },
+      }),
+    });
+
+    if (!response.ok) throw new Error(`LinkedIn API error: ${response.status}`);
+    const data = (await response.json()) as { id: string };
+    return data.id;
+  } catch (error) {
+    console.error("LinkedIn post failed:", error);
+    return null;
+  }
+}
+
+async function syncExpenses(provider: string, env: Env, supabase: SupabaseClient) {
+  let expenses: Record<string, unknown>[] = [];
+
+  switch (provider) {
+    case "cloudflare":
+      expenses = await fetchCloudflareExpenses(env);
+      break;
+    case "supabase":
+      expenses = await fetchSupabaseExpenses(env);
+      break;
+    case "anthropic":
+      expenses = await fetchAnthropicExpenses(env);
+      break;
+    case "openai":
+      expenses = await fetchOpenAIExpenses(env);
+      break;
+  }
+
+  for (const expense of expenses) {
+    await supabase.from("expenses").upsert(expense, { onConflict: "external_id" });
+  }
+}
+
+async function fetchCloudflareExpenses(env: Env): Promise<Record<string, unknown>[]> {
+  if (!env.CLOUDFLARE_BILLING_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) return [];
+  try {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/billing/profile`,
+      { headers: { Authorization: `Bearer ${env.CLOUDFLARE_BILLING_TOKEN}` } }
+    );
+    const _data = await response.json();
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchSupabaseExpenses(_env: Env): Promise<Record<string, unknown>[]> {
+  return [];
+}
+
+async function fetchAnthropicExpenses(_env: Env): Promise<Record<string, unknown>[]> {
+  return [];
+}
+
+async function fetchOpenAIExpenses(_env: Env): Promise<Record<string, unknown>[]> {
+  return [];
+}

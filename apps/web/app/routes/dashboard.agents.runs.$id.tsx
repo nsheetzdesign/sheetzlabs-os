@@ -99,7 +99,7 @@ export default function AgentRunDetail() {
                 via {run.trigger_type}
               </span>
             )}
-            <Link to="/dashboard/agents" className="ml-auto text-xs text-zinc-600 hover:text-zinc-400">
+            <Link to="/dashboard/agents/runs" className="ml-auto text-xs text-zinc-600 hover:text-zinc-400">
               ← All runs
             </Link>
           </div>

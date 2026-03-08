@@ -5,6 +5,7 @@ import stripeRouter from "./routes/stripe";
 import expensesRouter from "./routes/expenses";
 import ticketsRouter from "./routes/tickets";
 import mcpRouter from "./routes/mcp";
+import scheduledHandler from "./scheduled";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -15,6 +16,11 @@ type Bindings = {
   STRIPE_COLAB_KEY: string;
   STRIPE_COLAB_WEBHOOK_SECRET: string;
   N8N_API_KEY: string;
+  ANTHROPIC_API_KEY: string;
+  LINKEDIN_ACCESS_TOKEN: string;
+  LINKEDIN_PERSON_ID: string;
+  CLOUDFLARE_BILLING_TOKEN: string;
+  CLOUDFLARE_ACCOUNT_ID: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -35,4 +41,7 @@ app.route("/expenses", expensesRouter);
 app.route("/tickets", ticketsRouter);
 app.route("/mcp", mcpRouter);
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled: scheduledHandler.scheduled,
+};

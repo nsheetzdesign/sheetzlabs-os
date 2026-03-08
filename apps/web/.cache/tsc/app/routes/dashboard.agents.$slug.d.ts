@@ -1,0 +1,41 @@
+import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
+export declare function loader({ params, context }: LoaderFunctionArgs): Promise<{
+    agent: {
+        created_at: string | null;
+        department: import("@sheetzlabs/shared").Database["public"]["Enums"]["department"];
+        description: string | null;
+        enabled: boolean | null;
+        id: string;
+        input_sources: import("@sheetzlabs/shared").Json | null;
+        max_tokens: number | null;
+        model: string | null;
+        name: string;
+        output_actions: import("@sheetzlabs/shared").Json | null;
+        schedule: string | null;
+        slug: string;
+        system_prompt: string;
+        updated_at: string | null;
+        user_prompt_template: string | null;
+    };
+    runs: {
+        agent_id: string | null;
+        agent_name: string;
+        completed_at: string | null;
+        cost_cents: number | null;
+        created_at: string | null;
+        duration_ms: number | null;
+        error_message: string | null;
+        id: string;
+        input_context: import("@sheetzlabs/shared").Json | null;
+        input_data: import("@sheetzlabs/shared").Json | null;
+        output_data: import("@sheetzlabs/shared").Json | null;
+        started_at: string | null;
+        status: string | null;
+        tokens_input: number | null;
+        tokens_output: number | null;
+        tokens_used: number | null;
+        trigger_type: string | null;
+    }[];
+}>;
+export declare function action({ params, request, context }: ActionFunctionArgs): Promise<null>;
+export default function AgentDetail(): import("react/jsx-runtime").JSX.Element;

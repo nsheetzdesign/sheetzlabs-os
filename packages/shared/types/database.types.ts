@@ -14,50 +14,225 @@ export type Database = {
   }
   public: {
     Tables: {
+      agent_actions: {
+        Row: {
+          action_type: string
+          created_at: string | null
+          external_id: string | null
+          id: string
+          payload: Json | null
+          run_id: string | null
+          target_id: string | null
+          target_table: string | null
+        }
+        Insert: {
+          action_type: string
+          created_at?: string | null
+          external_id?: string | null
+          id?: string
+          payload?: Json | null
+          run_id?: string | null
+          target_id?: string | null
+          target_table?: string | null
+        }
+        Update: {
+          action_type?: string
+          created_at?: string | null
+          external_id?: string | null
+          id?: string
+          payload?: Json | null
+          run_id?: string | null
+          target_id?: string | null
+          target_table?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_actions_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "agent_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       agent_runs: {
         Row: {
+          agent_id: string | null
           agent_name: string
           completed_at: string | null
+          cost_cents: number | null
           created_at: string | null
           duration_ms: number | null
           error_message: string | null
           id: string
+          input_context: Json | null
           input_data: Json | null
           output_data: Json | null
           started_at: string | null
           status: string | null
+          tokens_input: number | null
+          tokens_output: number | null
           tokens_used: number | null
           trigger_type: string | null
         }
         Insert: {
+          agent_id?: string | null
           agent_name: string
           completed_at?: string | null
+          cost_cents?: number | null
           created_at?: string | null
           duration_ms?: number | null
           error_message?: string | null
           id?: string
+          input_context?: Json | null
           input_data?: Json | null
           output_data?: Json | null
           started_at?: string | null
           status?: string | null
+          tokens_input?: number | null
+          tokens_output?: number | null
           tokens_used?: number | null
           trigger_type?: string | null
         }
         Update: {
+          agent_id?: string | null
           agent_name?: string
           completed_at?: string | null
+          cost_cents?: number | null
           created_at?: string | null
           duration_ms?: number | null
           error_message?: string | null
           id?: string
+          input_context?: Json | null
           input_data?: Json | null
           output_data?: Json | null
           started_at?: string | null
           status?: string | null
+          tokens_input?: number | null
+          tokens_output?: number | null
           tokens_used?: number | null
           trigger_type?: string | null
         }
+        Relationships: [
+          {
+            foreignKeyName: "agent_runs_agent_id_fkey"
+            columns: ["agent_id"]
+            isOneToOne: false
+            referencedRelation: "agents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      agents: {
+        Row: {
+          created_at: string | null
+          department: Database["public"]["Enums"]["department"]
+          description: string | null
+          enabled: boolean | null
+          id: string
+          input_sources: Json | null
+          max_tokens: number | null
+          model: string | null
+          name: string
+          output_actions: Json | null
+          schedule: string | null
+          slug: string
+          system_prompt: string
+          updated_at: string | null
+          user_prompt_template: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          department: Database["public"]["Enums"]["department"]
+          description?: string | null
+          enabled?: boolean | null
+          id?: string
+          input_sources?: Json | null
+          max_tokens?: number | null
+          model?: string | null
+          name: string
+          output_actions?: Json | null
+          schedule?: string | null
+          slug: string
+          system_prompt: string
+          updated_at?: string | null
+          user_prompt_template?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          department?: Database["public"]["Enums"]["department"]
+          description?: string | null
+          enabled?: boolean | null
+          id?: string
+          input_sources?: Json | null
+          max_tokens?: number | null
+          model?: string | null
+          name?: string
+          output_actions?: Json | null
+          schedule?: string | null
+          slug?: string
+          system_prompt?: string
+          updated_at?: string | null
+          user_prompt_template?: string | null
+        }
         Relationships: []
+      }
+      content_queue: {
+        Row: {
+          agent_run_id: string | null
+          content: string
+          created_at: string | null
+          external_id: string | null
+          id: string
+          media_urls: string[] | null
+          platform: string
+          posted_at: string | null
+          scheduled_for: string | null
+          status: string | null
+          venture_id: string | null
+        }
+        Insert: {
+          agent_run_id?: string | null
+          content: string
+          created_at?: string | null
+          external_id?: string | null
+          id?: string
+          media_urls?: string[] | null
+          platform: string
+          posted_at?: string | null
+          scheduled_for?: string | null
+          status?: string | null
+          venture_id?: string | null
+        }
+        Update: {
+          agent_run_id?: string | null
+          content?: string
+          created_at?: string | null
+          external_id?: string | null
+          id?: string
+          media_urls?: string[] | null
+          platform?: string
+          posted_at?: string | null
+          scheduled_for?: string | null
+          status?: string | null
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "content_queue_agent_run_id_fkey"
+            columns: ["agent_run_id"]
+            isOneToOne: false
+            referencedRelation: "agent_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "content_queue_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       expense_connections: {
         Row: {
@@ -919,6 +1094,13 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
+      department:
+        | "executive"
+        | "marketing"
+        | "product"
+        | "finance"
+        | "research"
+        | "operations"
       expense_category:
         | "software"
         | "hosting"
@@ -1099,6 +1281,14 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      department: [
+        "executive",
+        "marketing",
+        "product",
+        "finance",
+        "research",
+        "operations",
+      ],
       expense_category: [
         "software",
         "hosting",

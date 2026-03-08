@@ -11,6 +11,11 @@ ENVIRONMENT = "production"
 pattern = "api.sheetzlabs.com"
 custom_domain = true
 
+[triggers]
+crons = [
+  "0 * * * *"  # Every hour — check scheduled agents and content queue
+]
+
 # Secrets set via `wrangler secret put`:
 # SUPABASE_URL
 # SUPABASE_SERVICE_ROLE_KEY
@@ -19,3 +24,7 @@ custom_domain = true
 # STRIPE_COLAB_KEY
 # STRIPE_COLAB_WEBHOOK_SECRET
 # N8N_API_KEY
+# ANTHROPIC_API_KEY
+# LINKEDIN_ACCESS_TOKEN
+# LINKEDIN_PERSON_ID
+# CLOUDFLARE_BILLING_TOKEN
