@@ -1,4 +1,3 @@
-Using workdir /Users/nick/Documents/Development/sheetz-labs
 export type Json =
   | string
   | number
@@ -15,6 +14,57 @@ export type Database = {
   }
   public: {
     Tables: {
+      interactions: {
+        Row: {
+          created_at: string | null
+          direction: string | null
+          id: string
+          occurred_at: string | null
+          relationship_id: string | null
+          subject: string | null
+          summary: string | null
+          type: string
+          venture_id: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          direction?: string | null
+          id?: string
+          occurred_at?: string | null
+          relationship_id?: string | null
+          subject?: string | null
+          summary?: string | null
+          type: string
+          venture_id?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          direction?: string | null
+          id?: string
+          occurred_at?: string | null
+          relationship_id?: string | null
+          subject?: string | null
+          summary?: string | null
+          type?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "interactions_relationship_id_fkey"
+            columns: ["relationship_id"]
+            isOneToOne: false
+            referencedRelation: "relationships"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "interactions_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       pipeline: {
         Row: {
           created_at: string | null

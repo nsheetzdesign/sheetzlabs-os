@@ -11,12 +11,20 @@ export default [
       route("new", "routes/dashboard.ventures.new.tsx"),
       route(":slug", "routes/dashboard.ventures.$slug.tsx"),
     ]),
-    route("pipeline", "routes/dashboard.pipeline.tsx"),
+    route("pipeline", "routes/dashboard.pipeline.tsx", [
+      index("routes/dashboard.pipeline._index.tsx"),
+      route("new", "routes/dashboard.pipeline.new.tsx"),
+      route(":id", "routes/dashboard.pipeline.$id.tsx"),
+    ]),
     route("revenue", "routes/dashboard.revenue.tsx", [
       index("routes/dashboard.revenue._index.tsx"),
       route("new", "routes/dashboard.revenue.new.tsx"),
     ]),
-    route("relationships", "routes/dashboard.relationships.tsx"),
+    route("relationships", "routes/dashboard.relationships.tsx", [
+      index("routes/dashboard.relationships._index.tsx"),
+      route("new", "routes/dashboard.relationships.new.tsx"),
+      route(":id", "routes/dashboard.relationships.$id.tsx"),
+    ]),
     route("tasks", "routes/dashboard.tasks.tsx", [
       index("routes/dashboard.tasks._index.tsx"),
       route("new", "routes/dashboard.tasks.new.tsx"),
