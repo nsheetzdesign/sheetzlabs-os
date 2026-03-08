@@ -9,10 +9,13 @@ import {
   Zap,
   ArrowUpRight,
   Plus,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
-import type { Venture, PipelineItem, Task } from "@sheetzlabs/shared";
+import { getAllVentureMetrics } from "~/lib/venture-metrics.server";
+import type { PipelineItem, Task } from "@sheetzlabs/shared";
 
 export const meta: MetaFunction = () => [
   { title: "Command Center — Sheetz Labs OS" },
@@ -21,9 +24,10 @@ export const meta: MetaFunction = () => [
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader({ context }: LoaderFunctionArgs) {
-  const supabase = getSupabaseClient(context.cloudflare.env);
+  const env = context.cloudflare.env;
+  const supabase = getSupabaseClient(env);
 
-  const [venturesRes, pipelineRes, tasksRes] = await Promise.all([
+  const [venturesRes, pipelineRes, tasksRes, liveMetrics] = await Promise.all([
     supabase.from("ventures").select("*").order("created_at"),
     supabase
       .from("pipeline")
@@ -36,18 +40,36 @@ export async function loader({ context }: LoaderFunctionArgs) {
       .neq("status", "done")
       .order("due_date")
       .limit(5),
+    getAllVentureMetrics(env),
   ]);
 
+  // Merge live metrics into ventures.
+  // Live data overrides seed values; _live=true signals real-time data.
+  const ventures = (venturesRes.data ?? []).map((v) => {
+    const live = liveMetrics[v.slug];
+    return {
+      ...v,
+      mrr_cents: live?.mrr_cents ?? v.mrr_cents ?? 0,
+      customer_count: live?.customer_count ?? v.customer_count ?? 0,
+      _live: live !== undefined && live !== null,
+    };
+  });
+
   return {
-    ventures: venturesRes.data ?? [],
+    ventures,
     pipeline: pipelineRes.data ?? [],
     tasks: tasksRes.data ?? [],
   };
 }
 
+// ─── Derived types ────────────────────────────────────────────────────────────
+
+type LoaderData = Awaited<ReturnType<typeof loader>>;
+type VentureRow = LoaderData["ventures"][number];
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function statusLabel(status: Venture["status"]): string {
+function statusLabel(status: VentureRow["status"]): string {
   switch (status) {
     case "active":
       return "Live";
@@ -68,7 +90,7 @@ function statusLabel(status: Venture["status"]): string {
   }
 }
 
-function statusColor(status: Venture["status"]): string {
+function statusColor(status: VentureRow["status"]): string {
   if (status === "active") return "bg-brand/10 text-brand";
   if (status === "building") return "bg-zinc-800 text-zinc-400";
   return "bg-zinc-900 text-zinc-600";
@@ -121,32 +143,40 @@ function PortfolioOverview({
   ventures,
   taskCount,
 }: {
-  ventures: Venture[];
+  ventures: VentureRow[];
   taskCount: number;
 }) {
-  const activeCount = ventures.filter(
+  const activeVentures = ventures.filter(
     (v) => v.status !== "sunset" && v.status !== "sold",
-  ).length;
+  );
   const totalMrrCents = ventures.reduce((s, v) => s + (v.mrr_cents ?? 0), 0);
+  const totalCustomers = ventures.reduce(
+    (s, v) => s + (v.customer_count ?? 0),
+    0,
+  );
+  const liveCount = ventures.filter((v) => v._live).length;
 
   const metrics = [
     {
       label: "Active Ventures",
-      value: String(activeCount),
-      delta: `${activeCount} tracked`,
+      value: String(activeVentures.length),
+      delta: `${liveCount} live connection${liveCount !== 1 ? "s" : ""}`,
       up: true,
     },
     {
       label: "MRR",
-      value: totalMrrCents > 0 ? `$${(totalMrrCents / 100).toLocaleString()}` : "$0",
+      value:
+        totalMrrCents > 0
+          ? `$${(totalMrrCents / 100).toLocaleString()}`
+          : "$0",
       delta: totalMrrCents > 0 ? "across all ventures" : "pre-revenue",
       up: totalMrrCents > 0,
     },
     {
-      label: "Pipeline Ideas",
-      value: "—",
-      delta: "from pipeline page",
-      up: true,
+      label: "Customers",
+      value: totalCustomers > 0 ? String(totalCustomers) : "—",
+      delta: totalCustomers > 0 ? "across connected products" : "no data yet",
+      up: totalCustomers > 0,
     },
     {
       label: "Open Tasks",
@@ -160,6 +190,7 @@ function PortfolioOverview({
     <Card className="col-span-12 lg:col-span-8">
       <SectionTitle>Portfolio Overview</SectionTitle>
 
+      {/* Metric tiles */}
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {metrics.map((m) => (
           <div
@@ -182,9 +213,10 @@ function PortfolioOverview({
         ))}
       </div>
 
+      {/* Venture rows */}
       <div className="space-y-2">
-        <div className="grid grid-cols-3 px-3 text-xs font-medium uppercase tracking-wide text-zinc-600">
-          <span>Venture</span>
+        <div className="grid grid-cols-4 px-3 text-xs font-medium uppercase tracking-wide text-zinc-600">
+          <span className="col-span-2">Venture</span>
           <span>Status</span>
           <span className="text-right">MRR</span>
         </div>
@@ -196,9 +228,24 @@ function PortfolioOverview({
           ventures.map((v) => (
             <div
               key={v.id}
-              className="grid grid-cols-3 items-center rounded-lg px-3 py-2.5 transition-colors hover:bg-surface-2/30"
+              className="grid grid-cols-4 items-center rounded-lg px-3 py-2.5 transition-colors hover:bg-surface-2/30"
             >
-              <span className="text-sm font-medium">{v.name}</span>
+              {/* Name + live indicator */}
+              <div className="col-span-2 flex items-center gap-2">
+                <span className="text-sm font-medium">{v.name}</span>
+                {v._live ? (
+                  <Wifi
+                    className="h-3 w-3 shrink-0 text-brand/70"
+                    title="Live data"
+                  />
+                ) : (
+                  <WifiOff
+                    className="h-3 w-3 shrink-0 text-zinc-700"
+                    title="No connection — showing seed data"
+                  />
+                )}
+              </div>
+
               <span>
                 <span
                   className={`rounded-full px-2 py-0.5 font-mono text-xs ${statusColor(v.status)}`}
@@ -206,6 +253,7 @@ function PortfolioOverview({
                   {statusLabel(v.status)}
                 </span>
               </span>
+
               <span className="text-right font-mono text-sm text-zinc-300">
                 {formatMrr(v.mrr_cents ?? 0)}
               </span>

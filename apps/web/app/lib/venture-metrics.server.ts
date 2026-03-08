@@ -1,4 +1,8 @@
-import { type ProductSlug, getProductClient } from "./product-clients.server";
+import {
+  type ProductSlug,
+  getProductClient,
+  getAllProductSlugs,
+} from "./product-clients.server";
 
 export interface VentureMetrics {
   customer_count: number;
@@ -50,10 +54,15 @@ export async function getVentureMetrics(
   return { customer_count: customerCount, mrr_cents: mrrCents };
 }
 
+/**
+ * Fetches live metrics for all connected products.
+ * Uses Promise.allSettled so a single unreachable product never
+ * blocks the rest or causes the page to error.
+ */
 export async function getAllVentureMetrics(
-  slugs: string[],
   env: Env
 ): Promise<Record<string, VentureMetrics | null>> {
+  const slugs = getAllProductSlugs();
   const results = await Promise.allSettled(
     slugs.map((slug) => getVentureMetrics(slug, env))
   );
