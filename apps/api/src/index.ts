@@ -11,6 +11,10 @@ const app = new Hono<{ Bindings: Bindings }>();
 
 app.use("*", cors());
 
+app.get("/", (c) => {
+  return c.json({ name: "sheetzlabs-api", status: "ok" });
+});
+
 app.get("/health", (c) => {
   return c.json({ status: "ok", env: c.env.ENVIRONMENT });
 });
