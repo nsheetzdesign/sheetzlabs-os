@@ -140,7 +140,7 @@ function Products() {
       tagColor: "text-brand border-brand/20 bg-brand/10",
       description:
         "Operations management platform for houses of worship. Volunteer scheduling, asset tracking, facility management, and AI-powered workflows.",
-      href: "https://backofhouse.pro",
+      href: "https://backofhousepro.com",
       cta: "Visit Site",
     },
     {
