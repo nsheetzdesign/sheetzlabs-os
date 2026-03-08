@@ -3,6 +3,8 @@ import { cors } from "hono/cors";
 import agents from "./routes/agents";
 import stripeRouter from "./routes/stripe";
 import expensesRouter from "./routes/expenses";
+import ticketsRouter from "./routes/tickets";
+import mcpRouter from "./routes/mcp";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -30,5 +32,7 @@ app.get("/health", (c) => {
 app.route("/agents", agents);
 app.route("/stripe", stripeRouter);
 app.route("/expenses", expensesRouter);
+app.route("/tickets", ticketsRouter);
+app.route("/mcp", mcpRouter);
 
 export default app;

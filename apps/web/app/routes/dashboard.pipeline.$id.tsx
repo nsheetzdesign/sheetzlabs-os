@@ -53,9 +53,130 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 
   if (!itemRes.data) throw new Response("Not found", { status: 404 });
 
+  const item = itemRes.data;
+
+  // Load scaffold template when item is in 'building' stage
+  let scaffoldPrompt: string | null = null;
+  if (item.stage === "building" || item.stage === "speccing") {
+    const { data: template } = await supabase
+      .from("stack_templates")
+      .select("*")
+      .eq("venture_type", "saas")
+      .single();
+
+    if (template) {
+      const skills = (template.skills as Array<{ name: string; content: string }>) ?? [];
+      const hooks = (template.hooks as Array<{ name: string; trigger: string }>) ?? [];
+      const stackItems =
+        (template.stack_items as Array<{ tool_name: string; category: string; secrets_required?: string[] }>) ?? [];
+
+      const claudeMd = (template.claude_md_template ?? "")
+        .replace(/\{\{VENTURE_NAME\}\}/g, item.name)
+        .replace(/\{\{TAGLINE\}\}/g, item.problem_statement ?? item.name);
+
+      const allSecrets = stackItems.flatMap((s) => s.secrets_required ?? []);
+      const envExample = allSecrets.map((s) => `${s}=`).join("\n");
+
+      const skillsBlock = skills
+        .map((s) => `# .claude/skills/${s.name}.md\n${s.content}`)
+        .join("\n\n---\n\n");
+
+      const hooksBlock = hooks
+        .map((h) => `${h.name}: "${h.trigger}"`)
+        .join("\n");
+
+      scaffoldPrompt = `# Claude Code Scaffold: ${item.name}
+
+You are initializing a new SaaS project. Follow these instructions exactly.
+
+## Project Overview
+Name: ${item.name}
+Problem: ${item.problem_statement ?? "TBD"}
+Target Market: ${item.target_market ?? "TBD"}
+
+## Repository Structure
+Create a pnpm monorepo with:
+\`\`\`
+${item.name.toLowerCase().replace(/\s+/g, "-")}/
+├── apps/
+│   ├── web/          # React Router v7 on Cloudflare Workers
+│   └── api/          # Hono API on Cloudflare Workers
+├── packages/
+│   └── shared/       # Shared types, utils
+├── supabase/
+│   └── migrations/
+├── package.json       # pnpm workspaces
+├── pnpm-workspace.yaml
+├── turbo.json
+└── CLAUDE.md
+\`\`\`
+
+## Stack
+${stackItems.map((s) => `- **${s.category}**: ${s.tool_name}`).join("\n")}
+
+## Environment Variables (.env.local)
+\`\`\`env
+${envExample}
+\`\`\`
+
+## CLAUDE.md
+Create this file at the repo root:
+
+\`\`\`markdown
+${claudeMd}
+\`\`\`
+
+## Claude Skills
+Create these files in .claude/skills/:
+
+${skillsBlock}
+
+## Claude Hooks (.claude/settings.json hooks)
+\`\`\`json
+{
+  "hooks": {
+${hooks.map((h) => `    "${h.name}": "${h.trigger}"`).join(",\n")}
+  }
+}
+\`\`\`
+
+## wrangler.toml (apps/web)
+\`\`\`toml
+name = "${item.name.toLowerCase().replace(/\s+/g, "-")}-web"
+compatibility_date = "2025-01-01"
+main = "workers/app.ts"
+
+[vars]
+ENVIRONMENT = "production"
+\`\`\`
+
+## wrangler.toml (apps/api)
+\`\`\`toml
+name = "${item.name.toLowerCase().replace(/\s+/g, "-")}-api"
+compatibility_date = "2025-01-01"
+main = "src/index.ts"
+
+[vars]
+ENVIRONMENT = "production"
+\`\`\`
+
+## Initial Commands
+\`\`\`bash
+mkdir ${item.name.toLowerCase().replace(/\s+/g, "-")} && cd $_
+pnpm init
+# ... follow the BOHP monorepo pattern
+npx supabase init
+npx supabase link --project-ref YOUR_PROJECT_REF
+\`\`\`
+
+Begin by creating the full monorepo structure described above.`;
+    }
+  }
+
   return {
-    item: itemRes.data,
+    item,
     ventures: venturesRes.data ?? [],
+    scaffoldPrompt,
   };
 }
 
@@ -184,7 +305,7 @@ function ScoreBar({ value, max }: { value: number; max: number }) {
 }
 
 export default function EditPipeline() {
-  const { item, ventures } = useLoaderData<typeof loader>();
+  const { item, ventures, scaffoldPrompt } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const errors = actionData?.errors ?? {};
 
@@ -367,8 +488,38 @@ export default function EditPipeline() {
               </Link>
             </div>
           </Form>
+
+          {/* Scaffold prompt generator */}
+          {scaffoldPrompt && (
+            <ScaffoldSection prompt={scaffoldPrompt} projectName={item.name} />
+          )}
         </div>
       </main>
+    </div>
+  );
+}
+
+function ScaffoldSection({ prompt, projectName }: { prompt: string; projectName: string }) {
+  return (
+    <div className="rounded-xl border border-brand/20 bg-brand/5 p-5">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-brand">🚀 Claude Code Scaffold</h2>
+          <p className="text-xs text-zinc-500 mt-0.5">
+            Copy this prompt into Claude Code to scaffold {projectName}.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => navigator.clipboard.writeText(prompt)}
+          className="rounded-lg border border-brand/30 bg-brand/10 px-3 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/20"
+        >
+          Copy Prompt
+        </button>
+      </div>
+      <pre className="max-h-96 overflow-y-auto rounded-lg bg-surface-0 p-4 font-mono text-xs text-zinc-400 whitespace-pre-wrap">
+        {prompt}
+      </pre>
     </div>
   );
 }

@@ -11,7 +11,15 @@ export default [
     route("ventures", "routes/dashboard.ventures.tsx", [
       index("routes/dashboard.ventures._index.tsx"),
       route("new", "routes/dashboard.ventures.new.tsx"),
-      route(":slug", "routes/dashboard.ventures.$slug.tsx"),
+      route(":slug", "routes/dashboard.ventures.$slug.tsx", [
+        index("routes/dashboard.ventures.$slug._index.tsx"),
+        route("stack", "routes/dashboard.ventures.$slug.stack.tsx"),
+        route("links", "routes/dashboard.ventures.$slug.links.tsx"),
+        route("roadmap", "routes/dashboard.ventures.$slug.roadmap.tsx"),
+        route("tickets", "routes/dashboard.ventures.$slug.tickets.tsx"),
+        route("tasks", "routes/dashboard.ventures.$slug.tasks.tsx"),
+        route("docs", "routes/dashboard.ventures.$slug.docs.tsx"),
+      ]),
     ]),
     route("pipeline", "routes/dashboard.pipeline.tsx", [
       index("routes/dashboard.pipeline._index.tsx"),
@@ -26,6 +34,9 @@ export default [
       index("routes/dashboard.expenses._index.tsx"),
       route("new", "routes/dashboard.expenses.new.tsx"),
       route(":id", "routes/dashboard.expenses.$id.tsx"),
+    ]),
+    route("tickets", "routes/dashboard.tickets.tsx", [
+      index("routes/dashboard.tickets._index.tsx"),
     ]),
     route("relationships", "routes/dashboard.relationships.tsx", [
       index("routes/dashboard.relationships._index.tsx"),

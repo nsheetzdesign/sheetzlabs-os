@@ -245,6 +245,50 @@ export type Database = {
           },
         ]
       }
+      milestones: {
+        Row: {
+          completed_at: string | null
+          created_at: string | null
+          description: string | null
+          id: string
+          sort_order: number | null
+          status: string | null
+          target_date: string | null
+          title: string
+          venture_id: string | null
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string | null
+          description?: string | null
+          id?: string
+          sort_order?: number | null
+          status?: string | null
+          target_date?: string | null
+          title: string
+          venture_id?: string | null
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string | null
+          description?: string | null
+          id?: string
+          sort_order?: number | null
+          status?: string | null
+          target_date?: string | null
+          title?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "milestones_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       pipeline: {
         Row: {
           created_at: string | null
@@ -415,6 +459,42 @@ export type Database = {
           },
         ]
       }
+      stack_templates: {
+        Row: {
+          claude_md_template: string | null
+          created_at: string | null
+          description: string | null
+          hooks: Json | null
+          id: string
+          name: string
+          skills: Json | null
+          stack_items: Json
+          venture_type: string
+        }
+        Insert: {
+          claude_md_template?: string | null
+          created_at?: string | null
+          description?: string | null
+          hooks?: Json | null
+          id?: string
+          name: string
+          skills?: Json | null
+          stack_items: Json
+          venture_type: string
+        }
+        Update: {
+          claude_md_template?: string | null
+          created_at?: string | null
+          description?: string | null
+          hooks?: Json | null
+          id?: string
+          name?: string
+          skills?: Json | null
+          stack_items?: Json
+          venture_type?: string
+        }
+        Relationships: []
+      }
       stripe_connections: {
         Row: {
           account_key: string
@@ -485,6 +565,7 @@ export type Database = {
           description: string | null
           due_date: string | null
           id: string
+          milestone_id: string | null
           priority: Database["public"]["Enums"]["task_priority"] | null
           status: Database["public"]["Enums"]["task_status"] | null
           title: string
@@ -497,6 +578,7 @@ export type Database = {
           description?: string | null
           due_date?: string | null
           id?: string
+          milestone_id?: string | null
           priority?: Database["public"]["Enums"]["task_priority"] | null
           status?: Database["public"]["Enums"]["task_status"] | null
           title: string
@@ -509,6 +591,7 @@ export type Database = {
           description?: string | null
           due_date?: string | null
           id?: string
+          milestone_id?: string | null
           priority?: Database["public"]["Enums"]["task_priority"] | null
           status?: Database["public"]["Enums"]["task_status"] | null
           title?: string
@@ -517,7 +600,90 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "tasks_milestone_id_fkey"
+            columns: ["milestone_id"]
+            isOneToOne: false
+            referencedRelation: "milestones"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "tasks_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      tickets: {
+        Row: {
+          converted_milestone_id: string | null
+          converted_task_id: string | null
+          created_at: string | null
+          description: string | null
+          external_id: string | null
+          id: string
+          priority: string | null
+          source: string
+          status: string | null
+          submitter_email: string | null
+          submitter_name: string | null
+          synced_at: string | null
+          title: string
+          type: string
+          venture_id: string | null
+        }
+        Insert: {
+          converted_milestone_id?: string | null
+          converted_task_id?: string | null
+          created_at?: string | null
+          description?: string | null
+          external_id?: string | null
+          id?: string
+          priority?: string | null
+          source: string
+          status?: string | null
+          submitter_email?: string | null
+          submitter_name?: string | null
+          synced_at?: string | null
+          title: string
+          type: string
+          venture_id?: string | null
+        }
+        Update: {
+          converted_milestone_id?: string | null
+          converted_task_id?: string | null
+          created_at?: string | null
+          description?: string | null
+          external_id?: string | null
+          id?: string
+          priority?: string | null
+          source?: string
+          status?: string | null
+          submitter_email?: string | null
+          submitter_name?: string | null
+          synced_at?: string | null
+          title?: string
+          type?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tickets_converted_milestone_id_fkey"
+            columns: ["converted_milestone_id"]
+            isOneToOne: false
+            referencedRelation: "milestones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tickets_converted_task_id_fkey"
+            columns: ["converted_task_id"]
+            isOneToOne: false
+            referencedRelation: "tasks"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tickets_venture_id_fkey"
             columns: ["venture_id"]
             isOneToOne: false
             referencedRelation: "ventures"
@@ -559,6 +725,126 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "venture_connections_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      venture_docs: {
+        Row: {
+          content: string | null
+          created_at: string | null
+          id: string
+          path: string
+          type: string
+          updated_at: string | null
+          venture_id: string | null
+        }
+        Insert: {
+          content?: string | null
+          created_at?: string | null
+          id?: string
+          path: string
+          type: string
+          updated_at?: string | null
+          venture_id?: string | null
+        }
+        Update: {
+          content?: string | null
+          created_at?: string | null
+          id?: string
+          path?: string
+          type?: string
+          updated_at?: string | null
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "venture_docs_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      venture_links: {
+        Row: {
+          created_at: string | null
+          id: string
+          label: string
+          type: string | null
+          url: string
+          venture_id: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          label: string
+          type?: string | null
+          url: string
+          venture_id?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          label?: string
+          type?: string | null
+          url?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "venture_links_venture_id_fkey"
+            columns: ["venture_id"]
+            isOneToOne: false
+            referencedRelation: "ventures"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      venture_stack: {
+        Row: {
+          category: string
+          config: Json | null
+          created_at: string | null
+          dashboard_url: string | null
+          docs_url: string | null
+          id: string
+          secrets_required: string[] | null
+          setup_commands: string | null
+          tool_name: string
+          venture_id: string | null
+        }
+        Insert: {
+          category: string
+          config?: Json | null
+          created_at?: string | null
+          dashboard_url?: string | null
+          docs_url?: string | null
+          id?: string
+          secrets_required?: string[] | null
+          setup_commands?: string | null
+          tool_name: string
+          venture_id?: string | null
+        }
+        Update: {
+          category?: string
+          config?: Json | null
+          created_at?: string | null
+          dashboard_url?: string | null
+          docs_url?: string | null
+          id?: string
+          secrets_required?: string[] | null
+          setup_commands?: string | null
+          tool_name?: string
+          venture_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "venture_stack_venture_id_fkey"
             columns: ["venture_id"]
             isOneToOne: false
             referencedRelation: "ventures"

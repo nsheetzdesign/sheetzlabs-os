@@ -12,6 +12,7 @@ import {
   Settings2,
   LogOut,
   Search,
+  Ticket,
 } from "lucide-react";
 
 const navItems = [
@@ -20,6 +21,7 @@ const navItems = [
   { icon: Rocket, label: "Pipeline", to: "/dashboard/pipeline" },
   { icon: DollarSign, label: "Revenue", to: "/dashboard/revenue" },
   { icon: Receipt, label: "Expenses", to: "/dashboard/expenses" },
+  { icon: Ticket, label: "Tickets", to: "/dashboard/tickets" },
   { icon: Users, label: "Relationships", to: "/dashboard/relationships" },
   { icon: CheckSquare, label: "Tasks", to: "/dashboard/tasks" },
   { icon: BookOpen, label: "Knowledge", to: "/dashboard/knowledge" },
