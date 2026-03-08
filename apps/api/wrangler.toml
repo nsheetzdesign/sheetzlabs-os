@@ -6,6 +6,11 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ENVIRONMENT = "production"
 
+# Custom domain — Cloudflare provisions DNS + TLS automatically
+[[routes]]
+pattern = "api.sheetzlabs.com"
+custom_domain = true
+
 # Secrets set via `wrangler secret put`:
 # SUPABASE_URL
 # SUPABASE_SERVICE_ROLE_KEY

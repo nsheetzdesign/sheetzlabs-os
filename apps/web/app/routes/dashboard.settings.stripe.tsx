@@ -5,7 +5,7 @@ import { getSupabaseClient } from "~/lib/supabase.server";
 import { Trash2, Copy, CheckCircle2, XCircle } from "lucide-react";
 import { useState } from "react";
 
-const API_BASE = "https://sheetzlabs-api.nsheetz09.workers.dev";
+const API_BASE = "https://api.sheetzlabs.com";
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   const { headers } = await requireAuth(request, context.cloudflare.env);
