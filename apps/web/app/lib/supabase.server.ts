@@ -1,9 +1,24 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@sheetzlabs/shared";
 
+/**
+ * Returns a Supabase client using the service role key, which bypasses RLS.
+ *
+ * This is safe to use in server-side loaders because:
+ * 1. All dashboard routes are already protected by requireAuth in dashboard.tsx
+ * 2. This is a single-tenant app — only the authenticated founder accesses data
+ * 3. Service role key is never exposed to the client (server-only module)
+ */
 export function getSupabaseClient(env: {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
 }) {
-  return createClient<Database>(env.SUPABASE_URL, env.SUPABASE_ANON_KEY);
+  const key = env.SUPABASE_SERVICE_ROLE_KEY ?? env.SUPABASE_ANON_KEY;
+  return createClient<Database>(env.SUPABASE_URL, key, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
 }
