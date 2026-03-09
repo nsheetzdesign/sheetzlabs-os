@@ -52,10 +52,11 @@ type CalendarAccount = {
 };
 
 type SubCalendar = {
-  id: string;
-  summary: string;
-  primary?: boolean;
-  backgroundColor?: string;
+  id: string;          // DB UUID
+  external_id: string; // Google Calendar ID (e.g. "primary")
+  name: string;
+  color: string;
+  is_visible: boolean;
 };
 
 type SubCalendarEntry = { accountId: string; calendars: SubCalendar[] };
@@ -168,11 +169,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   const blockedIds = new Set((blockedTasks ?? []).map((e) => e.task_id as string));
   const unscheduled = (tasksRes.data ?? []).filter((t) => !blockedIds.has(t.id));
 
-  // Fetch sub-calendars for each account
+  // Fetch sub-calendars for each account (DB-backed, synced from Google)
   const subCalendars: SubCalendarEntry[] = await Promise.all(
     (accountsRes.data ?? []).map(async (account) => {
       try {
-        const res = await fetch(`${apiUrl}/calendar/accounts/${account.id}/google-calendars`);
+        const res = await fetch(`${apiUrl}/calendar/accounts/${account.id}/calendars`);
         const json = (await res.json()) as { calendars?: SubCalendar[] };
         return { accountId: account.id, calendars: json.calendars ?? [] };
       } catch {
@@ -616,21 +617,25 @@ export default function Calendar() {
 
   const weekStartDate = new Date(weekStart);
 
-  // Build sub-cal color map (Google color → user override)
-  function getSubCalColor(subCalId: string | null, accountId: string): string {
-    if (subCalId && subCalColors[subCalId]) return subCalColors[subCalId];
-    if (subCalId) {
-      const entry = (subCalendars as SubCalendarEntry[]).find((s) => s.accountId === accountId);
-      const cal = entry?.calendars.find((c) => c.id === subCalId);
-      if (cal?.backgroundColor) return cal.backgroundColor;
-    }
+  // Look up DB sub-cal by Google calendar ID (external_id)
+  function findSubCal(googleCalId: string | null, accountId: string): SubCalendar | undefined {
+    if (!googleCalId) return undefined;
+    const entry = (subCalendars as SubCalendarEntry[]).find((s) => s.accountId === accountId);
+    return entry?.calendars.find((c) => c.external_id === googleCalId);
+  }
+
+  // Build sub-cal color (user override first, then DB color, then account color)
+  function getSubCalColor(googleCalId: string | null, accountId: string): string {
+    const sub = findSubCal(googleCalId, accountId);
+    if (sub) return subCalColors[sub.id] ?? sub.color;
     const account = (accounts as CalendarAccount[]).find((a) => a.id === accountId);
     return account?.color ?? "#2FE8B6";
   }
 
-  // Filter events by hidden sub-cals
+  // Filter events by hidden sub-cals (hiddenSubCals stores DB UUIDs)
   const visibleEvents = (events as CalendarEvent[]).filter((e) => {
-    if (e.google_calendar_id && hiddenSubCals.has(e.google_calendar_id)) return false;
+    const sub = findSubCal(e.google_calendar_id, e.account_id);
+    if (sub && hiddenSubCals.has(sub.id)) return false;
     return true;
   });
 
@@ -771,7 +776,7 @@ export default function Calendar() {
                     {cals.length > 0 ? (
                       <div className="space-y-1 pl-1">
                         {cals.map((cal) => {
-                          const color = subCalColors[cal.id] ?? cal.backgroundColor ?? account.color ?? "#2FE8B6";
+                          const color = subCalColors[cal.id] ?? cal.color ?? account.color ?? "#2FE8B6";
                           const isHidden = hiddenSubCals.has(cal.id);
                           return (
                             <div key={cal.id} className="flex items-center gap-1.5 group/cal">
@@ -814,7 +819,7 @@ export default function Calendar() {
 
                               {/* Sub-cal name */}
                               <span className={`text-xs truncate flex-1 ${isHidden ? "text-zinc-600" : "text-zinc-400"}`}>
-                                {cal.summary}
+                                {cal.name}
                               </span>
 
                               {/* Toggle visibility */}
