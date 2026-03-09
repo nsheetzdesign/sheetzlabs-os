@@ -97,7 +97,7 @@ calendar.get("/auth/google/callback", async (c) => {
     { onConflict: "email" }
   );
 
-  return c.redirect("/dashboard/calendar?connected=true");
+  return c.redirect("https://sheetzlabs.com/dashboard/calendar?connected=true");
 });
 
 // Update account
@@ -149,29 +149,43 @@ calendar.post("/accounts/:id/sync", async (c) => {
   const timeMin = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const timeMax = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
 
-  const response = await fetch(
-    `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
-      `timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}` +
-      `&singleEvents=true&orderBy=startTime&maxResults=250`,
+  // Enumerate all calendars this account has access to
+  const calListRes = await fetch(
+    "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50",
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
+  const calList = (await calListRes.json()) as {
+    items?: Array<{ id: string; summary: string; primary?: boolean }>;
+  };
 
-  const gcalData = (await response.json()) as { items?: unknown[] };
+  const calendarsToSync = calList.items ?? [{ id: "primary", summary: "Primary" }];
 
   let syncedCount = 0;
-  for (const event of gcalData.items ?? []) {
-    const parsed = parseGoogleEvent(event as Record<string, unknown>);
-
-    await supabase.from("calendar_events").upsert(
-      {
-        account_id: id,
-        external_id: (event as Record<string, unknown>).id as string,
-        ...parsed,
-      },
-      { onConflict: "account_id,external_id" }
+  for (const cal of calendarsToSync) {
+    const response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events?` +
+        `timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}` +
+        `&singleEvents=true&orderBy=startTime&maxResults=250`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
     );
 
-    syncedCount++;
+    const gcalData = (await response.json()) as { items?: unknown[] };
+
+    for (const event of gcalData.items ?? []) {
+      const parsed = parseGoogleEvent(event as Record<string, unknown>);
+
+      await supabase.from("calendar_events").upsert(
+        {
+          account_id: id,
+          // Google event IDs are globally unique per user — safe to use directly
+          external_id: (event as Record<string, unknown>).id as string,
+          ...parsed,
+        },
+        { onConflict: "account_id,external_id" }
+      );
+
+      syncedCount++;
+    }
   }
 
   await supabase
@@ -179,7 +193,7 @@ calendar.post("/accounts/:id/sync", async (c) => {
     .update({ last_sync_at: new Date().toISOString() })
     .eq("id", id);
 
-  return c.json({ message: "Sync complete", synced: syncedCount });
+  return c.json({ message: "Sync complete", synced: syncedCount, calendars: calendarsToSync.length });
 });
 
 // ============================================
@@ -217,6 +231,91 @@ calendar.get("/events/:id", async (c) => {
     .single();
 
   return c.json({ event: data });
+});
+
+// Create a new event (and push to Google Calendar)
+calendar.post("/events", async (c) => {
+  const body = await c.req.json<{
+    account_id: string;
+    title: string;
+    description?: string;
+    location?: string;
+    start_at: string;
+    end_at: string;
+    attendees?: Array<{ email: string; name?: string }>;
+  }>();
+
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("calendar_accounts")
+    .select("*")
+    .eq("id", body.account_id)
+    .single();
+
+  // Build local event first with a placeholder external_id
+  const localExternalId = `local-${Date.now()}`;
+  const { data: event } = await supabase
+    .from("calendar_events")
+    .insert({
+      account_id: body.account_id,
+      external_id: localExternalId,
+      title: body.title,
+      description: body.description ?? null,
+      location: body.location ?? null,
+      start_at: body.start_at,
+      end_at: body.end_at,
+      attendees: body.attendees ?? [],
+    })
+    .select()
+    .single();
+
+  // Push to Google Calendar if account connected
+  if (account) {
+    try {
+      const accessToken = await getValidAccessToken(account, c.env, supabase);
+
+      const gcalBody: Record<string, unknown> = {
+        summary: body.title,
+        description: body.description,
+        location: body.location,
+        start: { dateTime: body.start_at },
+        end: { dateTime: body.end_at },
+      };
+
+      if (body.attendees?.length) {
+        gcalBody.attendees = body.attendees.map((a) => ({ email: a.email, displayName: a.name }));
+      }
+
+      const gcalRes = await fetch(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(gcalBody),
+        }
+      );
+
+      const gcalData = (await gcalRes.json()) as { id?: string; hangoutLink?: string };
+
+      if (gcalData.id && event) {
+        await supabase
+          .from("calendar_events")
+          .update({
+            external_id: gcalData.id,
+            meeting_link: gcalData.hangoutLink ?? null,
+          })
+          .eq("id", event.id);
+      }
+    } catch (err) {
+      console.error("Failed to push event to Google Calendar:", err);
+    }
+  }
+
+  return c.json({ event });
 });
 
 // ============================================
