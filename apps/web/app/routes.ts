@@ -79,6 +79,7 @@ export default [
         route("star", "routes/dashboard.inbox.$id.star.tsx"),
       ]),
     ]),
+    route("chat", "routes/dashboard.chat.tsx"),
     route("analytics", "routes/dashboard.analytics.tsx"),
     route("settings", "routes/dashboard.settings.tsx", [
       route("stripe", "routes/dashboard.settings.stripe.tsx"),
