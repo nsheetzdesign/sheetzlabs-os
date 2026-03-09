@@ -1,8 +1,10 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { NavLink, Form } from "react-router";
-import { LayoutDashboard, Box, Rocket, DollarSign, Receipt, Users, CheckSquare, BookOpen, Brain, Settings2, LogOut, Search, Ticket, } from "lucide-react";
+import { LayoutDashboard, Box, Rocket, DollarSign, Receipt, Users, CheckSquare, BookOpen, Brain, Settings2, LogOut, Search, Ticket, Inbox, Calendar, PenSquare, } from "lucide-react";
 const navItems = [
     { icon: LayoutDashboard, label: "Command Center", to: "/dashboard" },
+    { icon: Inbox, label: "Inbox", to: "/dashboard/inbox" },
+    { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
     { icon: Box, label: "Ventures", to: "/dashboard/ventures" },
     { icon: Rocket, label: "Pipeline", to: "/dashboard/pipeline" },
     { icon: DollarSign, label: "Revenue", to: "/dashboard/revenue" },
@@ -11,6 +13,7 @@ const navItems = [
     { icon: Users, label: "Relationships", to: "/dashboard/relationships" },
     { icon: CheckSquare, label: "Tasks", to: "/dashboard/tasks" },
     { icon: BookOpen, label: "Knowledge", to: "/dashboard/knowledge" },
+    { icon: PenSquare, label: "Content", to: "/dashboard/content" },
     { icon: Brain, label: "AI Agents", to: "/dashboard/agents" },
     { icon: Settings2, label: "Settings", to: "/dashboard/settings/stripe" },
 ];

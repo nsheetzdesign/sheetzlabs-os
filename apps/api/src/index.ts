@@ -9,6 +9,7 @@ import mcpRouter from "./routes/mcp";
 import emailRouter from "./routes/email";
 import calendarRouter from "./routes/calendar";
 import knowledgeRouter from "./routes/knowledge";
+import contentRouter from "./routes/content";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -25,6 +26,8 @@ type Bindings = {
   BRAVE_API_KEY: string;
   LINKEDIN_ACCESS_TOKEN: string;
   LINKEDIN_PERSON_ID: string;
+  RESEND_API_KEY: string;
+  NEWSLETTER_FROM: string;
   CLOUDFLARE_BILLING_TOKEN: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   GOOGLE_CLIENT_ID: string;
@@ -53,6 +56,7 @@ app.route("/mcp", mcpRouter);
 app.route("/email", emailRouter);
 app.route("/calendar", calendarRouter);
 app.route("/knowledge", knowledgeRouter);
+app.route("/content", contentRouter);
 
 export default {
   fetch: app.fetch,

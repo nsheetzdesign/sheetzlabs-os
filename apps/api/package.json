@@ -16,6 +16,7 @@
     "@sheetzlabs/shared": "workspace:*",
     "@supabase/supabase-js": "^2.98.0",
     "hono": "^4.7.0",
+    "resend": "^6.9.3",
     "stripe": "^20.4.1",
     "zod": "^3.25.0"
   },

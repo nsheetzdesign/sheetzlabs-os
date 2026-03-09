@@ -1,4 +1,5 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react-router";
+export declare const meta: MetaFunction;
 export declare function loader({ context }: LoaderFunctionArgs): Promise<{
     ventures: {
         id: string;

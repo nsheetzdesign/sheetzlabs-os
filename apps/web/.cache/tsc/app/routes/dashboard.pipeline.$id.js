@@ -1,5 +1,6 @@
-import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
-import { useLoaderData, useActionData, Form, Link, redirect, data, } from "react-router";
+import { jsxs as _jsxs, jsx as _jsx, Fragment as _Fragment } from "react/jsx-runtime";
+import { useLoaderData, useActionData, useFetcher, Form, Link, redirect, data, } from "react-router";
+import { Sparkles } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { FormField } from "~/components/ui/FormField";
@@ -34,9 +35,16 @@ const SCORES = [
 ];
 export async function loader({ params, context }) {
     const supabase = getSupabaseClient(context.cloudflare.env);
-    const [itemRes, venturesRes] = await Promise.all([
+    const [itemRes, venturesRes, evalRes] = await Promise.all([
         supabase.from("pipeline").select("*").eq("id", params.id).single(),
         supabase.from("ventures").select("id, name, slug").order("name"),
+        supabase
+            .from("pipeline_evaluations")
+            .select("id, total_score, recommendation, created_at")
+            .eq("pipeline_id", params.id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle(),
     ]);
     if (!itemRes.data)
         throw new Response("Not found", { status: 404 });
@@ -155,12 +163,18 @@ Begin by creating the full monorepo structure described above.`;
         item,
         ventures: venturesRes.data ?? [],
         scaffoldPrompt,
+        latestEvaluation: evalRes.data ?? null,
     };
 }
 export async function action({ request, params, context }) {
     const supabase = getSupabaseClient(context.cloudflare.env);
     const fd = await request.formData();
     const intent = fd.get("intent");
+    // Trigger AI evaluation
+    if (intent === "evaluate") {
+        await fetch(`https://api.sheetzlabs.com/pipeline/${params.id}/evaluate`, { method: "POST" });
+        return redirect(`/dashboard/pipeline/${params.id}/evaluation`);
+    }
     // Advance stage
     if (intent === "advance") {
         const current = fd.get("current_stage");
@@ -251,10 +265,19 @@ function ScoreBar({ value, max }) {
     const pct = Math.round((value / max) * 100);
     return (_jsx("div", { className: "h-1.5 w-full rounded-full bg-surface-2/50", children: _jsx("div", { className: "h-1.5 rounded-full bg-brand transition-all", style: { width: `${pct}%` } }) }));
 }
+const REC_STYLE = {
+    strong_yes: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
+    yes: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    maybe: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+    no: "bg-red-500/10 text-red-400 border-red-500/20",
+    strong_no: "bg-red-500/20 text-red-300 border-red-500/30",
+};
 export default function EditPipeline() {
-    const { item, ventures, scaffoldPrompt } = useLoaderData();
+    const { item, ventures, scaffoldPrompt, latestEvaluation } = useLoaderData();
     const actionData = useActionData();
+    const fetcher = useFetcher();
     const errors = actionData?.errors ?? {};
+    const isEvaluating = fetcher.state !== "idle";
     const currentStage = item.stage ?? "idea";
     const nextStage = NEXT_STAGE[currentStage];
     const isLaunched = currentStage === "launched";
@@ -269,7 +292,7 @@ export default function EditPipeline() {
         "launched",
         "parked",
     ];
-    return (_jsxs("div", { className: "flex flex-1 flex-col", children: [_jsx(Header, { title: item.name }), _jsx("main", { className: "flex-1 p-6", children: _jsxs("div", { className: "mx-auto max-w-2xl space-y-4", children: [errors._form && (_jsx("div", { className: "rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400", children: errors._form })), _jsxs("div", { className: "flex items-center justify-between rounded-xl border border-surface-2/50 bg-surface-1/40 px-5 py-4 backdrop-blur-sm", children: [_jsxs("div", { children: [_jsx("p", { className: "text-xs font-medium uppercase tracking-wide text-zinc-600", children: "Total Score" }), _jsx("div", { className: "mt-1", children: _jsx(ScoreBadge, { score: item.total_score }) })] }), _jsxs("div", { className: "text-right", children: [_jsx("p", { className: "text-xs font-medium uppercase tracking-wide text-zinc-600", children: "Stage" }), _jsx("p", { className: "mt-1 text-sm font-semibold capitalize text-zinc-300", children: currentStage })] })] }), _jsxs("div", { className: "flex flex-wrap gap-2", children: [nextStage && !isParked && (_jsxs(Form, { method: "post", children: [_jsx("input", { type: "hidden", name: "intent", value: "advance" }), _jsx("input", { type: "hidden", name: "current_stage", value: currentStage }), _jsxs(Button, { type: "submit", children: ["Advance \u2192 ", nextStage] })] })), isLaunched && !item.venture_id && (_jsxs(Form, { method: "post", className: "flex items-center gap-2", children: [_jsx("input", { type: "hidden", name: "intent", value: "promote" }), _jsx("input", { type: "text", name: "venture_name", defaultValue: item.name, placeholder: "Venture name", className: "rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-brand" }), _jsx("input", { type: "text", name: "venture_slug", placeholder: "slug (optional)", className: "w-28 rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-brand" }), _jsx(Button, { type: "submit", variant: "secondary", children: "\uD83D\uDE80 Promote to Venture" })] })), item.venture_id && (_jsx(Link, { to: `/dashboard/ventures/${ventures.find((v) => v.id === item.venture_id)?.slug ?? ""}`, children: _jsx(Button, { type: "button", variant: "secondary", children: "View Venture \u2192" }) })), !isParked && (_jsxs(Form, { method: "post", onSubmit: (e) => {
+    return (_jsxs("div", { className: "flex flex-1 flex-col", children: [_jsx(Header, { title: item.name }), _jsx("main", { className: "flex-1 p-6", children: _jsxs("div", { className: "mx-auto max-w-2xl space-y-4", children: [errors._form && (_jsx("div", { className: "rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400", children: errors._form })), _jsxs("div", { className: "flex items-center justify-between rounded-xl border border-surface-2/50 bg-surface-1/40 px-5 py-4 backdrop-blur-sm", children: [_jsxs("div", { children: [_jsx("p", { className: "text-xs font-medium uppercase tracking-wide text-zinc-600", children: "Total Score" }), _jsx("div", { className: "mt-1", children: _jsx(ScoreBadge, { score: item.total_score }) })] }), _jsxs("div", { className: "text-right", children: [_jsx("p", { className: "text-xs font-medium uppercase tracking-wide text-zinc-600", children: "Stage" }), _jsx("p", { className: "mt-1 text-sm font-semibold capitalize text-zinc-300", children: currentStage })] })] }), _jsxs("div", { className: "flex items-center justify-between rounded-xl border border-surface-2/50 bg-surface-1/40 px-5 py-4 backdrop-blur-sm", children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsx(Sparkles, { className: "h-4 w-4 text-brand" }), _jsxs("div", { children: [_jsx("p", { className: "text-xs font-medium uppercase tracking-wide text-zinc-500", children: "AI Evaluation" }), latestEvaluation ? (_jsxs("div", { className: "mt-0.5 flex items-center gap-2", children: [_jsx("span", { className: `font-mono text-lg font-bold ${Number(latestEvaluation.total_score) >= 7 ? "text-emerald-400" : Number(latestEvaluation.total_score) >= 5 ? "text-amber-400" : "text-red-400"}`, children: Number(latestEvaluation.total_score).toFixed(1) }), latestEvaluation.recommendation && (_jsx("span", { className: `rounded border px-2 py-0.5 text-xs font-semibold ${REC_STYLE[latestEvaluation.recommendation] ?? "border-zinc-700 text-zinc-400"}`, children: latestEvaluation.recommendation.replace(/_/g, " ").toUpperCase() }))] })) : (_jsx("p", { className: "mt-0.5 text-xs text-zinc-600", children: "Not evaluated yet" }))] })] }), _jsxs("div", { className: "flex items-center gap-2", children: [latestEvaluation && (_jsx(Link, { to: "evaluation", className: "rounded-lg border border-zinc-700 px-3 py-1.5 text-xs hover:border-zinc-500", children: "View Details" })), _jsxs(fetcher.Form, { method: "post", children: [_jsx("input", { type: "hidden", name: "intent", value: "evaluate" }), _jsx("button", { type: "submit", disabled: isEvaluating, className: "inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-dark disabled:opacity-50", children: isEvaluating ? ("Evaluating…") : latestEvaluation ? ("Re-evaluate") : (_jsxs(_Fragment, { children: [_jsx(Sparkles, { className: "h-3 w-3" }), "Evaluate"] })) })] })] })] }), _jsxs("div", { className: "flex flex-wrap gap-2", children: [nextStage && !isParked && (_jsxs(Form, { method: "post", children: [_jsx("input", { type: "hidden", name: "intent", value: "advance" }), _jsx("input", { type: "hidden", name: "current_stage", value: currentStage }), _jsxs(Button, { type: "submit", children: ["Advance \u2192 ", nextStage] })] })), isLaunched && !item.venture_id && (_jsxs(Form, { method: "post", className: "flex items-center gap-2", children: [_jsx("input", { type: "hidden", name: "intent", value: "promote" }), _jsx("input", { type: "text", name: "venture_name", defaultValue: item.name, placeholder: "Venture name", className: "rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-brand" }), _jsx("input", { type: "text", name: "venture_slug", placeholder: "slug (optional)", className: "w-28 rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-brand" }), _jsx(Button, { type: "submit", variant: "secondary", children: "\uD83D\uDE80 Promote to Venture" })] })), item.venture_id && (_jsx(Link, { to: `/dashboard/ventures/${ventures.find((v) => v.id === item.venture_id)?.slug ?? ""}`, children: _jsx(Button, { type: "button", variant: "secondary", children: "View Venture \u2192" }) })), !isParked && (_jsxs(Form, { method: "post", onSubmit: (e) => {
                                         if (!confirm("Park this idea?"))
                                             e.preventDefault();
                                     }, children: [_jsx("input", { type: "hidden", name: "intent", value: "park" }), _jsx(Button, { type: "submit", variant: "danger", children: "\uD83D\uDCE6 Park" })] }))] }), _jsxs(Form, { method: "post", className: "space-y-5 rounded-xl border border-surface-2/50 bg-surface-1/40 p-6 backdrop-blur-sm", children: [_jsxs("div", { className: "grid gap-5 sm:grid-cols-2", children: [_jsx(FormField, { label: "Idea Name", required: true, error: errors.name, children: _jsx(Input, { name: "name", defaultValue: item.name, error: !!errors.name }) }), _jsx(FormField, { label: "Stage", children: _jsx(Select, { name: "stage", defaultValue: currentStage, children: STAGES.map((s) => (_jsx("option", { value: s, children: s }, s))) }) })] }), _jsx(FormField, { label: "Problem Statement", children: _jsx("textarea", { name: "problem_statement", rows: 3, defaultValue: item.problem_statement ?? "", className: "w-full rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-brand" }) }), _jsx(FormField, { label: "Target Market", children: _jsx(Input, { name: "target_market", defaultValue: item.target_market ?? "" }) }), _jsxs("div", { className: "space-y-4 rounded-lg border border-surface-2/30 bg-surface-1/30 p-4", children: [_jsx("p", { className: "text-xs font-semibold uppercase tracking-wide text-zinc-500", children: "Scoring Criteria" }), SCORES.map((s) => {

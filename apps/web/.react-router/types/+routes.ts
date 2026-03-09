@@ -147,6 +147,33 @@ type Pages = {
       "slug": string;
     };
   };
+  "/dashboard/calendar": {
+    params: {};
+  };
+  "/dashboard/calendar/:id": {
+    params: {
+      "id": string;
+    };
+  };
+  "/dashboard/inbox": {
+    params: {};
+  };
+  "/dashboard/inbox/compose": {
+    params: {};
+  };
+  "/dashboard/inbox/draft-ai": {
+    params: {};
+  };
+  "/dashboard/inbox/:id": {
+    params: {
+      "id": string;
+    };
+  };
+  "/dashboard/inbox/:id/star": {
+    params: {
+      "id": string;
+    };
+  };
   "/dashboard/settings": {
     params: {};
   };
@@ -161,7 +188,7 @@ type Pages = {
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/auth/login" | "/auth/logout" | "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/pipeline" | "/dashboard/pipeline/new" | "/dashboard/pipeline/:id" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/:slug" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
+    page: "/" | "/auth/login" | "/auth/logout" | "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/pipeline" | "/dashboard/pipeline/new" | "/dashboard/pipeline/:id" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/:slug" | "/dashboard/calendar" | "/dashboard/calendar/:id" | "/dashboard/inbox" | "/dashboard/inbox/compose" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
   };
   "routes/_marketing.tsx": {
     id: "routes/_marketing";
@@ -181,7 +208,7 @@ type RouteFiles = {
   };
   "routes/dashboard.tsx": {
     id: "routes/dashboard";
-    page: "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/pipeline" | "/dashboard/pipeline/new" | "/dashboard/pipeline/:id" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/:slug" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
+    page: "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/pipeline" | "/dashboard/pipeline/new" | "/dashboard/pipeline/:id" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/:slug" | "/dashboard/calendar" | "/dashboard/calendar/:id" | "/dashboard/inbox" | "/dashboard/inbox/compose" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
   };
   "routes/dashboard._index.tsx": {
     id: "routes/dashboard._index";
@@ -359,6 +386,42 @@ type RouteFiles = {
     id: "routes/dashboard.agents.$slug";
     page: "/dashboard/agents/:slug";
   };
+  "routes/dashboard.calendar.tsx": {
+    id: "routes/dashboard.calendar";
+    page: "/dashboard/calendar" | "/dashboard/calendar/:id";
+  };
+  "routes/dashboard.calendar._index.tsx": {
+    id: "routes/dashboard.calendar._index";
+    page: "/dashboard/calendar";
+  };
+  "routes/dashboard.calendar.$id.tsx": {
+    id: "routes/dashboard.calendar.$id";
+    page: "/dashboard/calendar/:id";
+  };
+  "routes/dashboard.inbox.tsx": {
+    id: "routes/dashboard.inbox";
+    page: "/dashboard/inbox" | "/dashboard/inbox/compose" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star";
+  };
+  "routes/dashboard.inbox._index.tsx": {
+    id: "routes/dashboard.inbox._index";
+    page: "/dashboard/inbox";
+  };
+  "routes/dashboard.inbox.compose.tsx": {
+    id: "routes/dashboard.inbox.compose";
+    page: "/dashboard/inbox/compose";
+  };
+  "routes/dashboard.inbox.draft-ai.tsx": {
+    id: "routes/dashboard.inbox.draft-ai";
+    page: "/dashboard/inbox/draft-ai";
+  };
+  "routes/dashboard.inbox.$id.tsx": {
+    id: "routes/dashboard.inbox.$id";
+    page: "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star";
+  };
+  "routes/dashboard.inbox.$id.star.tsx": {
+    id: "routes/dashboard.inbox.$id.star";
+    page: "/dashboard/inbox/:id/star";
+  };
   "routes/dashboard.settings.tsx": {
     id: "routes/dashboard.settings";
     page: "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
@@ -424,6 +487,15 @@ type RouteModules = {
   "routes/dashboard.agents.runs.$id": typeof import("./app/routes/dashboard.agents.runs.$id.tsx");
   "routes/dashboard.agents.content": typeof import("./app/routes/dashboard.agents.content.tsx");
   "routes/dashboard.agents.$slug": typeof import("./app/routes/dashboard.agents.$slug.tsx");
+  "routes/dashboard.calendar": typeof import("./app/routes/dashboard.calendar.tsx");
+  "routes/dashboard.calendar._index": typeof import("./app/routes/dashboard.calendar._index.tsx");
+  "routes/dashboard.calendar.$id": typeof import("./app/routes/dashboard.calendar.$id.tsx");
+  "routes/dashboard.inbox": typeof import("./app/routes/dashboard.inbox.tsx");
+  "routes/dashboard.inbox._index": typeof import("./app/routes/dashboard.inbox._index.tsx");
+  "routes/dashboard.inbox.compose": typeof import("./app/routes/dashboard.inbox.compose.tsx");
+  "routes/dashboard.inbox.draft-ai": typeof import("./app/routes/dashboard.inbox.draft-ai.tsx");
+  "routes/dashboard.inbox.$id": typeof import("./app/routes/dashboard.inbox.$id.tsx");
+  "routes/dashboard.inbox.$id.star": typeof import("./app/routes/dashboard.inbox.$id.star.tsx");
   "routes/dashboard.settings": typeof import("./app/routes/dashboard.settings.tsx");
   "routes/dashboard.settings.stripe": typeof import("./app/routes/dashboard.settings.stripe.tsx");
   "routes/dashboard.settings.expenses": typeof import("./app/routes/dashboard.settings.expenses.tsx");
