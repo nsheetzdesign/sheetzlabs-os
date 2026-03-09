@@ -329,6 +329,15 @@ async function gatherContext(
         context.content_queue = data;
         break;
       }
+      case "agent_runs": {
+        const { data } = await supabase
+          .from("agent_runs")
+          .select("id, agent_id, status, trigger_type, tokens_input, tokens_output, cost_cents, duration_ms, created_at")
+          .order("created_at", { ascending: false })
+          .limit(50);
+        context.agent_runs = data;
+        break;
+      }
     }
   }
 
