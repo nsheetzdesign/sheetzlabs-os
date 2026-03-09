@@ -9,6 +9,7 @@ type Env = {
   LINKEDIN_PERSON_ID: string;
   CLOUDFLARE_BILLING_TOKEN: string;
   CLOUDFLARE_ACCOUNT_ID: string;
+  API_URL: string;
 };
 
 export default {
@@ -54,6 +55,11 @@ export default {
     for (const post of scheduledPosts ?? []) {
       ctx.waitUntil(postScheduledContent(post, env, supabase));
     }
+
+    // Fetch all enabled RSS feeds daily at 6am UTC
+    if (now.getUTCHours() === 6 && now.getUTCMinutes() === 0) {
+      ctx.waitUntil(fetchAllFeeds(env, supabase));
+    }
   },
 };
 
@@ -82,6 +88,25 @@ async function postScheduledContent(
       .from("content_queue")
       .update({ status: "failed" })
       .eq("id", post.id);
+  }
+}
+
+async function fetchAllFeeds(
+  env: Env,
+  supabase: ReturnType<typeof createClient<any>>
+) {
+  const { data: feeds } = await supabase
+    .from("feed_sources")
+    .select("id")
+    .eq("enabled", true);
+
+  const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
+  for (const feed of feeds ?? []) {
+    try {
+      await fetch(`${apiUrl}/knowledge/feeds/${feed.id}/fetch`, { method: "POST" });
+    } catch {
+      // continue with remaining feeds
+    }
   }
 }
 

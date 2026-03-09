@@ -8,6 +8,7 @@ import ticketsRouter from "./routes/tickets";
 import mcpRouter from "./routes/mcp";
 import emailRouter from "./routes/email";
 import calendarRouter from "./routes/calendar";
+import knowledgeRouter from "./routes/knowledge";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -51,6 +52,7 @@ app.route("/tickets", ticketsRouter);
 app.route("/mcp", mcpRouter);
 app.route("/email", emailRouter);
 app.route("/calendar", calendarRouter);
+app.route("/knowledge", knowledgeRouter);
 
 export default {
   fetch: app.fetch,

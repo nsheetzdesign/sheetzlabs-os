@@ -1,4 +1,4 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react-router";
 import {
   useLoaderData,
   useActionData,
@@ -14,7 +14,13 @@ import { Input } from "~/components/ui/Input";
 import { Select } from "~/components/ui/Select";
 import { Button } from "~/components/ui/Button";
 
-const KNOWLEDGE_TYPES = ["note", "learning", "playbook", "template"];
+export const meta: MetaFunction = () => [{ title: "New Knowledge — Sheetz Labs OS" }];
+
+const KNOWLEDGE_TYPES = [
+  "note", "doc", "clip", "playbook", "spec",
+  "research", "draft", "learning", "template",
+  "meeting_prep", "daily_plan", "insight",
+];
 
 export async function loader({ context }: LoaderFunctionArgs) {
   const supabase = getSupabaseClient(context.cloudflare.env);
@@ -40,31 +46,36 @@ export async function action({ request, context }: ActionFunctionArgs) {
   const type = (fd.get("type") as string) || "note";
   const tagsRaw = (fd.get("tags") as string)?.trim();
   const tags = tagsRaw
-    ? tagsRaw
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean)
+    ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
     : null;
   const venture_id = (fd.get("venture_id") as string) || null;
   const content = (fd.get("content") as string)?.trim() || null;
+  const source_url = (fd.get("source_url") as string)?.trim() || null;
 
   const errors: Record<string, string> = {};
   if (!title) errors.title = "Required";
   if (!slug) errors.slug = "Required";
   if (Object.keys(errors).length) return data({ errors }, { status: 400 });
 
-  const { error } = await supabase.from("knowledge").insert({
+  // Calculate word count and reading time
+  const wordCount = content ? content.trim().split(/\s+/).length : 0;
+  const readingTime = wordCount > 0 ? Math.ceil(wordCount / 200) : null;
+
+  const { data: item, error } = await supabase.from("knowledge").insert({
     title,
     slug,
     type,
     tags,
     venture_id,
     content,
-  });
+    source_url,
+    word_count: wordCount || null,
+    reading_time: readingTime,
+  }).select("slug").single();
 
   if (error) return data({ errors: { _form: error.message } }, { status: 500 });
 
-  return redirect(`/dashboard/knowledge/${slug}`);
+  return redirect(`/dashboard/knowledge/${item.slug}`);
 }
 
 export default function NewKnowledge() {
@@ -74,7 +85,7 @@ export default function NewKnowledge() {
 
   return (
     <div className="flex flex-1 flex-col">
-      <Header title="New Article" />
+      <Header title="New Knowledge Item" />
       <main className="flex-1 p-6">
         <div className="mx-auto max-w-3xl">
           {errors._form && (
@@ -126,6 +137,10 @@ export default function NewKnowledge() {
               <Input name="tags" placeholder="ops, onboarding, template" />
             </FormField>
 
+            <FormField label="Source URL" hint="Original URL if clipped from web">
+              <Input name="source_url" placeholder="https://example.com/article" type="url" />
+            </FormField>
+
             <FormField label="Content" hint="Markdown supported">
               <textarea
                 name="content"
@@ -136,7 +151,7 @@ export default function NewKnowledge() {
             </FormField>
 
             <div className="flex items-center gap-3 pt-2">
-              <Button type="submit">Create Article</Button>
+              <Button type="submit">Create</Button>
               <Link to="/dashboard/knowledge">
                 <Button type="button" variant="secondary">
                   Cancel
