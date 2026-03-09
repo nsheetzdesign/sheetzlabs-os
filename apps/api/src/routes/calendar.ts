@@ -755,6 +755,74 @@ calendar.delete("/templates/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// ============================================
+// SUB-CALENDARS
+// ============================================
+
+// List sub-calendars for an account (syncs from Google, upserts to DB, returns DB records)
+calendar.get("/accounts/:id/calendars", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("calendar_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const accessToken = await getValidAccessToken(account, c.env, supabase);
+
+  const res = await fetch(
+    "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const calList = (await res.json()) as {
+    items?: Array<{ id: string; summary?: string; backgroundColor?: string }>;
+  };
+
+  for (const cal of calList.items ?? []) {
+    await supabase.from("calendar_sub_accounts").upsert(
+      {
+        account_id: id,
+        external_id: cal.id,
+        name: cal.summary || cal.id,
+        color: cal.backgroundColor || "#2FE8B6",
+      },
+      { onConflict: "account_id,external_id" }
+    );
+  }
+
+  const { data: subCalendars } = await supabase
+    .from("calendar_sub_accounts")
+    .select("*")
+    .eq("account_id", id)
+    .order("name");
+
+  return c.json({ calendars: subCalendars ?? [] });
+});
+
+// Update sub-calendar visibility or color
+calendar.patch("/sub-accounts/:id", async (c) => {
+  const { id } = c.req.param();
+  const body = await c.req.json<{ is_visible?: boolean; color?: string }>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const updates: Record<string, unknown> = {};
+  if (body.is_visible !== undefined) updates.is_visible = body.is_visible;
+  if (body.color !== undefined) updates.color = body.color;
+
+  const { data } = await supabase
+    .from("calendar_sub_accounts")
+    .update(updates)
+    .eq("id", id)
+    .select()
+    .single();
+
+  return c.json({ calendar: data });
+});
+
 export default calendar;
 
 // ============================================
