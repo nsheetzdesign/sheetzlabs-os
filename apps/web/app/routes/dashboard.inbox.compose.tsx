@@ -33,28 +33,46 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     replyTo = data ?? null;
   }
 
+  const { data: aliases } = await supabase
+    .from("email_aliases")
+    .select("id, account_id, email, name")
+    .order("email");
+
   const { data: drafts } = await supabase
     .from("email_drafts")
     .select("id, to_emails, subject, created_at")
     .eq("status", "draft")
     .order("created_at", { ascending: false });
 
-  return { accounts: accounts ?? [], replyTo, drafts: drafts ?? [] };
+  return { accounts: accounts ?? [], aliases: aliases ?? [], replyTo, drafts: drafts ?? [] };
 }
 
 export default function ComposeEmail() {
-  const { accounts, replyTo, drafts } = useLoaderData<typeof loader>();
+  const { accounts, aliases, replyTo, drafts } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
+  // Build a flat list of "from" options: each account + its aliases
+  const fromOptions = [
+    ...accounts.map((a) => ({ value: `account:${a.id}`, label: a.email, account_id: a.id, from_email: a.email })),
+    ...aliases.map((a) => ({ value: `alias:${a.id}`, label: a.name ? `${a.name} <${a.email}>` : a.email, account_id: a.account_id, from_email: a.email })),
+  ];
+  const defaultFrom = fromOptions[0];
+
   const [draft, setDraft] = useState({
-    account_id: accounts[0]?.id ?? "",
+    account_id: defaultFrom?.account_id ?? "",
+    from_email: defaultFrom?.from_email ?? "",
     to_emails: replyTo?.from_email ? [replyTo.from_email] : ([] as string[]),
     cc_emails: [] as string[],
     subject: replyTo?.subject ? `Re: ${replyTo.subject}` : "",
     body_text: "",
     reply_to_email_id: replyTo?.id ?? null,
   });
+
+  const handleFromChange = (val: string) => {
+    const opt = fromOptions.find((o) => o.value === val);
+    if (opt) setDraft((d) => ({ ...d, account_id: opt.account_id, from_email: opt.from_email }));
+  };
 
   const apiUrl = "https://api.sheetzlabs.com";
 
@@ -112,17 +130,17 @@ export default function ComposeEmail() {
       <div className="mx-auto w-full max-w-3xl flex-1 overflow-auto p-6">
         <div className="space-y-4">
           {/* From */}
-          {accounts.length > 0 && (
+          {fromOptions.length > 0 && (
             <div className="flex items-center gap-3">
               <label className="w-16 shrink-0 text-sm text-zinc-500">From</label>
               <select
-                value={draft.account_id}
-                onChange={(e) => setDraft({ ...draft, account_id: e.target.value })}
+                value={fromOptions.find((o) => o.from_email === draft.from_email)?.value ?? fromOptions[0]?.value}
+                onChange={(e) => handleFromChange(e.target.value)}
                 className="flex-1 rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-brand"
               >
-                {accounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.email}
+                {fromOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
                   </option>
                 ))}
               </select>

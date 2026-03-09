@@ -14,11 +14,13 @@ import {
   Search,
   Ticket,
   Inbox,
+  Calendar,
 } from "lucide-react";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Command Center", to: "/dashboard" },
   { icon: Inbox, label: "Inbox", to: "/dashboard/inbox" },
+  { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
   { icon: Box, label: "Ventures", to: "/dashboard/ventures" },
   { icon: Rocket, label: "Pipeline", to: "/dashboard/pipeline" },
   { icon: DollarSign, label: "Revenue", to: "/dashboard/revenue" },

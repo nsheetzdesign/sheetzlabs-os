@@ -1,6 +1,7 @@
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, useFetcher } from "react-router";
-import { Inbox, PenSquare, RefreshCw, Star } from "lucide-react";
+import { useLoaderData, Link } from "react-router";
+import { useState } from "react";
+import { Inbox, PenSquare, RefreshCw, Star, Plus, X } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { EmptyState } from "~/components/ui/EmptyState";
@@ -49,18 +50,31 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     .select("id, email, provider, sync_enabled, last_sync_at")
     .order("email");
 
+  const { data: aliases } = await supabase
+    .from("email_aliases")
+    .select("id, account_id, email, name, source")
+    .order("email");
+
   const unreadCount = (emails ?? []).filter((e) => !e.is_read).length;
 
-  return { emails: emails ?? [], accounts: accounts ?? [], category, unreadOnly, unreadCount };
+  return { emails: emails ?? [], accounts: accounts ?? [], aliases: aliases ?? [], category, unreadOnly, unreadCount };
 }
 
-export default function InboxIndex() {
-  const { emails, accounts, category, unreadOnly, unreadCount } = useLoaderData<typeof loader>();
-  const syncFetcher = useFetcher();
+const API = "https://api.sheetzlabs.com";
 
-  const apiUrl = typeof window !== "undefined"
-    ? (window as Window & { ENV?: { API_URL?: string } }).ENV?.API_URL ?? "https://api.sheetzlabs.com"
-    : "https://api.sheetzlabs.com";
+export default function InboxIndex() {
+  const { emails, accounts, aliases, category, unreadOnly, unreadCount } = useLoaderData<typeof loader>();
+  const [addingAliasFor, setAddingAliasFor] = useState<string | null>(null);
+  const [aliasEmail, setAliasEmail] = useState("");
+  const [aliasName, setAliasName] = useState("");
+  const [syncing, setSyncing] = useState<string | null>(null);
+
+  const callApi = async (url: string, method = "POST") => {
+    setSyncing(url);
+    await fetch(url, { method });
+    setSyncing(null);
+    window.location.reload();
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -120,26 +134,104 @@ export default function InboxIndex() {
                 + Connect Gmail
               </a>
             ) : (
-              <div className="space-y-1">
-                {accounts.map((account) => (
-                  <div key={account.id} className="flex items-center justify-between px-3 py-1">
-                    <span className="truncate text-xs text-zinc-400">{account.email}</span>
-                    <syncFetcher.Form
-                      method="post"
-                      action={`https://api.sheetzlabs.com/email/accounts/${account.id}/sync`}
-                    >
-                      <button
-                        type="submit"
-                        title="Sync"
-                        className="text-zinc-600 transition-colors hover:text-zinc-300"
-                      >
-                        <RefreshCw
-                          className={`h-3 w-3 ${syncFetcher.state === "submitting" ? "animate-spin" : ""}`}
-                        />
-                      </button>
-                    </syncFetcher.Form>
-                  </div>
-                ))}
+              <div className="space-y-2">
+                {accounts.map((account) => {
+                  const accountAliases = aliases.filter((a) => a.account_id === account.id);
+                  return (
+                    <div key={account.id}>
+                      <div className="flex items-center justify-between px-3 py-1">
+                        <span className="truncate text-xs text-zinc-400">{account.email}</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => callApi(`${API}/email/accounts/${account.id}/sync-aliases`)}
+                            title="Sync aliases from Gmail"
+                            className="text-zinc-600 hover:text-zinc-300"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${syncing?.includes("sync-aliases") ? "animate-spin" : ""}`} />
+                          </button>
+                          <button
+                            onClick={() => callApi(`${API}/email/accounts/${account.id}/sync`)}
+                            title="Sync emails"
+                            className="text-zinc-600 hover:text-zinc-300"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${syncing?.includes("/sync") && !syncing.includes("aliases") ? "animate-spin" : ""}`} />
+                          </button>
+                        </div>
+                      </div>
+                      {/* Aliases for this account */}
+                      {accountAliases.map((alias) => (
+                        <div key={alias.id} className="flex items-center justify-between py-0.5 pl-6 pr-3">
+                          <span className="truncate text-xs text-zinc-600">{alias.email}</span>
+                          <button
+                            onClick={() => callApi(`${API}/email/aliases/${alias.id}`, "DELETE")}
+                            className="text-zinc-700 hover:text-red-400"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                      {/* Add alias */}
+                      {addingAliasFor === account.id ? (
+                        <div className="mt-1 space-y-1 px-3">
+                          <input
+                            type="text"
+                            placeholder="Email address"
+                            value={aliasEmail}
+                            onChange={(e) => setAliasEmail(e.target.value)}
+                            className="w-full rounded border border-surface-2/50 bg-surface-1 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
+                          />
+                          <input
+                            type="text"
+                            placeholder="Name (optional)"
+                            value={aliasName}
+                            onChange={(e) => setAliasName(e.target.value)}
+                            className="w-full rounded border border-surface-2/50 bg-surface-1 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              onClick={async () => {
+                                if (!aliasEmail) return;
+                                await fetch("https://api.sheetzlabs.com/email/aliases", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ account_id: account.id, email: aliasEmail, name: aliasName || undefined }),
+                                });
+                                setAliasEmail("");
+                                setAliasName("");
+                                setAddingAliasFor(null);
+                                window.location.reload();
+                              }}
+                              className="text-xs text-brand hover:text-brand-light"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => { setAddingAliasFor(null); setAliasEmail(""); setAliasName(""); }}
+                              className="text-xs text-zinc-600 hover:text-zinc-400"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setAddingAliasFor(account.id)}
+                          className="flex items-center gap-1 py-0.5 pl-6 text-xs text-zinc-700 hover:text-zinc-400"
+                        >
+                          <Plus className="h-3 w-3" />
+                          Add alias
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                <a
+                  href="https://api.sheetzlabs.com/email/auth/gmail"
+                  className="flex items-center gap-1 px-3 py-1 text-xs text-zinc-600 hover:text-brand"
+                >
+                  <Plus className="h-3 w-3" />
+                  Connect another account
+                </a>
               </div>
             )}
           </div>

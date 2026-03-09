@@ -62,6 +62,18 @@ export default [
       route("content", "routes/dashboard.agents.content.tsx"),
       route(":slug", "routes/dashboard.agents.$slug.tsx"),
     ]),
+    route("calendar", "routes/dashboard.calendar.tsx", [
+      index("routes/dashboard.calendar._index.tsx"),
+      route(":id", "routes/dashboard.calendar.$id.tsx"),
+    ]),
+    route("inbox", "routes/dashboard.inbox.tsx", [
+      index("routes/dashboard.inbox._index.tsx"),
+      route("compose", "routes/dashboard.inbox.compose.tsx"),
+      route("draft-ai", "routes/dashboard.inbox.draft-ai.tsx"),
+      route(":id", "routes/dashboard.inbox.$id.tsx", [
+        route("star", "routes/dashboard.inbox.$id.star.tsx"),
+      ]),
+    ]),
     route("settings", "routes/dashboard.settings.tsx", [
       route("stripe", "routes/dashboard.settings.stripe.tsx"),
       route("expenses", "routes/dashboard.settings.expenses.tsx"),

@@ -111,6 +111,66 @@ email.delete("/accounts/:id", async (c) => {
 });
 
 // ============================================
+// ALIAS MANAGEMENT
+// ============================================
+
+// Fetch sendAs aliases from Gmail and upsert
+email.post("/accounts/:id/sync-aliases", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("email_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const accessToken = await getValidAccessToken(account, c.env, supabase);
+
+  const res = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const data = (await res.json()) as { sendAs?: Array<{ sendAsEmail: string; displayName?: string; isPrimary?: boolean }> };
+
+  const aliases = (data.sendAs ?? []).filter((a) => !a.isPrimary);
+
+  for (const alias of aliases) {
+    await supabase.from("email_aliases").upsert(
+      { account_id: id, email: alias.sendAsEmail, name: alias.displayName ?? null, source: "gmail_sendas" },
+      { onConflict: "account_id,email" }
+    );
+  }
+
+  return c.json({ synced: aliases.length });
+});
+
+// Manually add an alias
+email.post("/aliases", async (c) => {
+  const body = await c.req.json<{ account_id: string; email: string; name?: string }>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data, error } = await supabase
+    .from("email_aliases")
+    .insert({ account_id: body.account_id, email: body.email, name: body.name ?? null, source: "manual" })
+    .select()
+    .single();
+
+  if (error) return c.json({ error: error.message }, 400);
+  return c.json({ alias: data });
+});
+
+// Delete an alias
+email.delete("/aliases/:id", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  await supabase.from("email_aliases").delete().eq("id", id);
+  return c.json({ success: true });
+});
+
+// ============================================
 // EMAIL SYNC
 // ============================================
 email.post("/accounts/:id/sync", async (c) => {

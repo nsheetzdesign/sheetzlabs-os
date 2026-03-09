@@ -347,6 +347,34 @@ async function gatherContext(
         context.emails = data;
         break;
       }
+      case "calendar_events": {
+        const now = new Date();
+        const weekLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+        const { data } = await supabase
+          .from("calendar_events")
+          .select("id, title, description, location, start_at, end_at, attendees, meeting_link, is_time_block")
+          .gte("start_at", now.toISOString())
+          .lte("start_at", weekLater.toISOString())
+          .order("start_at");
+        context.calendar_events = data;
+        break;
+      }
+      case "calendar_today": {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const todayEnd = new Date();
+        todayEnd.setHours(23, 59, 59, 999);
+
+        const { data } = await supabase
+          .from("calendar_events")
+          .select("id, title, start_at, end_at, attendees, meeting_link, is_time_block, task_id")
+          .gte("start_at", todayStart.toISOString())
+          .lte("start_at", todayEnd.toISOString())
+          .order("start_at");
+        context.calendar_today = data;
+        break;
+      }
     }
   }
 
@@ -468,6 +496,25 @@ async function executeActions(
           .select()
           .single();
         targetId = draft?.id ?? null;
+        break;
+      }
+      case "create_calendar_event": {
+        const { data: newCalEvent } = await supabase
+          .from("calendar_events")
+          .insert({
+            ...payload,
+            external_id: `agent-${Date.now()}`,
+            is_time_block: payload.task_id ? true : false,
+          })
+          .select()
+          .single();
+        targetId = newCalEvent?.id ?? null;
+        break;
+      }
+      case "update_task": {
+        const { id: updateTaskId, ...taskUpdates } = payload as { id: string } & Record<string, unknown>;
+        await supabase.from("tasks").update(taskUpdates).eq("id", updateTaskId);
+        targetId = updateTaskId;
         break;
       }
     }
