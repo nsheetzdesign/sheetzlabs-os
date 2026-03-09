@@ -127,6 +127,38 @@ calendar.delete("/accounts/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// List Google sub-calendars for an account
+calendar.get("/accounts/:id/google-calendars", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("calendar_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const accessToken = await getValidAccessToken(account, c.env, supabase);
+
+  const res = await fetch(
+    "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const data = (await res.json()) as {
+    items?: Array<{
+      id: string;
+      summary: string;
+      primary?: boolean;
+      backgroundColor?: string;
+      foregroundColor?: string;
+    }>;
+  };
+
+  return c.json({ calendars: data.items ?? [] });
+});
+
 // ============================================
 // SYNC
 // ============================================
@@ -179,6 +211,7 @@ calendar.post("/accounts/:id/sync", async (c) => {
           account_id: id,
           // Google event IDs are globally unique per user — safe to use directly
           external_id: (event as Record<string, unknown>).id as string,
+          google_calendar_id: cal.id,
           ...parsed,
         },
         { onConflict: "account_id,external_id" }
@@ -243,6 +276,9 @@ calendar.post("/events", async (c) => {
     start_at: string;
     end_at: string;
     attendees?: Array<{ email: string; name?: string }>;
+    google_calendar_id?: string;
+    add_google_meet?: boolean;
+    meeting_link?: string;
   }>();
 
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -266,6 +302,7 @@ calendar.post("/events", async (c) => {
       start_at: body.start_at,
       end_at: body.end_at,
       attendees: body.attendees ?? [],
+      meeting_link: body.meeting_link ?? null,
     })
     .select()
     .single();
@@ -275,6 +312,7 @@ calendar.post("/events", async (c) => {
     try {
       const accessToken = await getValidAccessToken(account, c.env, supabase);
 
+      const calendarId = body.google_calendar_id ?? "primary";
       const gcalBody: Record<string, unknown> = {
         summary: body.title,
         description: body.description,
@@ -287,26 +325,47 @@ calendar.post("/events", async (c) => {
         gcalBody.attendees = body.attendees.map((a) => ({ email: a.email, displayName: a.name }));
       }
 
-      const gcalRes = await fetch(
-        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
+      if (body.add_google_meet) {
+        gcalBody.conferenceData = {
+          createRequest: {
+            requestId: `meet-${Date.now()}`,
+            conferenceSolutionKey: { type: "hangoutsMeet" },
           },
-          body: JSON.stringify(gcalBody),
-        }
-      );
+        };
+      }
 
-      const gcalData = (await gcalRes.json()) as { id?: string; hangoutLink?: string };
+      const gcalUrl =
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events` +
+        (body.add_google_meet ? "?conferenceDataVersion=1" : "");
+
+      const gcalRes = await fetch(gcalUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(gcalBody),
+      });
+
+      const gcalData = (await gcalRes.json()) as {
+        id?: string;
+        hangoutLink?: string;
+        conferenceData?: { entryPoints?: Array<{ uri: string }> };
+      };
 
       if (gcalData.id && event) {
+        const meetingLink =
+          gcalData.hangoutLink ||
+          gcalData.conferenceData?.entryPoints?.[0]?.uri ||
+          body.meeting_link ||
+          null;
+
         await supabase
           .from("calendar_events")
           .update({
             external_id: gcalData.id,
-            meeting_link: gcalData.hangoutLink ?? null,
+            google_calendar_id: calendarId,
+            meeting_link: meetingLink,
           })
           .eq("id", event.id);
       }
@@ -316,6 +375,104 @@ calendar.post("/events", async (c) => {
   }
 
   return c.json({ event });
+});
+
+// Update an event (and sync to Google Calendar)
+calendar.patch("/events/:id", async (c) => {
+  const { id } = c.req.param();
+  const body = await c.req.json<{
+    title?: string;
+    description?: string;
+    location?: string;
+    start_at?: string;
+    end_at?: string;
+    meeting_link?: string;
+    add_google_meet?: boolean;
+  }>();
+
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: event } = await supabase
+    .from("calendar_events")
+    .select("*, calendar_accounts(*)")
+    .eq("id", id)
+    .single();
+
+  if (!event) return c.json({ error: "Event not found" }, 404);
+
+  const updates: Record<string, unknown> = {};
+  if (body.title !== undefined) updates.title = body.title;
+  if (body.description !== undefined) updates.description = body.description;
+  if (body.location !== undefined) updates.location = body.location;
+  if (body.start_at !== undefined) updates.start_at = body.start_at;
+  if (body.end_at !== undefined) updates.end_at = body.end_at;
+  if (body.meeting_link !== undefined) updates.meeting_link = body.meeting_link;
+
+  // Sync to Google Calendar if connected and has a real external ID
+  const extId = event.external_id as string;
+  if (
+    event.calendar_accounts &&
+    !extId.startsWith("local-") &&
+    !extId.startsWith("timeblock-")
+  ) {
+    try {
+      const accessToken = await getValidAccessToken(event.calendar_accounts, c.env, supabase);
+      const calendarId = (event.google_calendar_id as string) ?? "primary";
+
+      const gcalBody: Record<string, unknown> = {};
+      if (body.title !== undefined) gcalBody.summary = body.title;
+      if (body.description !== undefined) gcalBody.description = body.description;
+      if (body.location !== undefined) gcalBody.location = body.location;
+      if (body.start_at !== undefined) gcalBody.start = { dateTime: body.start_at };
+      if (body.end_at !== undefined) gcalBody.end = { dateTime: body.end_at };
+
+      if (body.add_google_meet) {
+        gcalBody.conferenceData = {
+          createRequest: {
+            requestId: `meet-${Date.now()}`,
+            conferenceSolutionKey: { type: "hangoutsMeet" },
+          },
+        };
+      }
+
+      const gcalUrl =
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${extId}` +
+        (body.add_google_meet ? "?conferenceDataVersion=1" : "");
+
+      const gcalRes = await fetch(gcalUrl, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(gcalBody),
+      });
+
+      if (gcalRes.ok) {
+        const gcalData = (await gcalRes.json()) as {
+          hangoutLink?: string;
+          conferenceData?: { entryPoints?: Array<{ uri: string }> };
+        };
+        if (!body.meeting_link) {
+          if (gcalData.hangoutLink) updates.meeting_link = gcalData.hangoutLink;
+          else if (gcalData.conferenceData?.entryPoints?.[0]?.uri) {
+            updates.meeting_link = gcalData.conferenceData.entryPoints[0].uri;
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to update Google Calendar event:", err);
+    }
+  }
+
+  const { data: updated } = await supabase
+    .from("calendar_events")
+    .update(updates)
+    .eq("id", id)
+    .select()
+    .single();
+
+  return c.json({ event: updated });
 });
 
 // ============================================

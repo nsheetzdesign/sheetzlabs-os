@@ -1,6 +1,18 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, useFetcher, useNavigation } from "react-router";
-import { ArrowLeft, Clock, MapPin, Video, Users, ExternalLink, Zap, CheckSquare } from "lucide-react";
+import { useLoaderData, Link, useFetcher, useRevalidator } from "react-router";
+import { useState } from "react";
+import {
+  ArrowLeft,
+  Clock,
+  MapPin,
+  Video,
+  Users,
+  ExternalLink,
+  Zap,
+  CheckSquare,
+  Edit2,
+  X,
+} from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
 
@@ -39,6 +51,24 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
     await fetch(`${apiUrl}/calendar/events/${params.id}/prep`, { method: "POST" });
   }
 
+  if (intent === "edit") {
+    const startRaw = fd.get("start_at") as string;
+    const endRaw = fd.get("end_at") as string;
+    await fetch(`${apiUrl}/calendar/events/${params.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: fd.get("title") || undefined,
+        description: fd.get("description") || undefined,
+        location: fd.get("location") || undefined,
+        start_at: startRaw ? new Date(startRaw).toISOString() : undefined,
+        end_at: endRaw ? new Date(endRaw).toISOString() : undefined,
+        meeting_link: fd.get("meeting_link") || undefined,
+        add_google_meet: fd.get("add_google_meet") === "true",
+      }),
+    });
+  }
+
   if (intent === "delete_time_block") {
     await fetch(`${apiUrl}/calendar/time-blocks/${params.id}`, { method: "DELETE" });
     return new Response(null, {
@@ -67,6 +97,12 @@ function formatTime(iso: string) {
   });
 }
 
+function toLocalDateTimeInput(iso: string) {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 const STATUS_COLORS: Record<string, string> = {
   accepted: "bg-emerald-500",
   declined: "bg-red-500",
@@ -77,11 +113,20 @@ const STATUS_COLORS: Record<string, string> = {
 export default function CalendarEventDetail() {
   const { event } = useLoaderData<typeof loader>();
   const fetcher = useFetcher();
-  const navigation = useNavigation();
-  const isGenerating = fetcher.state !== "idle";
+  const revalidator = useRevalidator();
+  const [isEditing, setIsEditing] = useState(false);
+  const [videoType, setVideoType] = useState<"none" | "meet" | "teams">("none");
 
+  const isGenerating = fetcher.state !== "idle";
   const hasAttendees = Array.isArray(event.attendees) && event.attendees.length > 0;
   const prepPending = fetcher.formData?.get("intent") === "prep";
+  const isEditSubmitting = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "edit";
+
+  // Close edit form after successful submission
+  if (isEditing && fetcher.state === "idle" && fetcher.data !== undefined) {
+    setIsEditing(false);
+    revalidator.revalidate();
+  }
 
   return (
     <div className="flex flex-1 flex-col">
@@ -122,9 +167,158 @@ export default function CalendarEventDetail() {
                     title={event.calendar_accounts.email}
                   />
                 )}
+                {!isEditing && (
+                  <button
+                    onClick={() => setIsEditing(true)}
+                    className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-200 transition-colors mt-1"
+                  >
+                    <Edit2 className="h-3 w-3" />
+                    Edit
+                  </button>
+                )}
               </div>
             </div>
           </div>
+
+          {/* Edit form */}
+          {isEditing && (
+            <div className="rounded-xl border border-zinc-700 bg-zinc-900 px-6 py-5">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-semibold text-zinc-200">Edit Event</h2>
+                <button
+                  onClick={() => setIsEditing(false)}
+                  className="text-zinc-500 hover:text-zinc-200 transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <fetcher.Form method="post" className="space-y-4">
+                <input type="hidden" name="intent" value="edit" />
+                {videoType === "meet" && (
+                  <input type="hidden" name="add_google_meet" value="true" />
+                )}
+
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Title</label>
+                  <input
+                    name="title"
+                    defaultValue={event.title}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-zinc-500 mb-1">Start</label>
+                    <input
+                      name="start_at"
+                      type="datetime-local"
+                      defaultValue={toLocalDateTimeInput(event.start_at)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-500 mb-1">End</label>
+                    <input
+                      name="end_at"
+                      type="datetime-local"
+                      defaultValue={toLocalDateTimeInput(event.end_at)}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Location</label>
+                  <input
+                    name="location"
+                    defaultValue={event.location ?? ""}
+                    placeholder="Office, address, etc."
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1.5">
+                    <Video className="inline h-3 w-3 mr-1" />
+                    Video Conferencing
+                  </label>
+                  {event.meeting_link && videoType === "none" && (
+                    <div className="mb-2 text-xs text-zinc-400 flex items-center gap-1.5">
+                      <Video className="h-3 w-3 text-zinc-500" />
+                      <a
+                        href={event.meeting_link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-emerald-400 hover:text-emerald-300 truncate"
+                      >
+                        {event.meeting_link}
+                      </a>
+                    </div>
+                  )}
+                  <div className="flex gap-2 mb-2">
+                    {(["none", "meet", "teams"] as const).map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        onClick={() => setVideoType(type)}
+                        className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                          videoType === type
+                            ? "bg-emerald-600 border-emerald-500 text-white"
+                            : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                        }`}
+                      >
+                        {type === "none"
+                          ? "Keep existing"
+                          : type === "meet"
+                          ? "Add Meet"
+                          : "Teams / Zoom"}
+                      </button>
+                    ))}
+                  </div>
+                  {videoType === "teams" && (
+                    <input
+                      name="meeting_link"
+                      defaultValue={event.meeting_link ?? ""}
+                      placeholder="Paste Teams or Zoom meeting URL"
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+                    />
+                  )}
+                  {videoType === "meet" && (
+                    <p className="text-xs text-zinc-500">A new Google Meet link will be generated.</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Description</label>
+                  <textarea
+                    name="description"
+                    defaultValue={event.description ?? ""}
+                    rows={3}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 resize-none"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditing(false)}
+                    className="flex-1 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isEditSubmitting}
+                    className="flex-1 py-2 text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50 transition-colors"
+                  >
+                    {isEditSubmitting ? "Saving..." : "Save Changes"}
+                  </button>
+                </div>
+              </fetcher.Form>
+            </div>
+          )}
 
           {/* Details */}
           <div className="rounded-xl border border-surface-2/50 bg-surface-1/40 divide-y divide-zinc-800">

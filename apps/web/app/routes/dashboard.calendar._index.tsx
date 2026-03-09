@@ -1,13 +1,16 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, useFetcher, useSearchParams } from "react-router";
+import { useLoaderData, Link, useFetcher } from "react-router";
 import { useState } from "react";
-import { RefreshCw, Plus, X } from "lucide-react";
+import { RefreshCw, Plus, X, Eye, EyeOff, Video } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
 
 export const meta: MetaFunction = () => [{ title: "Calendar — Sheetz Labs OS" }];
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const HOURS = Array.from({ length: 12 }, (_, i) => i + 7); // 7am–6pm
+const START_HOUR = 7;
+const HOUR_HEIGHT = 64; // px per hour
+const VISIBLE_HOURS = 13; // 7am–7pm
+const HOURS = Array.from({ length: VISIBLE_HOURS }, (_, i) => i + START_HOUR);
 
 function formatHour(hour: number) {
   if (hour === 12) return "12pm";
@@ -25,6 +28,57 @@ function toLocalDateTimeInput(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+type CalendarEvent = {
+  id: string;
+  title: string;
+  start_at: string;
+  end_at: string;
+  is_time_block: boolean;
+  all_day: boolean;
+  account_id: string;
+  task_id: string | null;
+};
+
+type CalendarAccount = {
+  id: string;
+  email: string;
+  color: string | null;
+  sync_enabled: boolean;
+  last_sync_at: string | null;
+};
+
+function getEventsForDay(
+  dayIndex: number,
+  weekStartDate: Date,
+  events: CalendarEvent[]
+): CalendarEvent[] {
+  const cellDate = new Date(weekStartDate);
+  cellDate.setDate(weekStartDate.getDate() + dayIndex);
+  return events.filter((e) => {
+    if (e.all_day) return false;
+    const start = new Date(e.start_at);
+    return (
+      start.getFullYear() === cellDate.getFullYear() &&
+      start.getMonth() === cellDate.getMonth() &&
+      start.getDate() === cellDate.getDate()
+    );
+  });
+}
+
+function eventPosition(event: CalendarEvent): { top: number; height: number } {
+  const start = new Date(event.start_at);
+  const end = new Date(event.end_at);
+  const startFrac = Math.max(0, start.getHours() - START_HOUR + start.getMinutes() / 60);
+  const endFrac = Math.min(
+    VISIBLE_HOURS,
+    end.getHours() - START_HOUR + end.getMinutes() / 60
+  );
+  return {
+    top: startFrac * HOUR_HEIGHT,
+    height: Math.max(22, (endFrac - startFrac) * HOUR_HEIGHT),
+  };
 }
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
@@ -69,7 +123,6 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       .order("due_date", { nullsFirst: false }),
   ]);
 
-  // Filter out tasks already time-blocked
   const { data: blockedTasks } = await supabase
     .from("calendar_events")
     .select("task_id")
@@ -137,6 +190,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
         start_at: new Date(startLocal).toISOString(),
         end_at: new Date(endLocal).toISOString(),
         attendees,
+        add_google_meet: fd.get("add_google_meet") === "true",
+        meeting_link: fd.get("meeting_link") || undefined,
       }),
     });
   }
@@ -147,7 +202,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 // ── New Event Modal ──────────────────────────────────────────────────────────
 
 interface NewEventModalProps {
-  accounts: Array<{ id: string; email: string }>;
+  accounts: CalendarAccount[];
   defaultStart: string;
   defaultEnd: string;
   onClose: () => void;
@@ -156,6 +211,7 @@ interface NewEventModalProps {
 function NewEventModal({ accounts, defaultStart, defaultEnd, onClose }: NewEventModalProps) {
   const fetcher = useFetcher();
   const isSubmitting = fetcher.state !== "idle";
+  const [videoType, setVideoType] = useState<"none" | "meet" | "teams">("none");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -169,18 +225,16 @@ function NewEventModal({ accounts, defaultStart, defaultEnd, onClose }: NewEvent
 
         <fetcher.Form
           method="post"
-          onSubmit={() => {
-            // Close modal after submission starts
-            setTimeout(onClose, 100);
-          }}
+          onSubmit={() => setTimeout(onClose, 100)}
           className="space-y-4"
         >
           <input type="hidden" name="intent" value="create_event" />
+          {videoType === "meet" && <input type="hidden" name="add_google_meet" value="true" />}
 
           {/* Calendar account */}
           {accounts.length > 1 && (
             <div>
-              <label className="block text-xs text-zinc-500 mb-1">Calendar</label>
+              <label className="block text-xs text-zinc-500 mb-1">Calendar Account</label>
               <select
                 name="account_id"
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
@@ -238,9 +292,43 @@ function NewEventModal({ accounts, defaultStart, defaultEnd, onClose }: NewEvent
             <label className="block text-xs text-zinc-500 mb-1">Location</label>
             <input
               name="location"
-              placeholder="Office, Zoom link, etc."
+              placeholder="Office, address, etc."
               className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
             />
+          </div>
+
+          {/* Video conferencing */}
+          <div>
+            <label className="block text-xs text-zinc-500 mb-1.5">
+              <Video className="inline h-3 w-3 mr-1" />
+              Video Conferencing
+            </label>
+            <div className="flex gap-2 mb-2">
+              {(["none", "meet", "teams"] as const).map((type) => (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => setVideoType(type)}
+                  className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                    videoType === type
+                      ? "bg-emerald-600 border-emerald-500 text-white"
+                      : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                  }`}
+                >
+                  {type === "none" ? "None" : type === "meet" ? "Google Meet" : "Teams / Zoom"}
+                </button>
+              ))}
+            </div>
+            {videoType === "teams" && (
+              <input
+                name="meeting_link"
+                placeholder="Paste Teams or Zoom meeting URL"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+              />
+            )}
+            {videoType === "meet" && (
+              <p className="text-xs text-zinc-500">A Google Meet link will be generated automatically.</p>
+            )}
           </div>
 
           {/* Description */}
@@ -295,30 +383,43 @@ export default function Calendar() {
     useLoaderData<typeof loader>();
   const fetcher = useFetcher();
   const [draggedTask, setDraggedTask] = useState<{ id: string; title: string } | null>(null);
-  const [newEventModal, setNewEventModal] = useState<{
-    start: string;
-    end: string;
-  } | null>(null);
+  const [newEventModal, setNewEventModal] = useState<{ start: string; end: string } | null>(null);
+  const [hiddenAccounts, setHiddenAccounts] = useState<Set<string>>(new Set());
 
   const weekStartDate = new Date(weekStart);
 
-  function getEventColor(event: { is_time_block: boolean }) {
-    if (event.is_time_block) return "bg-emerald-500/20 border-emerald-500/40 text-emerald-300";
-    return "bg-blue-500/20 border-blue-500/40 text-blue-300";
+  // Build color map: accountId -> color
+  const accountColorMap = Object.fromEntries(
+    accounts.map((a) => [a.id, a.color ?? "#2FE8B6"])
+  );
+
+  // Filter events by hidden accounts
+  const visibleEvents = (events as CalendarEvent[]).filter(
+    (e) => !hiddenAccounts.has(e.account_id)
+  );
+
+  function toggleAccount(accountId: string) {
+    setHiddenAccounts((prev) => {
+      const next = new Set(prev);
+      if (next.has(accountId)) next.delete(accountId);
+      else next.add(accountId);
+      return next;
+    });
   }
 
-  function getEventsForCell(dayIndex: number, hour: number) {
-    const cellDate = new Date(weekStartDate);
-    cellDate.setDate(weekStartDate.getDate() + dayIndex);
-
-    return events.filter((e) => {
-      const start = new Date(e.start_at);
-      return (
-        start.getDay() === cellDate.getDay() &&
-        start.getDate() === cellDate.getDate() &&
-        start.getHours() === hour
-      );
-    });
+  function getEventStyle(event: CalendarEvent) {
+    const { top, height } = eventPosition(event);
+    const color = accountColorMap[event.account_id] ?? "#2FE8B6";
+    return {
+      position: "absolute" as const,
+      top,
+      height,
+      left: 2,
+      right: 2,
+      backgroundColor: `${color}22`,
+      borderLeft: `3px solid ${color}88`,
+      zIndex: 2,
+    };
   }
 
   function handleDrop(e: React.DragEvent, dayIndex: number, hour: number) {
@@ -328,7 +429,6 @@ export default function Calendar() {
     const startDate = new Date(weekStartDate);
     startDate.setDate(weekStartDate.getDate() + dayIndex);
     startDate.setHours(hour, 0, 0, 0);
-
     const endDate = new Date(startDate);
     endDate.setHours(hour + 1, 0, 0, 0);
 
@@ -339,7 +439,6 @@ export default function Calendar() {
     fd.set("start_at", startDate.toISOString());
     fd.set("end_at", endDate.toISOString());
     fetcher.submit(fd, { method: "post" });
-
     setDraggedTask(null);
   }
 
@@ -375,23 +474,22 @@ export default function Calendar() {
     <div className="flex h-full overflow-hidden">
       {newEventModal && accounts.length > 0 && (
         <NewEventModal
-          accounts={accounts}
+          accounts={accounts as CalendarAccount[]}
           defaultStart={newEventModal.start}
           defaultEnd={newEventModal.end}
           onClose={() => setNewEventModal(null)}
         />
       )}
 
-      {/* Task sidebar */}
-      <aside className="w-60 shrink-0 border-r border-zinc-800 flex flex-col overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-56 shrink-0 border-r border-zinc-800 flex flex-col overflow-hidden">
+        {/* Unscheduled tasks */}
         <div className="p-4 border-b border-zinc-800">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-sm font-semibold">Unscheduled Tasks</h2>
-          </div>
+          <h2 className="text-xs font-semibold text-zinc-300 mb-0.5">Unscheduled Tasks</h2>
           <p className="text-xs text-zinc-500">Drag onto calendar to block time</p>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+        <div className="flex-1 overflow-y-auto p-3 space-y-1.5 min-h-0">
           {tasks.length === 0 && (
             <p className="text-xs text-zinc-500 italic">All tasks scheduled</p>
           )}
@@ -418,7 +516,7 @@ export default function Calendar() {
         </div>
 
         {/* Connected Calendars */}
-        <div className="p-3 border-t border-zinc-800">
+        <div className="p-3 border-t border-zinc-800 shrink-0">
           <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2">Calendars</div>
           {accounts.length === 0 ? (
             <a
@@ -429,30 +527,58 @@ export default function Calendar() {
               Connect Google Calendar
             </a>
           ) : (
-            <div className="space-y-2">
-              {accounts.map((account) => (
-                <div key={account.id} className="flex items-center gap-2">
-                  <span
-                    className="w-2.5 h-2.5 rounded-sm shrink-0"
-                    style={{ backgroundColor: account.color ?? "#2FE8B6" }}
-                  />
-                  <span className="text-xs text-zinc-400 truncate flex-1">{account.email}</span>
-                  <fetcher.Form method="post">
-                    <input type="hidden" name="intent" value="sync" />
-                    <input type="hidden" name="account_id" value={account.id} />
+            <div className="space-y-1.5">
+              {(accounts as CalendarAccount[]).map((account) => {
+                const isHidden = hiddenAccounts.has(account.id);
+                const color = account.color ?? "#2FE8B6";
+                return (
+                  <div key={account.id} className="flex items-center gap-1.5">
+                    {/* Toggle visibility */}
                     <button
-                      type="submit"
-                      title="Sync all calendars"
-                      className="text-zinc-600 hover:text-zinc-300 transition-colors"
+                      onClick={() => toggleAccount(account.id)}
+                      className="flex items-center gap-1.5 flex-1 min-w-0 text-left group"
+                      title={isHidden ? "Show calendar" : "Hide calendar"}
                     >
-                      <RefreshCw className="h-3 w-3" />
+                      <span
+                        className="w-3 h-3 rounded-sm shrink-0 border transition-opacity"
+                        style={{
+                          backgroundColor: isHidden ? "transparent" : color,
+                          borderColor: color,
+                          opacity: isHidden ? 0.5 : 1,
+                        }}
+                      />
+                      <span
+                        className={`text-xs truncate flex-1 transition-colors ${
+                          isHidden ? "text-zinc-600" : "text-zinc-400 group-hover:text-zinc-200"
+                        }`}
+                      >
+                        {account.email}
+                      </span>
+                      {isHidden ? (
+                        <EyeOff className="h-3 w-3 text-zinc-600 shrink-0" />
+                      ) : (
+                        <Eye className="h-3 w-3 text-zinc-600 opacity-0 group-hover:opacity-100 shrink-0 transition-opacity" />
+                      )}
                     </button>
-                  </fetcher.Form>
-                </div>
-              ))}
+
+                    {/* Sync button */}
+                    <fetcher.Form method="post">
+                      <input type="hidden" name="intent" value="sync" />
+                      <input type="hidden" name="account_id" value={account.id} />
+                      <button
+                        type="submit"
+                        title="Sync calendar"
+                        className="text-zinc-600 hover:text-zinc-300 transition-colors shrink-0"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                      </button>
+                    </fetcher.Form>
+                  </div>
+                );
+              })}
               <a
                 href="https://api.sheetzlabs.com/calendar/auth/google"
-                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1"
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-2"
               >
                 <Plus className="h-3 w-3" />
                 Add account
@@ -527,14 +653,14 @@ export default function Calendar() {
           </div>
         </div>
 
-        {/* Grid */}
+        {/* Scrollable grid */}
         <div className="flex-1 overflow-auto">
-          {/* Day headers */}
+          {/* Sticky day headers */}
           <div
             className="grid border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10"
             style={{ gridTemplateColumns: "48px repeat(7, 1fr)" }}
           >
-            <div /> {/* time column */}
+            <div className="border-r border-zinc-800" />
             {DAYS.map((day, i) => {
               const d = new Date(weekStartDate);
               d.setDate(weekStartDate.getDate() + i);
@@ -546,7 +672,9 @@ export default function Calendar() {
                 >
                   <div className="text-xs text-zinc-500">{day}</div>
                   <div
-                    className={`text-sm font-medium mt-0.5 ${isToday ? "text-emerald-400" : "text-zinc-300"}`}
+                    className={`text-sm font-medium mt-0.5 ${
+                      isToday ? "text-emerald-400" : "text-zinc-300"
+                    }`}
                   >
                     {d.getDate()}
                   </div>
@@ -555,60 +683,103 @@ export default function Calendar() {
             })}
           </div>
 
-          {/* Hour rows */}
-          {HOURS.map((hour) => (
+          {/* Grid body: time labels + day columns */}
+          <div
+            className="flex"
+            style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}
+          >
+            {/* Time labels */}
             <div
-              key={hour}
-              className="grid border-b border-zinc-800/50"
-              style={{ gridTemplateColumns: "48px repeat(7, 1fr)", height: "60px" }}
+              className="w-12 shrink-0 relative border-r border-zinc-800"
+              style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}
             >
-              {/* Time label */}
-              <div className="px-1 pt-1 text-right text-xs text-zinc-600 border-r border-zinc-800">
-                {formatHour(hour)}
-              </div>
+              {HOURS.map((hour, i) => (
+                <div
+                  key={hour}
+                  style={{
+                    position: "absolute",
+                    top: i * HOUR_HEIGHT - 9,
+                    height: HOUR_HEIGHT,
+                    right: 0,
+                    left: 0,
+                  }}
+                  className="pr-2 text-right text-xs text-zinc-600"
+                >
+                  {formatHour(hour)}
+                </div>
+              ))}
+            </div>
 
-              {/* Day cells */}
-              {DAYS.map((_, dayIndex) => (
+            {/* Day columns */}
+            {DAYS.map((_, dayIndex) => {
+              const dayEvents = getEventsForDay(dayIndex, weekStartDate, visibleEvents);
+              return (
                 <div
                   key={dayIndex}
-                  className="border-r border-zinc-800/40 last:border-r-0 relative group cursor-pointer hover:bg-zinc-800/20 transition-colors"
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => handleDrop(e, dayIndex, hour)}
-                  onClick={() => handleCellClick(dayIndex, hour)}
+                  className="flex-1 relative border-r border-zinc-800/40 last:border-r-0"
+                  style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}
                 >
-                  {/* Events */}
-                  {getEventsForCell(dayIndex, hour).map((event) => (
+                  {/* Hour slots — background + click/drop */}
+                  {HOURS.map((hour, i) => (
+                    <div
+                      key={hour}
+                      style={{
+                        position: "absolute",
+                        top: i * HOUR_HEIGHT,
+                        height: HOUR_HEIGHT,
+                        left: 0,
+                        right: 0,
+                      }}
+                      className="border-b border-zinc-800/30 hover:bg-zinc-800/15 transition-colors cursor-pointer group"
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => handleDrop(e, dayIndex, hour)}
+                      onClick={() => handleCellClick(dayIndex, hour)}
+                    >
+                      {accounts.length > 0 && !draggedTask && (
+                        <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 text-zinc-600 text-xs pointer-events-none">
+                          +
+                        </span>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Events — absolutely positioned by actual start/end times */}
+                  {dayEvents.map((event) => (
                     <Link
                       key={event.id}
                       to={`/dashboard/calendar/${event.id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className={`absolute inset-x-0.5 top-0.5 px-1 py-0.5 rounded text-xs border truncate ${getEventColor(event)}`}
+                      style={getEventStyle(event)}
+                      className="overflow-hidden rounded-sm px-1.5 py-0.5 text-xs font-medium text-zinc-200 hover:brightness-110 transition-all"
                     >
-                      {event.title}
+                      <div className="truncate leading-tight">
+                        {event.is_time_block ? "⏱ " : ""}{event.title}
+                      </div>
+                      <div className="text-zinc-400 text-[10px] leading-tight">
+                        {new Date(event.start_at).toLocaleTimeString(undefined, {
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                      </div>
                     </Link>
                   ))}
-                  {/* Click hint */}
-                  {accounts.length > 0 && (
-                    <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-zinc-600 text-xs pointer-events-none">
-                      +
-                    </span>
-                  )}
                 </div>
-              ))}
-            </div>
-          ))}
+              );
+            })}
+          </div>
         </div>
 
         {/* Legend */}
         <div className="flex items-center gap-4 px-4 py-2 border-t border-zinc-800 text-xs text-zinc-500 shrink-0">
-          <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-sm bg-blue-500/40 border border-blue-500/60" />
-            Meeting
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-sm bg-emerald-500/40 border border-emerald-500/60" />
-            Time Block
-          </span>
+          {accounts.map((a) => (
+            <span key={a.id} className="flex items-center gap-1.5">
+              <span
+                className="w-2 h-2 rounded-sm"
+                style={{ backgroundColor: a.color ?? "#2FE8B6", opacity: hiddenAccounts.has(a.id) ? 0.3 : 1 }}
+              />
+              {a.email.split("@")[0]}
+            </span>
+          ))}
           {draggedTask ? (
             <span className="ml-auto text-emerald-400">
               Drop &ldquo;{draggedTask.title}&rdquo; onto a time slot
