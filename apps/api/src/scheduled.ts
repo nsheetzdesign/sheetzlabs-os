@@ -66,6 +66,15 @@ export default {
       const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
       ctx.waitUntil(fetch(`${apiUrl}/analytics/snapshot`, { method: "POST" }));
     }
+
+    // Unsnooze emails every minute
+    ctx.waitUntil(Promise.resolve(supabase.rpc("unsnooze_emails")));
+
+    // Auto-sync all email accounts every 5 minutes
+    if (now.getUTCMinutes() % 5 === 0) {
+      const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
+      ctx.waitUntil(fetch(`${apiUrl}/email/sync`, { method: "POST" }));
+    }
   },
 };
 

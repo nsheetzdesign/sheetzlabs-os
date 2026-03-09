@@ -82,18 +82,26 @@ email.get("/auth/gmail/callback", async (c) => {
   const user = (await userResponse.json()) as { email: string };
 
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  await supabase.from("email_accounts").upsert(
-    {
-      email: user.email,
-      provider: "gmail",
-      access_token: tokens.access_token as string,
-      refresh_token: tokens.refresh_token as string,
-      token_expires_at: new Date(
-        Date.now() + (tokens.expires_in as number) * 1000
-      ).toISOString(),
-    },
-    { onConflict: "email" }
-  );
+  const { data: newAccount } = await supabase
+    .from("email_accounts")
+    .upsert(
+      {
+        email: user.email,
+        provider: "gmail",
+        access_token: tokens.access_token as string,
+        refresh_token: tokens.refresh_token as string,
+        token_expires_at: new Date(
+          Date.now() + (tokens.expires_in as number) * 1000
+        ).toISOString(),
+      },
+      { onConflict: "email" }
+    )
+    .select("id")
+    .single();
+
+  if (newAccount?.id) {
+    await supabase.rpc("seed_email_labels_for_account", { p_account_id: newAccount.id });
+  }
 
   return c.redirect("https://sheetzlabs.com/dashboard/inbox?connected=true");
 });
@@ -460,6 +468,350 @@ email.post("/draft-with-ai", async (c) => {
   return c.json({ message: "Drafting email", run_id: run.id });
 });
 
+// ============================================
+// LABELS CRUD
+// ============================================
+email.get("/labels", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const account_id = c.req.query("account_id");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let query: any = supabase.from("email_labels").select("*").order("sort_order");
+  if (account_id) query = query.eq("account_id", account_id);
+
+  const { data } = await query;
+  return c.json({ labels: data ?? [] });
+});
+
+email.post("/labels", async (c) => {
+  const body = await c.req.json<{ account_id: string; name: string; color?: string; sort_order?: number }>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data } = await supabase
+    .from("email_labels")
+    .insert({ account_id: body.account_id, name: body.name, color: body.color ?? "#2FE8B6", type: "user", sort_order: body.sort_order ?? 100 })
+    .select()
+    .single();
+
+  return c.json({ label: data });
+});
+
+email.patch("/labels/:id", async (c) => {
+  const { id } = c.req.param();
+  const body = await c.req.json<Record<string, unknown>>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: existing } = await supabase.from("email_labels").select("type").eq("id", id).single();
+  if (existing?.type === "system" && body.name) {
+    return c.json({ error: "Cannot rename system labels" }, 400);
+  }
+
+  const { data } = await supabase.from("email_labels").update(body).eq("id", id).select().single();
+  return c.json({ label: data });
+});
+
+email.delete("/labels/:id", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: existing } = await supabase.from("email_labels").select("type").eq("id", id).single();
+  if (existing?.type === "system") {
+    return c.json({ error: "Cannot delete system labels" }, 400);
+  }
+
+  await supabase.from("email_labels").delete().eq("id", id);
+  return c.json({ success: true });
+});
+
+// ============================================
+// LABEL ASSIGNMENTS
+// ============================================
+email.post("/:id/labels/:labelId", async (c) => {
+  const { id, labelId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data } = await supabase
+    .from("email_label_assignments")
+    .upsert({ email_id: id, label_id: labelId })
+    .select()
+    .single();
+
+  return c.json({ assignment: data });
+});
+
+email.delete("/:id/labels/:labelId", async (c) => {
+  const { id, labelId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  await supabase
+    .from("email_label_assignments")
+    .delete()
+    .eq("email_id", id)
+    .eq("label_id", labelId);
+
+  return c.json({ success: true });
+});
+
+// ============================================
+// BULK ACTIONS
+// ============================================
+email.post("/bulk", async (c) => {
+  const { action, email_ids, label_id } = await c.req.json<{ action: string; email_ids: string[]; label_id?: string }>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  if (!email_ids?.length) return c.json({ error: "No emails specified" }, 400);
+
+  let affected = 0;
+
+  switch (action) {
+    case "archive":
+      { const { count } = await supabase.from("emails").update({ is_archived: true, folder: "ARCHIVE" }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "unarchive":
+      { const { count } = await supabase.from("emails").update({ is_archived: false, folder: "INBOX" }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "trash":
+      { const { count } = await supabase.from("emails").update({ is_trashed: true, folder: "TRASH" }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "untrash":
+      { const { count } = await supabase.from("emails").update({ is_trashed: false, folder: "INBOX" }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "delete":
+      { const { count } = await supabase.from("emails").delete().in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "spam":
+      { const { count } = await supabase.from("emails").update({ is_spam: true, folder: "SPAM" }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "not_spam":
+      { const { count } = await supabase.from("emails").update({ is_spam: false, folder: "INBOX" }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "read":
+      { const { count } = await supabase.from("emails").update({ is_read: true }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "unread":
+      { const { count } = await supabase.from("emails").update({ is_read: false }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "star":
+      { const { count } = await supabase.from("emails").update({ is_starred: true }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "unstar":
+      { const { count } = await supabase.from("emails").update({ is_starred: false }).in("id", email_ids);
+      affected = count ?? 0; break; }
+    case "add_label":
+      if (!label_id) return c.json({ error: "label_id required" }, 400);
+      for (const email_id of email_ids) {
+        await supabase.from("email_label_assignments").upsert({ email_id, label_id });
+      }
+      affected = email_ids.length;
+      break;
+    case "remove_label":
+      if (!label_id) return c.json({ error: "label_id required" }, 400);
+      { const { count } = await supabase.from("email_label_assignments").delete().in("email_id", email_ids).eq("label_id", label_id);
+      affected = count ?? 0; break; }
+    default:
+      return c.json({ error: "Unknown action" }, 400);
+  }
+
+  return c.json({ success: true, affected });
+});
+
+// ============================================
+// SNOOZE
+// ============================================
+email.post("/:id/snooze", async (c) => {
+  const { id } = c.req.param();
+  const { until } = await c.req.json<{ until: string }>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data } = await supabase
+    .from("emails")
+    .update({ snoozed_until: until, folder: "SNOOZED" })
+    .eq("id", id)
+    .select()
+    .single();
+
+  return c.json({ email: data });
+});
+
+email.delete("/:id/snooze", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data } = await supabase
+    .from("emails")
+    .update({ snoozed_until: null, folder: "INBOX" })
+    .eq("id", id)
+    .select()
+    .single();
+
+  return c.json({ email: data });
+});
+
+// ============================================
+// THREAD VIEW
+// ============================================
+email.get("/thread/:threadId", async (c) => {
+  const { threadId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data } = await supabase
+    .from("emails")
+    .select("*, email_label_assignments(label_id, email_labels(*))")
+    .eq("thread_id", threadId)
+    .order("received_at", { ascending: true });
+
+  return c.json({ thread: data ?? [] });
+});
+
+// ============================================
+// SEARCH
+// ============================================
+email.get("/search", async (c) => {
+  const q = c.req.query("q") ?? "";
+  const account_id = c.req.query("account_id");
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const filters: Record<string, string> = {};
+  let textQuery = q;
+
+  const operators = ["from:", "to:", "subject:", "has:", "is:", "in:", "label:", "after:", "before:"];
+  for (const op of operators) {
+    const regex = new RegExp(`${op}(\\S+)`, "gi");
+    let match;
+    while ((match = regex.exec(q)) !== null) {
+      filters[op.replace(":", "")] = match[1];
+      textQuery = textQuery.replace(match[0], "").trim();
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let query: any = supabase
+    .from("emails")
+    .select("*, email_label_assignments(label_id, email_labels(*))")
+    .eq("is_trashed", false)
+    .order("received_at", { ascending: false })
+    .limit(50);
+
+  if (account_id) query = query.eq("account_id", account_id);
+  if (filters.from) query = query.ilike("from_email", `%${filters.from}%`);
+  if (filters.to) query = query.ilike("to_emails", `%${filters.to}%`);
+  if (filters.subject) query = query.ilike("subject", `%${filters.subject}%`);
+  if (filters.has === "attachment") query = query.eq("has_attachments", true);
+  if (filters.is === "unread") query = query.eq("is_read", false);
+  if (filters.is === "read") query = query.eq("is_read", true);
+  if (filters.is === "starred") query = query.eq("is_starred", true);
+  if (filters.in === "inbox") query = query.eq("folder", "INBOX").eq("is_archived", false);
+  if (filters.in === "sent") query = query.eq("folder", "SENT");
+  if (filters.in === "trash") query = query.eq("is_trashed", true);
+  if (filters.in === "spam") query = query.eq("is_spam", true);
+  if (filters.after) query = query.gte("received_at", filters.after);
+  if (filters.before) query = query.lte("received_at", filters.before);
+  if (textQuery) {
+    query = query.or(`subject.ilike.%${textQuery}%,body_text.ilike.%${textQuery}%,from_name.ilike.%${textQuery}%`);
+  }
+
+  const { data } = await query;
+  return c.json({ emails: data ?? [], query: q, filters });
+});
+
+// ============================================
+// SYNC (Background + Manual)
+// ============================================
+email.post("/sync", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const account_id = c.req.query("account_id");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let query: any = supabase.from("email_accounts").select("*").eq("sync_enabled", true);
+  if (account_id) query = query.eq("id", account_id);
+
+  const { data: accounts } = await query;
+  const results = [];
+
+  for (const account of accounts ?? []) {
+    try {
+      await supabase
+        .from("email_accounts")
+        .update({ sync_status: "syncing", sync_error: null })
+        .eq("id", account.id);
+
+      const accessToken = await getValidAccessToken(account, c.env, supabase);
+
+      let newMessages = 0;
+      if (account.last_history_id && account.full_sync_completed) {
+        newMessages = await syncViaHistory(account, accessToken, supabase);
+      } else {
+        newMessages = await fullSync(account, accessToken, supabase);
+      }
+
+      await supabase
+        .from("email_accounts")
+        .update({ sync_status: "idle", last_sync_at: new Date().toISOString(), full_sync_completed: true })
+        .eq("id", account.id);
+
+      results.push({ account_id: account.id, email: account.email, new_messages: newMessages });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      await supabase
+        .from("email_accounts")
+        .update({ sync_status: "error", sync_error: msg })
+        .eq("id", account.id);
+      results.push({ account_id: account.id, email: account.email, error: msg });
+    }
+  }
+
+  return c.json({ synced: results });
+});
+
+// ============================================
+// UNREAD COUNTS (for sidebar badges)
+// ============================================
+email.get("/counts", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const account_id = c.req.query("account_id");
+
+  const counts: Record<string, number> = {};
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const withAccount = (q: any) => (account_id ? q.eq("account_id", account_id) : q);
+
+  const { count: inboxCount } = await withAccount(
+    supabase.from("emails").select("id", { count: "exact", head: true })
+      .eq("folder", "INBOX").eq("is_archived", false).eq("is_trashed", false).eq("is_read", false)
+  );
+  counts.inbox = inboxCount ?? 0;
+
+  const { count: starredCount } = await withAccount(
+    supabase.from("emails").select("id", { count: "exact", head: true })
+      .eq("is_starred", true).eq("is_trashed", false)
+  );
+  counts.starred = starredCount ?? 0;
+
+  const { count: snoozedCount } = await withAccount(
+    supabase.from("emails").select("id", { count: "exact", head: true })
+      .not("snoozed_until", "is", null)
+  );
+  counts.snoozed = snoozedCount ?? 0;
+
+  const { count: draftsCount } = await withAccount(
+    supabase.from("email_drafts").select("id", { count: "exact", head: true }).eq("status", "draft")
+  );
+  counts.drafts = draftsCount ?? 0;
+
+  const { count: spamCount } = await withAccount(
+    supabase.from("emails").select("id", { count: "exact", head: true })
+      .eq("is_spam", true).eq("is_trashed", false)
+  );
+  counts.spam = spamCount ?? 0;
+
+  const { count: trashCount } = await withAccount(
+    supabase.from("emails").select("id", { count: "exact", head: true }).eq("is_trashed", true)
+  );
+  counts.trash = trashCount ?? 0;
+
+  return c.json({ counts });
+});
+
 export default email;
 
 // ============================================
@@ -602,4 +954,139 @@ async function findRelationship(emailAddr: string, supabase: any): Promise<strin
     .eq("email", emailAddr.toLowerCase())
     .single();
   return (data as { id: string } | null)?.id ?? null;
+}
+
+// ============================================
+// HELPER: Full Sync (first-time or reset)
+// ============================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fullSync(account: any, accessToken: string, supabase: any): Promise<number> {
+  const listResponse = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const { messages } = (await listResponse.json()) as { messages?: Array<{ id: string }> };
+  if (!messages?.length) return 0;
+
+  let newCount = 0;
+  for (const msg of messages) {
+    const { data: existing } = await supabase.from("emails").select("id").eq("external_id", msg.id).single();
+    if (existing) continue;
+
+    const msgResponse = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const fullMsg = await msgResponse.json();
+    const emailRow = parseGmailMessageFull(fullMsg, account.id);
+    const { error } = await supabase.from("emails").insert(emailRow);
+    if (!error) newCount++;
+  }
+
+  // Store historyId for incremental syncs
+  const latestRes = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messages[0].id}?format=metadata`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const { historyId } = (await latestRes.json()) as { historyId?: string };
+  if (historyId) {
+    await supabase.from("email_accounts").update({ last_history_id: historyId }).eq("id", account.id);
+  }
+
+  return newCount;
+}
+
+// ============================================
+// HELPER: Incremental Sync via History API
+// ============================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function syncViaHistory(account: any, accessToken: string, supabase: any): Promise<number> {
+  const historyResponse = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${account.last_history_id}&historyTypes=messageAdded`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const { history, historyId } = (await historyResponse.json()) as {
+    history?: Array<{ messagesAdded?: Array<{ message: { id: string } }> }>;
+    historyId?: string;
+  };
+
+  if (!history?.length) {
+    if (historyId) {
+      await supabase.from("email_accounts").update({ last_history_id: historyId }).eq("id", account.id);
+    }
+    return 0;
+  }
+
+  let newCount = 0;
+  for (const h of history) {
+    for (const added of h.messagesAdded ?? []) {
+      const { data: existing } = await supabase.from("emails").select("id").eq("external_id", added.message.id).single();
+      if (existing) continue;
+
+      const msgResponse = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${added.message.id}?format=full`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const fullMsg = await msgResponse.json();
+      const emailRow = parseGmailMessageFull(fullMsg, account.id);
+      const { error } = await supabase.from("emails").insert(emailRow);
+      if (!error) newCount++;
+    }
+  }
+
+  if (historyId) {
+    await supabase.from("email_accounts").update({ last_history_id: historyId }).eq("id", account.id);
+  }
+  return newCount;
+}
+
+// ============================================
+// HELPER: Parse Gmail Message (for new sync)
+// ============================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseGmailMessageFull(msg: any, accountId: string): Record<string, unknown> {
+  const headers: Array<{ name: string; value: string }> = msg.payload?.headers ?? [];
+  const getHeader = (name: string) =>
+    headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
+
+  const bodyText = extractBody(msg.payload, "text/plain");
+  const bodyHtml = extractBody(msg.payload, "text/html");
+
+  const attachmentParts = (msg.payload?.parts ?? []).filter(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (p: any) => p.filename && p.filename.length > 0
+  );
+
+  const labels: string[] = msg.labelIds ?? [];
+  let folder = "INBOX";
+  if (labels.includes("SENT")) folder = "SENT";
+  if (labels.includes("TRASH")) folder = "TRASH";
+  if (labels.includes("SPAM")) folder = "SPAM";
+  if (labels.includes("DRAFT")) folder = "DRAFTS";
+
+  const fromHeader = getHeader("from");
+  const fromMatch = fromHeader.match(/^(?:"?([^"]*)"?\s*)?<?([^>]+)>?$/);
+
+  return {
+    account_id: accountId,
+    external_id: msg.id,
+    thread_id: msg.threadId,
+    subject: getHeader("subject"),
+    from_email: fromMatch?.[2] ?? fromHeader,
+    from_name: fromMatch?.[1]?.replace(/"/g, "").trim() ?? "",
+    to_emails: getHeader("to").split(",").map((e: string) => e.trim().replace(/.*<|>/g, "")).filter(Boolean),
+    cc_emails: getHeader("cc").split(",").map((e: string) => e.trim().replace(/.*<|>/g, "")).filter(Boolean),
+    body_text: bodyText,
+    body_html: bodyHtml,
+    snippet: msg.snippet ?? "",
+    received_at: new Date(parseInt(msg.internalDate)).toISOString(),
+    folder,
+    is_read: !labels.includes("UNREAD"),
+    is_starred: labels.includes("STARRED"),
+    is_archived: !labels.includes("INBOX") && folder === "INBOX",
+    is_trashed: labels.includes("TRASH"),
+    is_spam: labels.includes("SPAM"),
+    has_attachments: attachmentParts.length > 0,
+    attachment_count: attachmentParts.length,
+  };
 }
