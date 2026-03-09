@@ -17,10 +17,12 @@ import {
   Calendar,
   PenSquare,
   BarChart3,
+  MessageSquare,
 } from "lucide-react";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Command Center", to: "/dashboard" },
+  { icon: MessageSquare, label: "Chat", to: "/dashboard/chat" },
   { icon: Inbox, label: "Inbox", to: "/dashboard/inbox" },
   { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
   { icon: Box, label: "Ventures", to: "/dashboard/ventures" },

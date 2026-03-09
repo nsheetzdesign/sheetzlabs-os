@@ -11,6 +11,7 @@ import calendarRouter from "./routes/calendar";
 import knowledgeRouter from "./routes/knowledge";
 import contentRouter from "./routes/content";
 import analyticsRouter from "./routes/analytics";
+import chatRouter from "./routes/chat";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -59,6 +60,7 @@ app.route("/calendar", calendarRouter);
 app.route("/knowledge", knowledgeRouter);
 app.route("/content", contentRouter);
 app.route("/analytics", analyticsRouter);
+app.route("/chat", chatRouter);
 
 export default {
   fetch: app.fetch,
