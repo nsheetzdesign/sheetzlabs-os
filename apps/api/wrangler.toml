@@ -29,3 +29,6 @@ crons = [
 # LINKEDIN_PERSON_ID
 # CLOUDFLARE_BILLING_TOKEN
 # SERPER_API_KEY  (or BRAVE_API_KEY) — web search for idea evaluator agent
+# GOOGLE_CLIENT_ID — Gmail OAuth
+# GOOGLE_CLIENT_SECRET — Gmail OAuth
+# API_URL — public API base URL (https://api.sheetzlabs.com)

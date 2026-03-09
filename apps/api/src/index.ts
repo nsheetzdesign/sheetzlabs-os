@@ -6,6 +6,7 @@ import stripeRouter from "./routes/stripe";
 import expensesRouter from "./routes/expenses";
 import ticketsRouter from "./routes/tickets";
 import mcpRouter from "./routes/mcp";
+import emailRouter from "./routes/email";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -24,6 +25,9 @@ type Bindings = {
   LINKEDIN_PERSON_ID: string;
   CLOUDFLARE_BILLING_TOKEN: string;
   CLOUDFLARE_ACCOUNT_ID: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  API_URL: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -44,6 +48,7 @@ app.route("/stripe", stripeRouter);
 app.route("/expenses", expensesRouter);
 app.route("/tickets", ticketsRouter);
 app.route("/mcp", mcpRouter);
+app.route("/email", emailRouter);
 
 export default {
   fetch: app.fetch,

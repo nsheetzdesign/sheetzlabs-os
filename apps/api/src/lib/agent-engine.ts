@@ -338,6 +338,15 @@ async function gatherContext(
         context.agent_runs = data;
         break;
       }
+      case "emails": {
+        const { data } = await supabase
+          .from("emails")
+          .select("id, subject, from_email, from_name, snippet, ai_category, received_at")
+          .order("received_at", { ascending: false })
+          .limit(20);
+        context.emails = data;
+        break;
+      }
     }
   }
 
@@ -447,6 +456,18 @@ async function executeActions(
       }
       case "sync_expenses": {
         await syncExpenses(String(payload.provider), env, supabase);
+        break;
+      }
+      case "create_draft": {
+        const { data: draft } = await supabase
+          .from("email_drafts")
+          .insert({
+            ...payload,
+            agent_run_id: runId,
+          })
+          .select()
+          .single();
+        targetId = draft?.id ?? null;
         break;
       }
     }
