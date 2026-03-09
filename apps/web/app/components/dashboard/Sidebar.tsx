@@ -80,7 +80,7 @@ export function Sidebar({ user, onOpenPalette }: SidebarProps) {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
+      <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
         {navItems.map(({ icon: Icon, label, to }) => (
           <NavLink
             key={to}

@@ -53,6 +53,11 @@ export default [
       route("new", "routes/dashboard.knowledge.new.tsx"),
       route(":slug", "routes/dashboard.knowledge.$slug.tsx"),
     ]),
+    route("content", "routes/dashboard.content.tsx", [
+      index("routes/dashboard.content._index.tsx"),
+      route("new", "routes/dashboard.content.new.tsx"),
+      route(":id", "routes/dashboard.content.$id.tsx"),
+    ]),
     route("agents", "routes/dashboard.agents.tsx", [
       index("routes/dashboard.agents._index.tsx"),
       route("runs", "routes/dashboard.agents.runs.tsx", [
