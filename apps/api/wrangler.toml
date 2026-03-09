@@ -28,3 +28,4 @@ crons = [
 # LINKEDIN_ACCESS_TOKEN
 # LINKEDIN_PERSON_ID
 # CLOUDFLARE_BILLING_TOKEN
+# SERPER_API_KEY  (or BRAVE_API_KEY) — web search for idea evaluator agent

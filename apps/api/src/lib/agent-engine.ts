@@ -24,7 +24,177 @@ type Env = {
   LINKEDIN_PERSON_ID?: string;
   CLOUDFLARE_BILLING_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
+  SERPER_API_KEY?: string;
+  BRAVE_API_KEY?: string;
 };
+
+// Agentic loop variant — supports tool use (web_search) before final output
+export async function executeAgentWithTools(
+  agent: Agent,
+  run: AgentRun,
+  userInput: Record<string, unknown>,
+  env: Env,
+  supabase: SupabaseClient
+) {
+  const startTime = Date.now();
+
+  try {
+    const context = await gatherContext(agent.input_sources, supabase, userInput);
+    const userPrompt = buildPrompt(agent.user_prompt_template, { ...context, ...userInput });
+
+    const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+
+    const tools: Anthropic.Tool[] = [];
+    if (agent.output_actions.includes('web_search')) {
+      tools.push({
+        name: 'web_search',
+        description: 'Search the web for information about competitors, market size, pricing, and trends',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            query: { type: 'string', description: 'Search query' },
+          },
+          required: ['query'],
+        },
+      });
+    }
+
+    let messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }];
+    let response!: Anthropic.Message;
+    const allWebResearch: Array<{ query: string; results: unknown }> = [];
+    let totalTokensInput = 0;
+    let totalTokensOutput = 0;
+
+    // Agentic loop — continue until no more tool calls
+    while (true) {
+      response = await anthropic.messages.create({
+        model: agent.model,
+        max_tokens: agent.max_tokens,
+        system: agent.system_prompt,
+        tools: tools.length > 0 ? tools : undefined,
+        messages,
+      });
+
+      totalTokensInput += response.usage.input_tokens;
+      totalTokensOutput += response.usage.output_tokens;
+
+      const toolUseBlocks = response.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
+      );
+
+      if (toolUseBlocks.length === 0 || response.stop_reason === 'end_turn') {
+        break;
+      }
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const toolUse of toolUseBlocks) {
+        if (toolUse.name === 'web_search') {
+          const { query } = toolUse.input as { query: string };
+          const results = await performWebSearch(query, env);
+          allWebResearch.push({ query, results });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(results),
+          });
+        }
+      }
+
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'user', content: toolResults });
+    }
+
+    const output = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+
+    const costCents = (totalTokensInput * 3 + totalTokensOutput * 15) / 10000;
+
+    const actions = await executeActions(
+      agent.output_actions,
+      output,
+      supabase,
+      run.id,
+      env,
+      userInput,
+      { web_research: allWebResearch }
+    );
+
+    await supabase
+      .from('agent_runs')
+      .update({
+        status: 'completed',
+        output_data: { output, actions, web_research: allWebResearch },
+        input_context: context,
+        tokens_input: totalTokensInput,
+        tokens_output: totalTokensOutput,
+        cost_cents: costCents,
+        duration_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', run.id);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    await supabase
+      .from('agent_runs')
+      .update({
+        status: 'failed',
+        error_message: msg,
+        duration_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', run.id);
+  }
+}
+
+async function performWebSearch(query: string, env: Env): Promise<unknown> {
+  if (env.SERPER_API_KEY) {
+    const response = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': env.SERPER_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ q: query, num: 10 }),
+    });
+    const data = await response.json() as Record<string, unknown>;
+    return {
+      query,
+      results: ((data.organic as Array<Record<string, unknown>>) ?? []).map((r) => ({
+        title: r.title,
+        url: r.link,
+        snippet: r.snippet,
+      })),
+      answerBox: data.answerBox,
+      knowledgeGraph: data.knowledgeGraph,
+    };
+  }
+
+  if (env.BRAVE_API_KEY) {
+    const response = await fetch(
+      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=10`,
+      {
+        headers: {
+          'X-Subscription-Token': env.BRAVE_API_KEY,
+          Accept: 'application/json',
+        },
+      }
+    );
+    const data = await response.json() as Record<string, unknown>;
+    const web = data.web as { results?: Array<Record<string, unknown>> } | undefined;
+    return {
+      query,
+      results: (web?.results ?? []).map((r) => ({
+        title: r.title,
+        url: r.url,
+        snippet: r.description,
+      })),
+    };
+  }
+
+  return { query, results: [], error: 'No search API configured' };
+}
 
 export async function executeAgent(
   agent: Agent,
@@ -56,7 +226,7 @@ export async function executeAgent(
     // Claude Sonnet 4 pricing: $3/M input, $15/M output
     const costCents = (tokensInput * 3 + tokensOutput * 15) / 10000;
 
-    const actions = await executeActions(agent.output_actions, output, supabase, run.id, env);
+    const actions = await executeActions(agent.output_actions, output, supabase, run.id, env, userInput);
 
     await supabase
       .from("agent_runs")
@@ -181,7 +351,9 @@ async function executeActions(
   output: string,
   supabase: SupabaseClient,
   runId: string,
-  env: Env
+  env: Env,
+  userInput: Record<string, unknown> = {},
+  extraData: Record<string, unknown> = {}
 ): Promise<unknown[]> {
   const actions: unknown[] = [];
   const actionMatches = output.matchAll(/```action:(\w+)\n([\s\S]*?)```/g);
@@ -203,6 +375,28 @@ async function executeActions(
     let externalId: string | null = null;
 
     switch (actionType) {
+      case "create_evaluation": {
+        const evaluationPayload = {
+          ...payload,
+          pipeline_id: userInput.pipeline_id ?? null,
+          agent_run_id: runId,
+          web_research: extraData?.web_research ?? null,
+        };
+        const { data: evaluation } = await supabase
+          .from('pipeline_evaluations')
+          .insert(evaluationPayload)
+          .select()
+          .single();
+        targetId = evaluation?.id ?? null;
+        // Update pipeline with latest evaluation
+        if (evaluation && userInput.pipeline_id) {
+          await supabase
+            .from('pipeline')
+            .update({ last_evaluation_id: evaluation.id })
+            .eq('id', userInput.pipeline_id);
+        }
+        break;
+      }
       case "create_task": {
         const { data } = await supabase.from("tasks").insert(payload).select().single();
         targetId = data?.id ?? null;

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import agents from "./routes/agents";
+import pipelineRouter from "./routes/pipeline";
 import stripeRouter from "./routes/stripe";
 import expensesRouter from "./routes/expenses";
 import ticketsRouter from "./routes/tickets";
@@ -17,6 +18,8 @@ type Bindings = {
   STRIPE_COLAB_WEBHOOK_SECRET: string;
   N8N_API_KEY: string;
   ANTHROPIC_API_KEY: string;
+  SERPER_API_KEY: string;
+  BRAVE_API_KEY: string;
   LINKEDIN_ACCESS_TOKEN: string;
   LINKEDIN_PERSON_ID: string;
   CLOUDFLARE_BILLING_TOKEN: string;
@@ -36,6 +39,7 @@ app.get("/health", (c) => {
 });
 
 app.route("/agents", agents);
+app.route("/pipeline", pipelineRouter);
 app.route("/stripe", stripeRouter);
 app.route("/expenses", expensesRouter);
 app.route("/tickets", ticketsRouter);

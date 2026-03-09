@@ -2,11 +2,13 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import {
   useLoaderData,
   useActionData,
+  useFetcher,
   Form,
   Link,
   redirect,
   data,
 } from "react-router";
+import { Sparkles } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { FormField } from "~/components/ui/FormField";
@@ -46,9 +48,16 @@ const SCORES = [
 export async function loader({ params, context }: LoaderFunctionArgs) {
   const supabase = getSupabaseClient(context.cloudflare.env);
 
-  const [itemRes, venturesRes] = await Promise.all([
+  const [itemRes, venturesRes, evalRes] = await Promise.all([
     supabase.from("pipeline").select("*").eq("id", params.id!).single(),
     supabase.from("ventures").select("id, name, slug").order("name"),
+    supabase
+      .from("pipeline_evaluations")
+      .select("id, total_score, recommendation, created_at")
+      .eq("pipeline_id", params.id!)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   if (!itemRes.data) throw new Response("Not found", { status: 404 });
@@ -177,6 +186,7 @@ Begin by creating the full monorepo structure described above.`;
     item,
     ventures: venturesRes.data ?? [],
     scaffoldPrompt,
+    latestEvaluation: evalRes.data ?? null,
   };
 }
 
@@ -184,6 +194,12 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
+
+  // Trigger AI evaluation
+  if (intent === "evaluate") {
+    await fetch(`https://api.sheetzlabs.com/pipeline/${params.id}/evaluate`, { method: "POST" });
+    return redirect(`/dashboard/pipeline/${params.id}/evaluation`);
+  }
 
   // Advance stage
   if (intent === "advance") {
@@ -304,10 +320,20 @@ function ScoreBar({ value, max }: { value: number; max: number }) {
   );
 }
 
+const REC_STYLE: Record<string, string> = {
+  strong_yes: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
+  yes: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+  maybe: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+  no: "bg-red-500/10 text-red-400 border-red-500/20",
+  strong_no: "bg-red-500/20 text-red-300 border-red-500/30",
+};
+
 export default function EditPipeline() {
-  const { item, ventures, scaffoldPrompt } = useLoaderData<typeof loader>();
+  const { item, ventures, scaffoldPrompt, latestEvaluation } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+  const fetcher = useFetcher();
   const errors = actionData?.errors ?? {};
+  const isEvaluating = fetcher.state !== "idle";
 
   const currentStage = item.stage ?? "idea";
   const nextStage = NEXT_STAGE[currentStage];
@@ -349,6 +375,61 @@ export default function EditPipeline() {
             <div className="text-right">
               <p className="text-xs font-medium uppercase tracking-wide text-zinc-600">Stage</p>
               <p className="mt-1 text-sm font-semibold capitalize text-zinc-300">{currentStage}</p>
+            </div>
+          </div>
+
+          {/* AI Evaluation panel */}
+          <div className="flex items-center justify-between rounded-xl border border-surface-2/50 bg-surface-1/40 px-5 py-4 backdrop-blur-sm">
+            <div className="flex items-center gap-3">
+              <Sparkles className="h-4 w-4 text-brand" />
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  AI Evaluation
+                </p>
+                {latestEvaluation ? (
+                  <div className="mt-0.5 flex items-center gap-2">
+                    <span className={`font-mono text-lg font-bold ${Number(latestEvaluation.total_score) >= 7 ? "text-emerald-400" : Number(latestEvaluation.total_score) >= 5 ? "text-amber-400" : "text-red-400"}`}>
+                      {Number(latestEvaluation.total_score).toFixed(1)}
+                    </span>
+                    {latestEvaluation.recommendation && (
+                      <span className={`rounded border px-2 py-0.5 text-xs font-semibold ${REC_STYLE[latestEvaluation.recommendation] ?? "border-zinc-700 text-zinc-400"}`}>
+                        {latestEvaluation.recommendation.replace(/_/g, " ").toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-0.5 text-xs text-zinc-600">Not evaluated yet</p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {latestEvaluation && (
+                <Link
+                  to="evaluation"
+                  className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs hover:border-zinc-500"
+                >
+                  View Details
+                </Link>
+              )}
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="evaluate" />
+                <button
+                  type="submit"
+                  disabled={isEvaluating}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+                >
+                  {isEvaluating ? (
+                    "Evaluating…"
+                  ) : latestEvaluation ? (
+                    "Re-evaluate"
+                  ) : (
+                    <>
+                      <Sparkles className="h-3 w-3" />
+                      Evaluate
+                    </>
+                  )}
+                </button>
+              </fetcher.Form>
             </div>
           </div>
 
