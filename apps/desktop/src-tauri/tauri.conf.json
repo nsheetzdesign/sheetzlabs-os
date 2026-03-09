@@ -27,8 +27,7 @@
     "security": {
       "csp": null,
       "capabilities": ["remote-access"]
-    },
-    "macOSPrivateApi": true
+    }
   },
   "bundle": {
     "active": true,
@@ -55,9 +54,6 @@
     }
   },
   "plugins": {
-    "notification": {
-      "all": true
-    },
     "shell": {
       "open": true
     },

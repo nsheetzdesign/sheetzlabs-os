@@ -48,9 +48,13 @@ fn main() {
                 &sep3, &quit,
             ])?;
 
-            // Build tray icon
+            // Build tray icon (embed PNG at compile time to avoid missing-resource panic)
+            let tray_icon = tauri::image::Image::from_bytes(
+                include_bytes!("../icons/tray.png")
+            ).map_err(|e| format!("failed to load tray icon: {e}"))?;
+
             TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
@@ -78,7 +82,7 @@ fn main() {
         .on_window_event(|window, event| {
             // Hide to tray instead of closing
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
+                let _ = window.hide();
                 api.prevent_close();
             }
         })
