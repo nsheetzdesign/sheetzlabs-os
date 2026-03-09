@@ -62,7 +62,7 @@ export async function executeAgent(
       .from("agent_runs")
       .update({
         status: "completed",
-        result: { output, actions },
+        output_data: { output, actions },
         input_context: context,
         tokens_input: tokensInput,
         tokens_output: tokensOutput,
@@ -77,7 +77,7 @@ export async function executeAgent(
       .from("agent_runs")
       .update({
         status: "failed",
-        result: { error: msg },
+        error_message: msg,
         duration_ms: Date.now() - startTime,
         completed_at: new Date().toISOString(),
       })
