@@ -16,6 +16,7 @@ import {
   Inbox,
   Calendar,
   PenSquare,
+  BarChart3,
 } from "lucide-react";
 
 const navItems = [
@@ -32,6 +33,7 @@ const navItems = [
   { icon: BookOpen, label: "Knowledge", to: "/dashboard/knowledge" },
   { icon: PenSquare, label: "Content", to: "/dashboard/content" },
   { icon: Brain, label: "AI Agents", to: "/dashboard/agents" },
+  { icon: BarChart3, label: "Analytics", to: "/dashboard/analytics" },
   { icon: Settings2, label: "Settings", to: "/dashboard/settings/stripe" },
 ];
 

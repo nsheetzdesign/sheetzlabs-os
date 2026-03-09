@@ -60,6 +60,12 @@ export default {
     if (now.getUTCHours() === 6 && now.getUTCMinutes() === 0) {
       ctx.waitUntil(fetchAllFeeds(env, supabase));
     }
+
+    // Generate daily analytics snapshot at midnight UTC
+    if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
+      const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
+      ctx.waitUntil(fetch(`${apiUrl}/analytics/snapshot`, { method: "POST" }));
+    }
   },
 };
 

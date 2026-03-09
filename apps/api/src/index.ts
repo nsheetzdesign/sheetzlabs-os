@@ -10,6 +10,7 @@ import emailRouter from "./routes/email";
 import calendarRouter from "./routes/calendar";
 import knowledgeRouter from "./routes/knowledge";
 import contentRouter from "./routes/content";
+import analyticsRouter from "./routes/analytics";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -57,6 +58,7 @@ app.route("/email", emailRouter);
 app.route("/calendar", calendarRouter);
 app.route("/knowledge", knowledgeRouter);
 app.route("/content", contentRouter);
+app.route("/analytics", analyticsRouter);
 
 export default {
   fetch: app.fetch,
