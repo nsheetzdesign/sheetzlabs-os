@@ -1,0 +1,14 @@
+{
+  "name": "sheetzlabs-desktop",
+  "version": "1.0.0",
+  "description": "Sheetz Labs OS Desktop App",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:universal": "tauri build --target universal-apple-darwin",
+    "build:dmg": "tauri build --target universal-apple-darwin --bundles dmg"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

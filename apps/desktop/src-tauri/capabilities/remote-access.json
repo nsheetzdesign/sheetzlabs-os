@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-access",
+  "description": "Capabilities for remote URL (app.sheetzlabs.com)",
+  "remote": {
+    "urls": ["https://app.sheetzlabs.com/*"]
+  },
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "shell:default"
+  ]
+}

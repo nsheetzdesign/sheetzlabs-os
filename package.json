@@ -6,7 +6,9 @@
     "dev:api": "cd apps/api && pnpm dev",
     "build:all": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "desktop:dev": "pnpm --filter sheetzlabs-desktop dev",
+    "desktop:build": "pnpm --filter sheetzlabs-desktop build:universal"
   },
   "devDependencies": {
     "turbo": "latest"

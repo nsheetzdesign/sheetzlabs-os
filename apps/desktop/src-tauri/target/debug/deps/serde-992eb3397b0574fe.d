@@ -1,0 +1,14 @@
+/Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/deps/serde-992eb3397b0574fe.d: /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/build/serde-794fa95e817143be/out/private.rs
+
+/Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/deps/libserde-992eb3397b0574fe.rlib: /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/build/serde-794fa95e817143be/out/private.rs
+
+/Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/deps/libserde-992eb3397b0574fe.rmeta: /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/build/serde-794fa95e817143be/out/private.rs
+
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/build/serde-794fa95e817143be/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/nick/Documents/Development/sheetz-labs/apps/desktop/src-tauri/target/debug/build/serde-794fa95e817143be/out
