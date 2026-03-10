@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useFetcher } from 'react-router';
 import {
   Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail,
-  ChevronDown, ChevronRight, Plus, Tag,
+  ChevronDown, ChevronRight, Plus, Tag, RefreshCw, Check, AlertCircle,
 } from 'lucide-react';
 
 interface Label {
@@ -275,6 +275,58 @@ export function InboxSidebar({
           </a>
         )}
       </div>
+
+      {/* Sync button */}
+      <SyncButton />
+    </div>
+  );
+}
+
+function SyncButton() {
+  const syncFetcher = useFetcher();
+  const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const isLoading = syncFetcher.state !== 'idle';
+
+  useEffect(() => {
+    if (syncFetcher.state === 'idle' && syncFetcher.data != null) {
+      const hasFailure = (syncFetcher.data as any).results?.some((r: any) => !r.success);
+      setStatus(hasFailure ? 'error' : 'success');
+      const timer = setTimeout(() => setStatus('idle'), hasFailure ? 3000 : 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [syncFetcher.data, syncFetcher.state]);
+
+  return (
+    <div className="p-3 border-t border-zinc-800">
+      <syncFetcher.Form method="post" action="/dashboard/inbox/sync">
+        <button
+          type="submit"
+          disabled={isLoading}
+          className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
+        >
+          {isLoading ? (
+            <>
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>Syncing...</span>
+            </>
+          ) : status === 'success' ? (
+            <>
+              <Check className="w-4 h-4 text-emerald-500" />
+              <span className="text-emerald-500">Synced</span>
+            </>
+          ) : status === 'error' ? (
+            <>
+              <AlertCircle className="w-4 h-4 text-red-500" />
+              <span className="text-red-500">Sync failed</span>
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-4 h-4" />
+              <span>Sync All Inboxes</span>
+            </>
+          )}
+        </button>
+      </syncFetcher.Form>
     </div>
   );
 }
