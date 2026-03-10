@@ -10,29 +10,20 @@ import { ThreadView } from '~/components/inbox/ThreadView';
 
 export const meta: MetaFunction = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 
-const SYSTEM_LABELS = [
-  { id: 'sys-inbox', name: 'Inbox', icon: 'Inbox', color: '#71717a', type: 'system' as const },
-  { id: 'sys-starred', name: 'Starred', icon: 'Star', color: '#71717a', type: 'system' as const },
-  { id: 'sys-snoozed', name: 'Snoozed', icon: 'Clock', color: '#71717a', type: 'system' as const },
-  { id: 'sys-sent', name: 'Sent', icon: 'Send', color: '#71717a', type: 'system' as const },
-  { id: 'sys-drafts', name: 'Drafts', icon: 'File', color: '#71717a', type: 'system' as const },
-  { id: 'sys-spam', name: 'Spam', icon: 'AlertTriangle', color: '#71717a', type: 'system' as const },
-  { id: 'sys-trash', name: 'Trash', icon: 'Trash2', color: '#71717a', type: 'system' as const },
-];
-
 export async function loader({ request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env;
   const supabase = getSupabaseClient(env);
   const url = new URL(request.url);
   const folder = url.searchParams.get('folder') || 'inbox';
-  const account_id = url.searchParams.get('account');
+  const account_id = url.searchParams.get('account') || null;
   const label_id = url.searchParams.get('label');
   const search = url.searchParams.get('q');
 
   // Build emails query
-  let query = supabase
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let query: any = supabase
     .from('emails')
-    .select('id, subject, snippet, from_email, from_name, is_read, is_starred, received_at, thread_id')
+    .select('id, subject, snippet, from_email, from_name, is_read, is_starred, received_at, thread_id, account_id')
     .order('received_at', { ascending: false })
     .limit(50);
 
@@ -49,9 +40,15 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       query = query.eq('is_spam', true);
     } else if (folder === 'trash') {
       query = query.eq('is_trashed', true);
+    } else if (folder === 'snoozed') {
+      query = query.not('snoozed_until', 'is', null);
+    } else if (folder === 'drafts') {
+      // Drafts come from email_drafts table — handled separately
+      query = query.eq('folder', 'DRAFTS');
     }
   }
 
+  // Only filter by account if a specific one is selected
   if (account_id) {
     query = query.eq('account_id', account_id);
   }
@@ -61,22 +58,63 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     supabase.from('email_accounts').select('id, email').order('email'),
   ]);
 
-  // Build counts from current emails (simplified — unread in inbox)
-  const allEmails = emails ?? [];
-  const unreadInbox = allEmails.filter(e => !e.is_read).length;
+  const accountIds = (accounts ?? []).map(a => a.id);
 
-  // Build accounts with system labels
+  // Fetch labels for all accounts from DB
+  const { data: labelsData } = accountIds.length
+    ? await supabase
+        .from('email_labels')
+        .select('*')
+        .in('account_id', accountIds)
+        .order('sort_order')
+    : { data: [] };
+
+  // Group labels by account
+  const labelsByAccount = (labelsData ?? []).reduce<Record<string, typeof labelsData>>((acc, label) => {
+    if (!acc[label.account_id]) acc[label.account_id] = [];
+    acc[label.account_id]!.push(label);
+    return acc;
+  }, {});
+
+  // Build accounts with their real labels
   const accountsWithLabels = (accounts ?? []).map(account => ({
     id: account.id,
     email: account.email,
-    labels: SYSTEM_LABELS,
+    labels: labelsByAccount[account.id] ?? [],
   }));
 
-  // Build counts per account
+  // Global counts (across all accounts)
+  const [
+    { count: gInbox },
+    { count: gStarred },
+    { count: gSnoozed },
+    { count: gSpam },
+    { count: gTrash },
+    { count: gDrafts },
+  ] = await Promise.all([
+    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_read', false),
+    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_starred', true).eq('is_trashed', false),
+    supabase.from('emails').select('id', { count: 'exact', head: true }).not('snoozed_until', 'is', null),
+    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_spam', true).eq('is_trashed', false),
+    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_trashed', true),
+    supabase.from('email_drafts').select('id', { count: 'exact', head: true }).eq('status', 'draft'),
+  ]);
+
+  const globalCounts = {
+    inbox: gInbox ?? 0,
+    starred: gStarred ?? 0,
+    snoozed: gSnoozed ?? 0,
+    spam: gSpam ?? 0,
+    trash: gTrash ?? 0,
+    drafts: gDrafts ?? 0,
+  };
+
+  // Per-account counts (simple: just unread inbox for each)
   const counts: Record<string, { inbox: number; starred: number; snoozed: number; drafts: number; spam: number; trash: number }> = {};
   for (const account of accounts ?? []) {
+    const accountEmails = (emails ?? []).filter(e => e.account_id === account.id);
     counts[account.id] = {
-      inbox: unreadInbox,
+      inbox: accountEmails.filter(e => !e.is_read).length,
       starred: 0,
       snoozed: 0,
       drafts: 0,
@@ -86,13 +124,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   }
 
   return {
-    emails: allEmails.map(e => ({
+    emails: (emails ?? []).map(e => ({
       ...e,
       has_attachments: false,
       labels: [],
     })),
     accounts: accountsWithLabels,
     counts,
+    globalCounts,
     folder,
     accountId: account_id,
     labelId: label_id,
@@ -101,7 +140,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 }
 
 export default function Inbox() {
-  const { emails, accounts, counts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
+  const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const fetcher = useFetcher();
@@ -229,7 +268,6 @@ export default function Inbox() {
     setActiveEmail(email);
     markAsRead(email.id);
 
-    // If email has a thread_id, try to load thread
     if (email.thread_id) {
       try {
         const res = await fetch(`/api/email/thread/${email.thread_id}`);
@@ -275,7 +313,7 @@ export default function Inbox() {
     );
   };
 
-  const handleFolderSelect = (newFolder: string, newAccountId?: string) => {
+  const handleFolderSelect = (newFolder: string, newAccountId?: string | null) => {
     const params = new URLSearchParams();
     params.set('folder', newFolder);
     if (newAccountId) params.set('account', newAccountId);
@@ -338,7 +376,6 @@ export default function Inbox() {
   const closeCompose = () => {
     setShowCompose(false);
     setComposeProps(null);
-    // Clear URL params
     const params = new URLSearchParams(searchParams);
     params.delete('reply');
     params.delete('forward');
@@ -351,6 +388,7 @@ export default function Inbox() {
       <InboxSidebar
         accounts={accounts}
         counts={counts}
+        globalCounts={globalCounts}
         activeFolder={folder}
         activeAccountId={accountId}
         activeLabel={labelId}

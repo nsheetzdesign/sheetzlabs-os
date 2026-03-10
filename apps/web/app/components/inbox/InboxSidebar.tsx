@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useFetcher } from 'react-router';
 import {
   Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail,
-  ChevronDown, ChevronRight, Plus,
+  ChevronDown, ChevronRight, Plus, Tag,
 } from 'lucide-react';
 
 interface Label {
@@ -31,10 +31,11 @@ interface Counts {
 interface Props {
   accounts: Account[];
   counts: Record<string, Counts>;
+  globalCounts: Counts;
   activeFolder: string;
   activeAccountId: string | null;
   activeLabel: string | null;
-  onSelectFolder: (folder: string, accountId?: string) => void;
+  onSelectFolder: (folder: string, accountId?: string | null) => void;
   onSelectLabel: (labelId: string, accountId: string) => void;
   onDragOver: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
   onDrop: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
@@ -49,11 +50,13 @@ const systemIcons: Record<string, React.ComponentType<{ size?: number }>> = {
   AlertTriangle,
   Trash2,
   Mail,
+  Tag,
 };
 
 export function InboxSidebar({
   accounts,
   counts,
+  globalCounts,
   activeFolder,
   activeAccountId,
   activeLabel,
@@ -62,9 +65,8 @@ export function InboxSidebar({
   onDragOver,
   onDrop,
 }: Props) {
-  const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(
-    new Set(accounts.map(a => a.id))
-  );
+  // All accounts start collapsed
+  const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
   const [expandedLabels, setExpandedLabels] = useState<Set<string>>(new Set());
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
   const fetcher = useFetcher();
@@ -97,6 +99,8 @@ export function InboxSidebar({
     onDrop(e, { type, id: targetId, accountId });
   };
 
+  const isAllInboxesActive = activeFolder === 'inbox' && activeAccountId === null;
+
   return (
     <div className="w-56 border-r border-zinc-800 flex flex-col h-full overflow-hidden">
       {/* Compose Button */}
@@ -110,7 +114,29 @@ export function InboxSidebar({
         </Link>
       </div>
 
-      {/* Accounts & Folders */}
+      {/* All Inboxes */}
+      <div className="px-2 mb-1">
+        <button
+          onClick={() => onSelectFolder('inbox', null)}
+          className={`flex items-center gap-3 w-full px-3 py-2 rounded text-sm transition-colors ${
+            isAllInboxesActive
+              ? 'bg-emerald-500/20 text-emerald-400 font-medium'
+              : 'text-zinc-300 hover:bg-zinc-800'
+          }`}
+        >
+          <Inbox size={16} />
+          <span className="flex-1 text-left">All Inboxes</span>
+          {globalCounts.inbox > 0 && (
+            <span className={`text-xs px-1.5 py-0.5 rounded ${isAllInboxesActive ? 'bg-emerald-500/20 text-emerald-400' : 'text-zinc-500'}`}>
+              {globalCounts.inbox}
+            </span>
+          )}
+        </button>
+      </div>
+
+      <div className="border-t border-zinc-800 mx-2 mb-1" />
+
+      {/* Accounts & Folders — all collapsed by default */}
       <div className="flex-1 overflow-auto px-2 pb-4">
         {accounts.map((account) => {
           const accountCounts = counts[account.id] || {} as Counts;
@@ -120,18 +146,28 @@ export function InboxSidebar({
           const labelsExpanded = expandedLabels.has(account.id);
 
           return (
-            <div key={account.id} className="mb-4">
+            <div key={account.id} className="mb-1">
               {/* Account Header */}
               <button
                 onClick={() => toggleAccount(account.id)}
-                className="flex items-center gap-2 w-full px-2 py-1.5 text-left hover:bg-zinc-800 rounded group"
+                className={`flex items-center gap-2 w-full px-2 py-1.5 text-left rounded group ${
+                  isExpanded ? 'bg-zinc-800/50' : 'hover:bg-zinc-800/30'
+                }`}
               >
-                {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                <span className="text-sm font-medium truncate flex-1">{account.email}</span>
+                {isExpanded
+                  ? <ChevronDown size={14} className="text-zinc-500 flex-shrink-0" />
+                  : <ChevronRight size={14} className="text-zinc-500 flex-shrink-0" />
+                }
+                <span className="text-sm truncate flex-1 text-zinc-400">
+                  {account.email.split('@')[0]}
+                </span>
+                {!isExpanded && (accountCounts.inbox ?? 0) > 0 && (
+                  <span className="text-xs text-zinc-500">{accountCounts.inbox}</span>
+                )}
               </button>
 
               {isExpanded && (
-                <div className="mt-1 space-y-0.5">
+                <div className="mt-1 ml-2 space-y-0.5 border-l border-zinc-800 pl-2">
                   {/* System Folders */}
                   {systemLabels.map((label) => {
                     const Icon = systemIcons[label.icon || 'Mail'] || Mail;
@@ -146,7 +182,7 @@ export function InboxSidebar({
                         onDragOver={(e) => handleDragOver(e, label.name, 'folder', account.id)}
                         onDragLeave={handleDragLeave}
                         onDrop={(e) => handleDrop(e, label.name, 'folder', account.id)}
-                        className={`flex items-center gap-3 w-full px-3 py-1.5 rounded text-sm transition-colors ${
+                        className={`flex items-center gap-2 w-full px-2 py-1 rounded text-xs transition-colors ${
                           isActive
                             ? 'bg-zinc-800 text-white'
                             : isDragOver
@@ -154,7 +190,7 @@ export function InboxSidebar({
                               : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'
                         }`}
                       >
-                        <Icon size={16} />
+                        <Icon size={14} />
                         <span className="flex-1 text-left">{label.name}</span>
                         {count > 0 && (
                           <span className={`text-xs ${isActive ? 'text-zinc-300' : 'text-zinc-500'}`}>
@@ -165,18 +201,18 @@ export function InboxSidebar({
                     );
                   })}
 
-                  {/* Labels Section */}
+                  {/* User Labels */}
                   {userLabels.length > 0 && (
-                    <div className="mt-2">
+                    <div className="mt-1">
                       <button
                         onClick={() => toggleLabels(account.id)}
-                        className="flex items-center gap-2 w-full px-3 py-1 text-xs text-zinc-500 hover:text-zinc-300"
+                        className="flex items-center gap-1 w-full px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300"
                       >
-                        {labelsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                        Labels
+                        {labelsExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                        Labels ({userLabels.length})
                       </button>
                       {labelsExpanded && (
-                        <div className="mt-1 space-y-0.5">
+                        <div className="mt-0.5 space-y-0.5">
                           {userLabels.map((label) => {
                             const isActive = activeLabel === label.id;
                             const isDragOver = dragOverTarget === `${account.id}-label-${label.id}`;
@@ -188,7 +224,7 @@ export function InboxSidebar({
                                 onDragOver={(e) => handleDragOver(e, label.id, 'label', account.id)}
                                 onDragLeave={handleDragLeave}
                                 onDrop={(e) => handleDrop(e, label.id, 'label', account.id)}
-                                className={`flex items-center gap-3 w-full px-3 py-1.5 rounded text-sm transition-colors ${
+                                className={`flex items-center gap-2 w-full px-2 py-1 rounded text-xs transition-colors ${
                                   isActive
                                     ? 'bg-zinc-800 text-white'
                                     : isDragOver
@@ -197,7 +233,7 @@ export function InboxSidebar({
                                 }`}
                               >
                                 <span
-                                  className="w-3 h-3 rounded-sm"
+                                  className="w-2 h-2 rounded-sm flex-shrink-0"
                                   style={{ backgroundColor: label.color }}
                                 />
                                 <span className="flex-1 text-left truncate">{label.name}</span>
@@ -214,9 +250,9 @@ export function InboxSidebar({
                                 );
                               }
                             }}
-                            className="flex items-center gap-3 w-full px-3 py-1.5 text-sm text-zinc-500 hover:text-zinc-300"
+                            className="flex items-center gap-2 w-full px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300"
                           >
-                            <Plus size={14} />
+                            <Plus size={12} />
                             Create label
                           </button>
                         </div>

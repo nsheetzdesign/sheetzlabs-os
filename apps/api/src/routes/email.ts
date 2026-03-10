@@ -100,7 +100,8 @@ email.get("/auth/gmail/callback", async (c) => {
     .single();
 
   if (newAccount?.id) {
-    await supabase.rpc("seed_email_labels_for_account", { p_account_id: newAccount.id });
+    const accessToken = tokens.access_token as string;
+    await syncLabelsForAccount(newAccount.id, accessToken, supabase);
   }
 
   return c.redirect("https://sheetzlabs.com/dashboard/inbox?connected=true");
@@ -466,6 +467,27 @@ email.post("/draft-with-ai", async (c) => {
   c.executionCtx.waitUntil(executeAgent(agent, run, body, c.env, supabase));
 
   return c.json({ message: "Drafting email", run_id: run.id });
+});
+
+// ============================================
+// LABEL SYNC (from Gmail)
+// ============================================
+email.get("/accounts/:id/sync-labels", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("email_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const accessToken = await getValidAccessToken(account, c.env, supabase);
+  const labels = await syncLabelsForAccount(id, accessToken, supabase);
+
+  return c.json({ labels });
 });
 
 // ============================================
@@ -954,6 +976,73 @@ async function findRelationship(emailAddr: string, supabase: any): Promise<strin
     .eq("email", emailAddr.toLowerCase())
     .single();
   return (data as { id: string } | null)?.id ?? null;
+}
+
+// ============================================
+// HELPER: Sync Gmail Labels
+// ============================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function syncLabelsForAccount(accountId: string, accessToken: string, supabase: any): Promise<unknown[]> {
+  const response = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const { labels } = (await response.json()) as { labels?: Array<{
+    id: string; name: string; type?: string;
+    labelListVisibility?: string;
+    color?: { backgroundColor?: string };
+  }> };
+
+  const systemLabelIds = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "STARRED", "UNREAD", "IMPORTANT"];
+
+  for (const label of labels ?? []) {
+    if (label.labelListVisibility === "labelHide") continue;
+    if (label.id.startsWith("CATEGORY_")) continue;
+
+    const isSystem = systemLabelIds.includes(label.id) || label.type === "system";
+
+    let name = label.name;
+    let icon = "Tag";
+    let sortOrder = 100;
+
+    if (label.id === "INBOX")   { name = "Inbox";   icon = "Inbox";         sortOrder = 1; }
+    else if (label.id === "STARRED") { name = "Starred"; icon = "Star";     sortOrder = 2; }
+    else if (label.id === "SENT")    { name = "Sent";    icon = "Send";     sortOrder = 4; }
+    else if (label.id === "DRAFT")   { name = "Drafts";  icon = "File";     sortOrder = 5; }
+    else if (label.id === "SPAM")    { name = "Spam";    icon = "AlertTriangle"; sortOrder = 90; }
+    else if (label.id === "TRASH")   { name = "Trash";   icon = "Trash2";   sortOrder = 91; }
+    else if (label.id === "IMPORTANT" || label.id === "UNREAD") continue;
+
+    await supabase.from("email_labels").upsert(
+      {
+        account_id: accountId,
+        name,
+        type: isSystem ? "system" : "user",
+        icon,
+        sort_order: sortOrder,
+        color: label.color?.backgroundColor ?? "#2FE8B6",
+        external_id: label.id,
+      },
+      { onConflict: "account_id,name" }
+    );
+  }
+
+  // Ensure Snoozed and All Mail exist
+  await supabase.from("email_labels").upsert(
+    [
+      { account_id: accountId, name: "Snoozed",  type: "system", icon: "Clock", sort_order: 3,  color: "#71717a" },
+      { account_id: accountId, name: "All Mail", type: "system", icon: "Mail",  sort_order: 92, color: "#71717a" },
+    ],
+    { onConflict: "account_id,name" }
+  );
+
+  const { data: savedLabels } = await supabase
+    .from("email_labels")
+    .select("*")
+    .eq("account_id", accountId)
+    .order("sort_order");
+
+  return savedLabels ?? [];
 }
 
 // ============================================
