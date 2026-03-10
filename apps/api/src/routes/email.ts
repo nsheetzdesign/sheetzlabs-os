@@ -537,6 +537,51 @@ email.get("/accounts/:id/sync-labels", async (c) => {
 });
 
 // ============================================
+// DEBUG: Test Gmail labels API directly
+// ============================================
+email.get("/test-labels/:accountId", async (c) => {
+  const accountId = c.req.param("accountId");
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account, error: accountError } = await supabase
+    .from("email_accounts")
+    .select("id, email, access_token, refresh_token, token_expires_at")
+    .eq("id", accountId)
+    .single();
+
+  if (accountError || !account) {
+    return c.json({ error: "Account not found", details: accountError }, 404);
+  }
+
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken(account, c.env, supabase);
+  } catch (e) {
+    return c.json({ error: "Token refresh failed", details: String(e) }, 500);
+  }
+
+  const response = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  const status = response.status;
+  const body = await response.json() as Record<string, unknown>;
+  const labels = (body.labels as Array<{ id: string; name: string; type?: string }>) ?? [];
+
+  return c.json({
+    account: account.email,
+    token_expires_at: account.token_expires_at,
+    gmail_api_status: status,
+    labels_count: labels.length,
+    system_labels: labels.filter(l => l.type === "system").length,
+    user_labels: labels.filter(l => l.type === "user").length,
+    user_label_names: labels.filter(l => l.type === "user").map(l => l.name),
+    raw_response: body,
+  });
+});
+
+// ============================================
 // LABELS CRUD
 // ============================================
 email.get("/labels", async (c) => {
@@ -1049,19 +1094,33 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
     "https://gmail.googleapis.com/gmail/v1/users/me/labels",
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
-  const { labels } = (await response.json()) as { labels?: Array<{
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[Labels] Gmail API error for account ${accountId}: ${response.status} ${errorText}`);
+    throw new Error(`Gmail labels API returned ${response.status}: ${errorText}`);
+  }
+
+  const body = (await response.json()) as { labels?: Array<{
     id: string; name: string; type?: string;
     labelListVisibility?: string;
     messageListVisibility?: string;
     color?: { backgroundColor?: string };
   }> };
 
+  const { labels } = body;
+  console.log(`[Labels] Gmail returned ${labels?.length ?? 0} labels for account ${accountId}`);
+  const userLabels = labels?.filter(l => l.type === "user") ?? [];
+  console.log(`[Labels] User labels: ${userLabels.length}, names: ${userLabels.map(l => l.name).join(", ")}`);
+
   const systemLabelIds = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "STARRED", "UNREAD", "IMPORTANT"];
 
   for (const label of labels ?? []) {
-    if (label.labelListVisibility === "labelHide") continue;
+    // Skip category tabs (Promotions, Social, etc.) — not useful as labels
     if (label.id.startsWith("CATEGORY_")) continue;
     if (label.id === "IMPORTANT" || label.id === "UNREAD") continue;
+    // For system labels: skip hidden ones. For user labels: always sync regardless of visibility.
+    if (label.type !== "user" && label.labelListVisibility === "labelHide") continue;
 
     const isSystem = systemLabelIds.includes(label.id) || label.type === "system";
 
