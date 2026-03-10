@@ -3,7 +3,7 @@ import { useLoaderData, Link, useFetcher } from "react-router";
 import { useState, useEffect, useRef } from "react";
 import {
   RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin,
-  Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2,
+  Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar,
 } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
 
@@ -965,6 +965,10 @@ export default function Calendar() {
               <Link to="/dashboard/calendar/booking-links"
                 className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
                 <Link2 className="h-3 w-3" />Booking Links
+              </Link>
+              <Link to="/dashboard/calendar/bookings"
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
+                <Calendar className="h-3 w-3" />Bookings
               </Link>
             </div>
           )}

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
-import { guestConfirmationEmail, hostNotificationEmail, cancellationEmail } from "../lib/booking-emails";
+import { guestConfirmationEmail, hostNotificationEmail, cancellationEmail, rescheduleConfirmationEmail } from "../lib/booking-emails";
 import { sendBookingEmail } from "../lib/send-booking-email";
 
 type Bindings = {
@@ -428,14 +428,15 @@ booking.post("/public/:slug", async (c) => {
 
   if (bookingError) return c.json({ error: bookingError.message }, 500);
 
-  // Create Google Calendar event
+  // Create Google Calendar event with Meet link
+  let meetLink: string | null = null;
   try {
     const account = link.calendar_accounts as Record<string, unknown>;
     const accessToken = await getValidAccessToken(account, c.env, supabase);
     const eventEnd = new Date(new Date(body.scheduled_at).getTime() + (link.duration_minutes as number) * 60000);
 
     const gcalRes = await fetch(
-      "https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all",
+      "https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all&conferenceDataVersion=1",
       {
         method: "POST",
         headers: {
@@ -448,16 +449,28 @@ booking.post("/public/:slug", async (c) => {
           start: { dateTime: body.scheduled_at, timeZone: timezone },
           end: { dateTime: eventEnd.toISOString(), timeZone: timezone },
           attendees: [{ email: body.guest_email, displayName: body.guest_name }],
+          conferenceData: {
+            createRequest: {
+              requestId: `booking-${newBooking.id}`,
+              conferenceSolutionKey: { type: "hangoutsMeet" },
+            },
+          },
         }),
       }
     );
 
     if (gcalRes.ok) {
-      const gcalData = (await gcalRes.json()) as { id?: string };
+      const gcalData = (await gcalRes.json()) as {
+        id?: string;
+        conferenceData?: { entryPoints?: Array<{ entryPointType: string; uri: string }> };
+      };
+      meetLink = gcalData.conferenceData?.entryPoints?.find(
+        (ep) => ep.entryPointType === "video"
+      )?.uri ?? null;
       if (gcalData.id) {
         await supabase
           .from("bookings")
-          .update({ calendar_event_id: gcalData.id })
+          .update({ calendar_event_id: gcalData.id, meet_link: meetLink })
           .eq("id", newBooking.id);
       }
     }
@@ -482,6 +495,8 @@ booking.post("/public/:slug", async (c) => {
     bookingId: newBooking.id,
     notes: body.guest_notes,
     cancelUrl: `https://app.sheetzlabs.com/book/cancel/${newBooking.id}`,
+    rescheduleUrl: `https://app.sheetzlabs.com/book/reschedule/${newBooking.id}`,
+    meetLink: meetLink ?? undefined,
   };
 
   const guestEmail = guestConfirmationEmail(emailData);
@@ -496,8 +511,109 @@ booking.post("/public/:slug", async (c) => {
       id: newBooking.id,
       scheduled_at: newBooking.scheduled_at,
       duration_minutes: newBooking.duration_minutes,
+      meet_link: meetLink,
     },
   });
+});
+
+// ── Public: Reschedule Flow ───────────────────────────────────────────────────
+
+// Get booking info for reschedule page
+booking.get("/public/reschedule/:bookingId", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: bk, error } = await supabase
+    .from("bookings")
+    .select("id, guest_name, guest_email, guest_notes, scheduled_at, duration_minutes, timezone, status, booking_links(id, slug, title, duration_minutes, availability_rules)")
+    .eq("id", bookingId)
+    .single();
+
+  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+  if (bk.status === "cancelled") return c.json({ error: "Booking is cancelled" }, 400);
+
+  return c.json({ booking: bk });
+});
+
+// Reschedule a booking
+booking.post("/public/reschedule/:bookingId", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const body = await c.req.json<{ scheduled_at: string; timezone?: string }>();
+
+  if (!body.scheduled_at) return c.json({ error: "New time required" }, 400);
+
+  const { data: bk } = await supabase
+    .from("bookings")
+    .select("*, booking_links(title, calendar_accounts(email, display_name, access_token, refresh_token, token_expires_at, id))")
+    .eq("id", bookingId)
+    .single();
+
+  if (!bk || bk.status === "cancelled") return c.json({ error: "Booking not found or cancelled" }, 404);
+
+  const oldDateTime = new Date(bk.scheduled_at as string);
+  const newDateTime = new Date(body.scheduled_at);
+  const newTimezone = body.timezone ?? (bk.timezone as string);
+
+  const { error: updateError } = await supabase
+    .from("bookings")
+    .update({
+      scheduled_at: body.scheduled_at,
+      timezone: newTimezone,
+      updated_at: new Date().toISOString(),
+      reminder_24h_sent: false,
+      reminder_1h_sent: false,
+    })
+    .eq("id", bookingId);
+
+  if (updateError) return c.json({ error: updateError.message }, 500);
+
+  // Update Google Calendar event
+  if (bk.calendar_event_id) {
+    try {
+      const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
+      const accessToken = await getValidAccessToken(account, c.env, supabase);
+      const eventEnd = new Date(newDateTime.getTime() + (bk.duration_minutes as number) * 60000);
+
+      await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${bk.calendar_event_id}?sendUpdates=all`,
+        {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start: { dateTime: body.scheduled_at, timeZone: newTimezone },
+            end: { dateTime: eventEnd.toISOString(), timeZone: newTimezone },
+          }),
+        }
+      );
+    } catch {
+      // Calendar update failed — booking still rescheduled
+    }
+  }
+
+  const hostEmail = bk.booking_links.calendar_accounts.email as string;
+  const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
+
+  const emailData = {
+    guestName: bk.guest_name as string,
+    guestEmail: bk.guest_email as string,
+    hostName,
+    hostEmail,
+    title: bk.booking_links.title as string,
+    dateTime: newDateTime,
+    duration: bk.duration_minutes as number,
+    timezone: newTimezone,
+    bookingId: bk.id as string,
+    meetLink: (bk.meet_link as string) ?? undefined,
+  };
+
+  const guestEmailContent = rescheduleConfirmationEmail(emailData, false, oldDateTime);
+  await sendBookingEmail({ to: emailData.guestEmail, subject: guestEmailContent.subject, html: guestEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  const hostEmailContent = rescheduleConfirmationEmail(emailData, true, oldDateTime);
+  await sendBookingEmail({ to: hostEmail, subject: hostEmailContent.subject, html: hostEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  return c.json({ success: true });
 });
 
 export default booking;

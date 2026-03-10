@@ -6,6 +6,7 @@ export default [
   ]),
   route("book/:slug", "routes/book.$slug.tsx"),
   route("book/cancel/:bookingId", "routes/book.cancel.$bookingId.tsx"),
+  route("book/reschedule/:bookingId", "routes/book.reschedule.$bookingId.tsx"),
   route("auth/login", "routes/auth.login.tsx"),
   route("auth/logout", "routes/auth.logout.tsx"),
   route("dashboard", "routes/dashboard.tsx", [
@@ -72,6 +73,7 @@ export default [
     route("calendar", "routes/dashboard.calendar.tsx", [
       index("routes/dashboard.calendar._index.tsx"),
       route("booking-links", "routes/dashboard.calendar.booking-links.tsx"),
+      route("bookings", "routes/dashboard.calendar.bookings.tsx"),
       route(":id", "routes/dashboard.calendar.$id.tsx"),
     ]),
     route("inbox", "routes/dashboard.inbox.tsx", [
