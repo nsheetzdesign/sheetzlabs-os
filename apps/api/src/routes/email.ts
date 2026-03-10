@@ -1068,6 +1068,43 @@ email.get("/counts", async (c) => {
 });
 
 // ============================================
+// CHECK FOR UPDATES (lightweight client polling)
+// ============================================
+email.get("/check-updates", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const since = c.req.query("since"); // ISO timestamp from client
+
+  if (!since) {
+    return c.json({ hasUpdates: false });
+  }
+
+  // Check if any inbox email arrived after the client's last known timestamp
+  const { count } = await supabase
+    .from("emails")
+    .select("id", { count: "exact", head: true })
+    .gt("received_at", since)
+    .eq("folder", "INBOX")
+    .eq("is_archived", false)
+    .eq("is_trashed", false);
+
+  const hasUpdates = (count ?? 0) > 0;
+
+  // Return the newest received_at so the client can advance its cursor
+  let newestAt = since;
+  if (hasUpdates) {
+    const { data: newest } = await supabase
+      .from("emails")
+      .select("received_at")
+      .order("received_at", { ascending: false })
+      .limit(1)
+      .single();
+    if (newest?.received_at) newestAt = newest.received_at;
+  }
+
+  return c.json({ hasUpdates, newestAt });
+});
+
+// ============================================
 // UNIFIED SEARCH
 // ============================================
 email.get("/search", async (c) => {

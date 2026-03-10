@@ -10,6 +10,7 @@ import { ComposeModal } from '~/components/inbox/ComposeModal';
 import { ThreadView } from '~/components/inbox/ThreadView';
 import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
 import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
+import { useEmailPolling } from '~/hooks/useEmailPolling';
 
 export const meta: MetaFunction = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 
@@ -311,18 +312,11 @@ export default function Inbox() {
     return () => window.removeEventListener('focus', onFocus);
   }, []);
 
-  // Polling sync every 3 minutes
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        await fetch('/dashboard/inbox/sync', { method: 'POST' });
-        revalidator.revalidate();
-      } catch {
-        // ignore interval sync errors
-      }
-    }, 3 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []);
+  // Lightweight polling every 60s — only revalidates when new inbox emails actually exist
+  const newestEmailAt = emails.length > 0
+    ? (emails[0] as any).received_at as string | undefined
+    : undefined;
+  useEmailPolling({ enabled: true, interval: 60_000, newestEmailAt });
 
   const handleOpenEmail = async (email: PreviewEmail) => {
     setActiveEmail(email);
