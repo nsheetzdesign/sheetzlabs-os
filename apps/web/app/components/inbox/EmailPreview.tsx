@@ -10,13 +10,14 @@ export interface PreviewEmail {
   subject: string | null;
   from_name: string | null;
   from_email: string | null;
-  to_emails?: string | null;
-  cc_emails?: string | null;
+  to_emails?: string[] | string | null;
+  cc_emails?: string[] | string | null;
   body_html?: string | null;
   body_text?: string | null;
   received_at: string | null;
   is_read: boolean;
   is_starred: boolean;
+  thread_id?: string | null;
   ai_summary?: string | null;
   labels?: { id: string; name: string; color: string }[];
 }
@@ -63,7 +64,13 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward }:
     });
   };
 
-  const firstTo = email.to_emails?.split(',')[0] ?? '';
+  const toList = Array.isArray(email.to_emails)
+    ? email.to_emails
+    : (email.to_emails ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  const ccList = Array.isArray(email.cc_emails)
+    ? email.cc_emails
+    : (email.cc_emails ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  const firstTo = toList[0] ?? '';
   const senderInitial = (email.from_name || email.from_email || '?')[0].toUpperCase();
 
   return (
@@ -143,8 +150,8 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward }:
               </button>
               {showDetails && (
                 <div className="mt-2 text-sm text-zinc-400 space-y-1">
-                  <div>To: {email.to_emails}</div>
-                  {email.cc_emails && <div>Cc: {email.cc_emails}</div>}
+                  <div>To: {toList.join(', ')}</div>
+                  {ccList.length > 0 && <div>Cc: {ccList.join(', ')}</div>}
                   <div>Date: {formatDate(email.received_at)}</div>
                 </div>
               )}
@@ -166,8 +173,12 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward }:
           <div className="prose prose-invert prose-sm max-w-none">
             {email.body_html ? (
               <div dangerouslySetInnerHTML={{ __html: email.body_html }} />
+            ) : email.body_text ? (
+              <pre className="whitespace-pre-wrap font-sans text-sm text-zinc-300">{email.body_text}</pre>
+            ) : email.snippet ? (
+              <p className="text-zinc-300">{email.snippet}</p>
             ) : (
-              <pre className="whitespace-pre-wrap font-sans">{email.body_text}</pre>
+              <p className="text-zinc-500 italic">No content</p>
             )}
           </div>
         </div>

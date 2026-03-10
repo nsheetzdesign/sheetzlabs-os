@@ -19,19 +19,29 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   const label_id = url.searchParams.get('label');
   const search = url.searchParams.get('q');
 
-  // Build emails query
+  // Build emails query — all fields needed for list + preview
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let query: any = supabase
     .from('emails')
-    .select('id, subject, snippet, from_email, from_name, is_read, is_starred, received_at, thread_id, account_id')
+    .select(`
+      id, account_id, external_id, thread_id,
+      subject, snippet,
+      from_name, from_email, to_emails, cc_emails,
+      body_text, body_html,
+      received_at, folder,
+      is_read, is_starred, is_archived, is_trashed, is_spam,
+      snoozed_until, has_attachments, attachment_count,
+      ai_summary, ai_category,
+      email_label_assignments(label_id, email_labels(id, name, color))
+    `)
     .order('received_at', { ascending: false })
-    .limit(50);
+    .limit(100);
 
   if (search) {
     query = query.or(`subject.ilike.%${search}%,from_email.ilike.%${search}%,snippet.ilike.%${search}%`);
   } else {
     if (folder === 'inbox') {
-      query = query.eq('is_archived', false).eq('is_trashed', false).eq('is_spam', false);
+      query = query.eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_spam', false);
     } else if (folder === 'starred') {
       query = query.eq('is_starred', true).eq('is_trashed', false);
     } else if (folder === 'sent') {
@@ -43,12 +53,13 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     } else if (folder === 'snoozed') {
       query = query.not('snoozed_until', 'is', null);
     } else if (folder === 'drafts') {
-      // Drafts come from email_drafts table — handled separately
       query = query.eq('folder', 'DRAFTS');
+    } else if (folder === 'all mail') {
+      query = query.eq('is_trashed', false);
     }
   }
 
-  // Only filter by account if a specific one is selected
+  // Only filter by account if a specific one is selected (null = All Inboxes)
   if (account_id) {
     query = query.eq('account_id', account_id);
   }
@@ -75,6 +86,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     acc[label.account_id]!.push(label);
     return acc;
   }, {});
+
+  // For any account with no labels, auto-trigger sync-labels (fire and forget)
+  const apiUrl = (env as Record<string, string>).API_URL ?? 'https://api.sheetzlabs.com';
+  for (const account of accounts ?? []) {
+    if (!labelsByAccount[account.id]?.length) {
+      fetch(`${apiUrl}/email/accounts/${account.id}/sync-labels`).catch(() => {});
+    }
+  }
 
   // Build accounts with their real labels
   const accountsWithLabels = (accounts ?? []).map(account => ({
@@ -126,8 +145,9 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   return {
     emails: (emails ?? []).map(e => ({
       ...e,
-      has_attachments: false,
-      labels: [],
+      has_attachments: e.has_attachments ?? false,
+      // Flatten label assignments to array of label objects
+      labels: (e.email_label_assignments ?? []).map((a: any) => a.email_labels).filter(Boolean),
     })),
     accounts: accountsWithLabels,
     counts,

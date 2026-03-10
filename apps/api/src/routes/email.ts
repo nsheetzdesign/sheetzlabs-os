@@ -470,6 +470,52 @@ email.post("/draft-with-ai", async (c) => {
 });
 
 // ============================================
+// RESYNC BODIES (for emails synced before body extraction was fixed)
+// ============================================
+email.post("/resync-bodies", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  // Fetch up to 100 emails with missing body
+  const { data: missing } = await supabase
+    .from("emails")
+    .select("id, external_id, account_id")
+    .is("body_text", null)
+    .is("body_html", null)
+    .limit(100);
+
+  if (!missing?.length) return c.json({ resynced: 0 });
+
+  let resynced = 0;
+  for (const row of missing) {
+    const { data: account } = await supabase
+      .from("email_accounts")
+      .select("*")
+      .eq("id", row.account_id)
+      .single();
+    if (!account) continue;
+
+    try {
+      const accessToken = await getValidAccessToken(account, c.env, supabase);
+      const res = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${row.external_id}?format=full`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const fullMsg = await res.json() as Record<string, unknown>;
+      const bodyText = extractBody(fullMsg.payload as Record<string, unknown>, "text/plain");
+      const bodyHtml = extractBody(fullMsg.payload as Record<string, unknown>, "text/html");
+      if (bodyText || bodyHtml) {
+        await supabase.from("emails").update({ body_text: bodyText || null, body_html: bodyHtml || null }).eq("id", row.id);
+        resynced++;
+      }
+    } catch {
+      // Skip failures
+    }
+  }
+
+  return c.json({ resynced, total_missing: missing.length });
+});
+
+// ============================================
 // LABEL SYNC (from Gmail)
 // ============================================
 email.get("/accounts/:id/sync-labels", async (c) => {
@@ -902,12 +948,25 @@ function parseGmailMessage(msg: Record<string, unknown>) {
   };
 }
 
+function decodeBase64(data: string): string {
+  // URL-safe base64 → standard base64 → binary → UTF-8
+  const standard = data.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(standard);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  try {
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch {
+    return new TextDecoder("latin1").decode(bytes);
+  }
+}
+
 function extractBody(payload: Record<string, unknown> | undefined, mimeType: string): string {
   if (!payload) return "";
 
-  const body = payload.body as { data?: string } | undefined;
+  const body = payload.body as { data?: string; size?: number } | undefined;
   if (payload.mimeType === mimeType && body?.data) {
-    return atob(body.data.replace(/-/g, "+").replace(/_/g, "/"));
+    try { return decodeBase64(body.data); } catch { return ""; }
   }
 
   if (payload.parts) {
