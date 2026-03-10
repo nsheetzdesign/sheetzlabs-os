@@ -1,5 +1,4 @@
 import type { ActionFunctionArgs } from 'react-router';
-import { json } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
 
 export async function action({ context }: ActionFunctionArgs) {
@@ -28,5 +27,5 @@ export async function action({ context }: ActionFunctionArgs) {
     }
   }
 
-  return json({ results, synced_at: new Date().toISOString() });
+  return Response.json({ results, synced_at: new Date().toISOString() });
 }

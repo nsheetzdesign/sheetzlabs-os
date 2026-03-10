@@ -119,20 +119,23 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
       const seededLabels: any[] = [];
       for (const label of systemLabels) {
-        const { data: inserted, error: insertError } = await supabase
+        const { data: inserted, error: upsertError } = await supabase
           .from('email_labels')
-          .insert({
-            account_id: account.id,
-            name: label.name,
-            type: 'system',
-            icon: label.icon,
-            sort_order: label.sort_order,
-          })
+          .upsert(
+            {
+              account_id: account.id,
+              name: label.name,
+              type: 'system',
+              icon: label.icon,
+              sort_order: label.sort_order,
+            },
+            { onConflict: 'account_id,name', ignoreDuplicates: false }
+          )
           .select('*')
           .single();
 
-        if (insertError) {
-          console.error(`[Inbox] Failed to insert label ${label.name} for ${account.email}:`, insertError.message);
+        if (upsertError) {
+          console.error(`[Inbox] Failed to upsert label ${label.name} for ${account.email}:`, upsertError.message);
         } else if (inserted) {
           seededLabels.push(inserted);
         }
