@@ -3,7 +3,7 @@ import { useLoaderData, Link, useFetcher } from "react-router";
 import { useState, useEffect, useRef } from "react";
 import {
   RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin,
-  Users, ExternalLink, Zap, CheckSquare, Edit2,
+  Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2,
 } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
 
@@ -240,6 +240,32 @@ export async function action({ request, context }: ActionFunctionArgs) {
   if (intent === "delete_time_block") {
     const eventId = fd.get("event_id") as string;
     await fetch(`${apiUrl}/calendar/time-blocks/${eventId}`, { method: "DELETE" });
+  }
+
+  if (intent === "update_sub_cal") {
+    const subCalId = fd.get("sub_cal_id") as string;
+    const updates: Record<string, unknown> = {};
+    const color = fd.get("color");
+    const isVisible = fd.get("is_visible");
+    if (color) updates.color = color;
+    if (isVisible !== null) updates.is_visible = isVisible === "true";
+    await fetch(`${apiUrl}/calendar/sub-accounts/${subCalId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+  }
+
+  if (intent === "update_account") {
+    const accountId = fd.get("account_id") as string;
+    const updates: Record<string, unknown> = {};
+    const color = fd.get("color");
+    const displayName = fd.get("display_name");
+    if (color) updates.color = color;
+    if (displayName !== null) updates.display_name = displayName || null;
+    await fetch(`${apiUrl}/calendar/accounts/${accountId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
   }
 
   return null;
@@ -599,6 +625,77 @@ function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: (
   );
 }
 
+// ── Calendar Account Settings Modal ──────────────────────────────────────────
+
+function CalendarSettingsModal({
+  account,
+  onClose,
+}: {
+  account: CalendarAccount;
+  onClose: () => void;
+}) {
+  const fetcher = useFetcher();
+  const [color, setColor] = useState(account.color ?? "#2FE8B6");
+  const [displayName, setDisplayName] = useState((account as CalendarAccount & { display_name?: string }).display_name ?? "");
+
+  function handleSave() {
+    const fd = new FormData();
+    fd.set("intent", "update_account");
+    fd.set("account_id", account.id);
+    fd.set("color", color);
+    fd.set("display_name", displayName);
+    fetcher.submit(fd, { method: "post" });
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-sm bg-zinc-900 border border-zinc-700 rounded-xl p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-zinc-100">Calendar Settings</h2>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200"><X className="h-4 w-4" /></button>
+        </div>
+
+        <p className="text-xs text-zinc-500 mb-4">{account.email}</p>
+
+        <div className="mb-4">
+          <label className="block text-xs text-zinc-400 mb-1.5">Display Name (optional)</label>
+          <input
+            type="text"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder={account.email.split("@")[0]}
+            className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-200 text-sm placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
+          />
+        </div>
+
+        <div className="mb-6">
+          <label className="block text-xs text-zinc-400 mb-2">Account Color</label>
+          <div className="grid grid-cols-5 gap-2">
+            {COLOR_SWATCHES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setColor(c)}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-transform ${color === c ? "ring-2 ring-white ring-offset-2 ring-offset-zinc-900 scale-110" : "hover:scale-105"}`}
+                style={{ backgroundColor: c }}
+                title={c}
+              >
+                {color === c && <Check className="h-4 w-4 text-white" />}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2 text-xs text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg">Cancel</button>
+          <button onClick={handleSave} className="flex-1 py-2 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Calendar Component ───────────────────────────────────────────────────
 
 export default function Calendar() {
@@ -609,6 +706,7 @@ export default function Calendar() {
   const [draggedTask, setDraggedTask] = useState<{ id: string; title: string } | null>(null);
   const [newEventModal, setNewEventModal] = useState<{ start: string; end: string } | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+  const [settingsAccount, setSettingsAccount] = useState<CalendarAccount | null>(null);
 
   // Sub-calendar visibility + color overrides (local state)
   const [hiddenSubCals, setHiddenSubCals] = useState<Set<string>>(new Set());
@@ -717,6 +815,9 @@ export default function Calendar() {
       {selectedEvent && (
         <EventDetailModal event={selectedEvent} onClose={() => setSelectedEvent(null)} />
       )}
+      {settingsAccount && (
+        <CalendarSettingsModal account={settingsAccount} onClose={() => setSettingsAccount(null)} />
+      )}
 
       {/* Sidebar */}
       <aside className="w-56 shrink-0 border-r border-zinc-800 flex flex-col overflow-hidden">
@@ -759,10 +860,18 @@ export default function Calendar() {
                 return (
                   <div key={account.id}>
                     {/* Account header */}
-                    <div className="flex items-center gap-1.5 mb-1">
+                    <div className="flex items-center gap-1.5 mb-1 group/acct">
                       <span className="text-xs font-medium text-zinc-400 truncate flex-1">
-                        {account.email.split("@")[0]}
+                        {(account as CalendarAccount & { display_name?: string }).display_name || account.email.split("@")[0]}
                       </span>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setSettingsAccount(account as CalendarAccount); }}
+                        title="Settings"
+                        className="text-zinc-600 hover:text-zinc-300 transition-colors opacity-0 group-hover/acct:opacity-100"
+                      >
+                        <Settings className="h-3 w-3" />
+                      </button>
                       <fetcher.Form method="post">
                         <input type="hidden" name="intent" value="sync" />
                         <input type="hidden" name="account_id" value={account.id} />
@@ -801,7 +910,16 @@ export default function Calendar() {
                                     <div className="grid grid-cols-5 gap-1">
                                       {COLOR_SWATCHES.map((c) => (
                                         <button key={c} type="button"
-                                          onClick={() => { setSubCalColors((prev) => ({ ...prev, [cal.id]: c })); setColorPickerFor(null); }}
+                                          onClick={() => {
+                                            setSubCalColors((prev) => ({ ...prev, [cal.id]: c }));
+                                            setColorPickerFor(null);
+                                            // Persist to API
+                                            const fd = new FormData();
+                                            fd.set("intent", "update_sub_cal");
+                                            fd.set("sub_cal_id", cal.id);
+                                            fd.set("color", c);
+                                            fetcher.submit(fd, { method: "post" });
+                                          }}
                                           className="w-4 h-4 rounded-sm hover:scale-110 transition-transform border border-black/20"
                                           style={{ backgroundColor: c }} />
                                       ))}
@@ -844,6 +962,10 @@ export default function Calendar() {
                 className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
                 <Plus className="h-3 w-3" />Add account
               </a>
+              <Link to="/dashboard/calendar/booking-links"
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
+                <Link2 className="h-3 w-3" />Booking Links
+              </Link>
             </div>
           )}
         </div>

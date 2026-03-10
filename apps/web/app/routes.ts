@@ -4,6 +4,7 @@ export default [
   layout("routes/_marketing.tsx", [
     index("routes/_marketing._index.tsx"),
   ]),
+  route("book/:slug", "routes/book.$slug.tsx"),
   route("auth/login", "routes/auth.login.tsx"),
   route("auth/logout", "routes/auth.logout.tsx"),
   route("dashboard", "routes/dashboard.tsx", [
@@ -69,6 +70,7 @@ export default [
     ]),
     route("calendar", "routes/dashboard.calendar.tsx", [
       index("routes/dashboard.calendar._index.tsx"),
+      route("booking-links", "routes/dashboard.calendar.booking-links.tsx"),
       route(":id", "routes/dashboard.calendar.$id.tsx"),
     ]),
     route("inbox", "routes/dashboard.inbox.tsx", [
