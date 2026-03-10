@@ -294,6 +294,7 @@ export function InboxSidebar({
 }
 
 interface SyncAccount {
+  accountId: string;
   email: string;
   success: boolean;
   error: string | null;
@@ -308,12 +309,14 @@ interface SyncResult {
 
 function SyncButton() {
   const syncFetcher = useFetcher();
+  const fullSyncFetcher = useFetcher();
   const [showDetails, setShowDetails] = useState(false);
   const [lastResult, setLastResult] = useState<SyncResult | null>(null);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
   const [, setTick] = useState(0);
 
   const isLoading = syncFetcher.state === 'submitting' || syncFetcher.state === 'loading';
+  const isFullSyncing = fullSyncFetcher.state === 'submitting' || fullSyncFetcher.state === 'loading';
 
   useEffect(() => {
     if (syncFetcher.data && syncFetcher.state === 'idle') {
@@ -322,6 +325,15 @@ function SyncButton() {
       // No auto-expand
     }
   }, [syncFetcher.data, syncFetcher.state]);
+
+  const handleFullSync = (accountId: string) => {
+    if (window.confirm('This will download ALL emails from this account. This may take several minutes. Continue?')) {
+      fullSyncFetcher.submit(
+        { intent: 'full-sync', accountId },
+        { method: 'post', action: '/dashboard/inbox/sync' }
+      );
+    }
+  };
 
   // Update relative time every minute
   useEffect(() => {
@@ -395,7 +407,7 @@ function SyncButton() {
                   className={`p-2 rounded ${account.success ? 'bg-zinc-900' : 'bg-red-950/30'}`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-zinc-300 font-medium truncate max-w-[150px]">
+                    <span className="text-zinc-300 font-medium truncate max-w-[140px]">
                       {account.email}
                     </span>
                     {account.success ? (
@@ -419,8 +431,36 @@ function SyncButton() {
                   ) : (
                     <div className="mt-1 text-red-400">{account.error || 'Unknown error'}</div>
                   )}
+
+                  {/* Full sync button per account */}
+                  {account.accountId && (
+                    <button
+                      onClick={() => handleFullSync(account.accountId)}
+                      disabled={isFullSyncing}
+                      className="mt-2 w-full px-2 py-1 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isFullSyncing ? (
+                        <span className="flex items-center justify-center gap-1">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          Downloading all...
+                        </span>
+                      ) : (
+                        'Download All Emails'
+                      )}
+                    </button>
+                  )}
                 </div>
               ))}
+
+              {/* Full sync result */}
+              {fullSyncFetcher.data && (
+                <div className={`p-2 rounded text-xs ${(fullSyncFetcher.data as any).success ? 'bg-emerald-900/20 text-emerald-400' : 'bg-red-900/20 text-red-400'}`}>
+                  {(fullSyncFetcher.data as any).success
+                    ? `Downloaded ${(fullSyncFetcher.data as any).totalSynced ?? 0} emails (${(fullSyncFetcher.data as any).pages ?? 0} pages)`
+                    : `Error: ${(fullSyncFetcher.data as any).error}`
+                  }
+                </div>
+              )}
 
               <button
                 onClick={() => { setLastResult(null); setShowDetails(false); }}

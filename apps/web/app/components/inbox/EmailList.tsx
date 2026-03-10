@@ -24,6 +24,7 @@ interface Props {
   emails: Email[];
   selectedIds: Set<string>;
   activeEmailId: string | null;
+  focusedIndex?: number;
   onSelect: (id: string, multi?: boolean) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
@@ -35,6 +36,7 @@ export function EmailList({
   emails,
   selectedIds,
   activeEmailId,
+  focusedIndex,
   onSelect,
   onSelectAll,
   onClearSelection,
@@ -148,10 +150,11 @@ export function EmailList({
             No emails
           </div>
         ) : (
-          emails.map((email) => {
+          emails.map((email, index) => {
             const isSelected = selectedIds.has(email.id);
             const isActive = activeEmailId === email.id;
             const isHovered = hoveredId === email.id;
+            const isFocused = focusedIndex === index;
 
             return (
               <div
@@ -169,7 +172,7 @@ export function EmailList({
                       : email.is_read
                         ? 'hover:bg-zinc-900'
                         : 'bg-zinc-900/30 hover:bg-zinc-900'
-                }`}
+                } ${isFocused && !isActive ? 'ring-1 ring-inset ring-emerald-500/40' : ''}`}
               >
                 {/* Checkbox */}
                 <button

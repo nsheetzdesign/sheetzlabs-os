@@ -892,6 +892,107 @@ email.post("/sync", async (c) => {
 });
 
 // ============================================
+// FULL INBOX DOWNLOAD (paginate all messages)
+// ============================================
+email.post("/accounts/:id/full-sync", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("email_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const accessToken = await getValidAccessToken(account, c.env, supabase);
+
+  // Sync labels first
+  await syncLabelsForAccount(id, accessToken, supabase);
+
+  let pageToken: string | undefined;
+  let totalSynced = 0;
+  let pageCount = 0;
+  const maxPages = 100; // 100 pages × 100 messages = 10,000 emails max
+
+  try {
+    do {
+      const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+      listUrl.searchParams.set("maxResults", "100");
+      if (pageToken) listUrl.searchParams.set("pageToken", pageToken);
+
+      const listResponse = await fetch(listUrl.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (!listResponse.ok) {
+        throw new Error(`Gmail API error: ${listResponse.status}`);
+      }
+
+      const listData = (await listResponse.json()) as { messages?: Array<{ id: string }>; nextPageToken?: string };
+      const messages = listData.messages ?? [];
+      pageToken = listData.nextPageToken;
+
+      for (const msg of messages) {
+        try {
+          const { data: existing } = await supabase
+            .from("emails")
+            .select("id")
+            .eq("external_id", msg.id)
+            .single();
+
+          if (existing) continue;
+
+          const msgResponse = await fetch(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          );
+
+          if (!msgResponse.ok) continue;
+
+          const fullMsg = (await msgResponse.json()) as { labelIds?: string[]; [key: string]: unknown };
+          const emailRow = parseGmailMessageFull(fullMsg, id);
+          const { data: inserted, error } = await supabase
+            .from("emails")
+            .insert(emailRow)
+            .select("id")
+            .single();
+
+          if (!error && inserted) {
+            totalSynced++;
+            await assignEmailLabels(inserted.id, fullMsg.labelIds ?? [], id, supabase);
+          }
+        } catch {
+          // Skip individual message failures
+        }
+      }
+
+      pageCount++;
+      console.log(`[FullSync] Page ${pageCount}: processed ${messages.length} messages, total synced: ${totalSynced}`);
+    } while (pageToken && pageCount < maxPages);
+
+    await supabase
+      .from("email_accounts")
+      .update({ last_sync_at: new Date().toISOString(), full_sync_completed: true })
+      .eq("id", id);
+
+    return c.json({
+      success: true,
+      totalSynced,
+      pages: pageCount,
+      complete: !pageToken,
+    });
+  } catch (error) {
+    return c.json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+      totalSynced,
+    }, 500);
+  }
+});
+
+// ============================================
 // UNREAD COUNTS (for sidebar badges)
 // ============================================
 email.get("/counts", async (c) => {
@@ -1076,13 +1177,33 @@ async function triageEmail(
       summary?: string;
     };
 
+    const aiCategory = parsed.category ?? "fyi";
     return {
-      ai_category: parsed.category ?? "fyi",
+      ai_category: aiCategory,
       ai_priority: parsed.priority ?? "medium",
       ai_summary: parsed.summary ?? "",
+      triage_category: mapTriageCategory(aiCategory),
+      triage_confidence: 0.8,
+      triaged_at: new Date().toISOString(),
     };
   } catch {
-    return { ai_category: "fyi", ai_priority: "medium", ai_summary: "" };
+    return {
+      ai_category: "fyi",
+      ai_priority: "medium",
+      ai_summary: "",
+      triage_category: "other",
+      triage_confidence: 0.5,
+      triaged_at: new Date().toISOString(),
+    };
+  }
+}
+
+function mapTriageCategory(aiCategory: string): string {
+  switch (aiCategory) {
+    case "action_required": return "important";
+    case "newsletter":      return "newsletter";
+    case "automated":       return "notification";
+    default:                return "other";
   }
 }
 

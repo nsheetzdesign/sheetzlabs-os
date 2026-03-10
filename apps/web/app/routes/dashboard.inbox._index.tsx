@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator } from 'react-router';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell } from 'lucide-react';
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
 import { InboxSidebar } from '~/components/inbox/InboxSidebar';
@@ -8,6 +8,8 @@ import { EmailList, type Email } from '~/components/inbox/EmailList';
 import { EmailPreview, type PreviewEmail } from '~/components/inbox/EmailPreview';
 import { ComposeModal } from '~/components/inbox/ComposeModal';
 import { ThreadView } from '~/components/inbox/ThreadView';
+import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
+import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
 
 export const meta: MetaFunction = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 
@@ -33,6 +35,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       is_read, is_starred, is_archived, is_trashed, is_spam,
       snoozed_until, has_attachments, attachment_count,
       ai_summary, ai_category,
+      triage_category,
       email_label_assignments(label_id, email_labels(id, name, color))
     `)
     .order('received_at', { ascending: false })
@@ -200,6 +203,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     emails: (emails ?? []).map(e => ({
       ...e,
       has_attachments: e.has_attachments ?? false,
+      triage_category: e.triage_category ?? 'other',
       // Flatten label assignments to array of label objects
       labels: (e.email_label_assignments ?? []).map((a: any) => a.email_labels).filter(Boolean),
     })),
@@ -213,6 +217,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   };
 }
 
+const TRIAGE_TABS = [
+  { id: 'all',          label: 'All',           Icon: InboxIcon },
+  { id: 'important',   label: 'Important',     Icon: Star },
+  { id: 'other',       label: 'Other',         Icon: Mail },
+  { id: 'newsletter',  label: 'Newsletters',   Icon: Mail },
+  { id: 'notification',label: 'Notifications', Icon: Bell },
+] as const;
+
 export default function Inbox() {
   const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -225,12 +237,34 @@ export default function Inbox() {
   const [focusIndex, setFocusIndex] = useState(0);
   const [draggedEmailIds, setDraggedEmailIds] = useState<string[]>([]);
   const [showCompose, setShowCompose] = useState(false);
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+  const [triageFilter, setTriageFilter] = useState<string>('all');
   const [composeProps, setComposeProps] = useState<{
     replyTo?: any;
     replyAll?: boolean;
     forward?: boolean;
   } | null>(null);
   const [threadEmails, setThreadEmails] = useState<any[] | null>(null);
+
+  // Triage filtering
+  const filteredEmails = useMemo(() => {
+    if (triageFilter === 'all') return emails;
+    return emails.filter((e: any) => (e.triage_category ?? 'other') === triageFilter);
+  }, [emails, triageFilter]);
+
+  const triageCounts = useMemo(() => {
+    const c: Record<string, number> = { all: emails.length };
+    for (const e of emails as any[]) {
+      const cat = e.triage_category ?? 'other';
+      c[cat] = (c[cat] || 0) + 1;
+    }
+    return c;
+  }, [emails]);
+
+  // Reset focus when filter changes
+  useEffect(() => {
+    setFocusIndex(0);
+  }, [triageFilter, folder]);
 
   // Handle URL params for compose (reply/forward links)
   useEffect(() => {
@@ -250,78 +284,6 @@ export default function Inbox() {
       }
     }
   }, [searchParams, emails]);
-
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-      switch (e.key) {
-        case 'j':
-          e.preventDefault();
-          setFocusIndex(i => Math.min(i + 1, emails.length - 1));
-          break;
-        case 'k':
-          e.preventDefault();
-          setFocusIndex(i => Math.max(i - 1, 0));
-          break;
-        case 'o':
-        case 'Enter':
-          e.preventDefault();
-          if (emails[focusIndex]) {
-            handleOpenEmail(emails[focusIndex] as PreviewEmail);
-          }
-          break;
-        case 'u':
-          e.preventDefault();
-          setActiveEmail(null);
-          setThreadEmails(null);
-          break;
-        case 'e':
-          e.preventDefault();
-          handleBulkAction('archive');
-          break;
-        case '#':
-          e.preventDefault();
-          handleBulkAction('trash');
-          break;
-        case 's':
-          e.preventDefault();
-          if (emails[focusIndex]) {
-            handleBulkAction(emails[focusIndex].is_starred ? 'unstar' : 'star');
-          }
-          break;
-        case 'x':
-          e.preventDefault();
-          if (emails[focusIndex]) toggleSelect(emails[focusIndex].id);
-          break;
-        case '/':
-          e.preventDefault();
-          document.getElementById('inbox-search')?.focus();
-          break;
-        case 'c':
-          e.preventDefault();
-          setShowCompose(true);
-          setComposeProps(null);
-          break;
-        case 'r':
-          e.preventDefault();
-          if (activeEmail) {
-            setComposeProps({ replyTo: activeEmail });
-            setShowCompose(true);
-          }
-          break;
-        case 'Escape':
-          setActiveEmail(null);
-          setThreadEmails(null);
-          setSelectedIds(new Set());
-          break;
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [emails, focusIndex, activeEmail]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -392,17 +354,17 @@ export default function Inbox() {
     });
   };
 
-  const handleBulkAction = (action: string) => {
+  const handleBulkAction = useCallback((action: string) => {
     const ids = selectedIds.size > 0
       ? Array.from(selectedIds)
-      : emails[focusIndex] ? [emails[focusIndex].id] : [];
+      : filteredEmails[focusIndex] ? [filteredEmails[focusIndex].id] : [];
     if (ids.length === 0) return;
     fetcher.submit(
       { action, email_ids: JSON.stringify(ids) },
       { method: 'post', action: '/dashboard/inbox/bulk' }
     );
     setSelectedIds(new Set());
-  };
+  }, [selectedIds, filteredEmails, focusIndex, fetcher]);
 
   const markAsRead = (id: string) => {
     fetcher.submit(
@@ -481,6 +443,57 @@ export default function Inbox() {
     setSearchParams(params);
   };
 
+  const handleClose = useCallback(() => {
+    setActiveEmail(null);
+    setThreadEmails(null);
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleReply = useCallback(() => {
+    if (activeEmail) {
+      setComposeProps({ replyTo: activeEmail });
+      setShowCompose(true);
+    }
+  }, [activeEmail]);
+
+  const handleReplyAll = useCallback(() => {
+    if (activeEmail) {
+      setComposeProps({ replyTo: activeEmail, replyAll: true });
+      setShowCompose(true);
+    }
+  }, [activeEmail]);
+
+  const handleForward = useCallback(() => {
+    if (activeEmail) {
+      setComposeProps({ replyTo: activeEmail, forward: true });
+      setShowCompose(true);
+    }
+  }, [activeEmail]);
+
+  // Wire up keyboard shortcuts
+  useEmailKeyboardShortcuts({
+    emails: filteredEmails as Array<{ id: string; is_starred?: boolean }>,
+    focusIndex,
+    setFocusIndex,
+    activeEmail,
+    onOpenFocused: () => {
+      if (filteredEmails[focusIndex]) {
+        handleOpenEmail(filteredEmails[focusIndex] as PreviewEmail);
+      }
+    },
+    onClose: handleClose,
+    onBulkAction: handleBulkAction,
+    onToggleSelect: () => {
+      if (filteredEmails[focusIndex]) toggleSelect(filteredEmails[focusIndex].id);
+    },
+    onCompose: () => { setShowCompose(true); setComposeProps(null); },
+    onReply: handleReply,
+    onReplyAll: handleReplyAll,
+    onForward: handleForward,
+    onSearch: () => document.getElementById('inbox-search')?.focus(),
+    onShowHelp: () => setShowShortcutsHelp(true),
+  });
+
   return (
     <div className="flex h-full">
       <InboxSidebar
@@ -523,12 +536,46 @@ export default function Inbox() {
               />
             </button>
           </div>
+
+          {/* Triage Tabs */}
+          <div className="flex border-b border-zinc-800 overflow-x-auto scrollbar-none">
+            {TRIAGE_TABS.map(({ id, label }) => {
+              const count = triageCounts[id] ?? 0;
+              const isActive = triageFilter === id;
+              if (id !== 'all' && count === 0) return null;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setTriageFilter(id)}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap border-b-2 transition-colors ${
+                    isActive
+                      ? 'border-emerald-500 text-emerald-400'
+                      : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  <span>{label}</span>
+                  {count > 0 && id !== 'all' && (
+                    <span className={`px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
+                      {count}
+                    </span>
+                  )}
+                  {id === 'all' && (
+                    <span className={`px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
           <EmailList
-            emails={emails as Email[]}
+            emails={filteredEmails as Email[]}
             selectedIds={selectedIds}
             activeEmailId={activeEmail?.id ?? null}
+            focusedIndex={focusIndex}
             onSelect={toggleSelect}
-            onSelectAll={() => setSelectedIds(new Set(emails.map(e => e.id)))}
+            onSelectAll={() => setSelectedIds(new Set(filteredEmails.map(e => e.id)))}
             onClearSelection={() => setSelectedIds(new Set())}
             onOpen={(email) => handleOpenEmail(email as PreviewEmail)}
             onDragStart={handleDragStart}
@@ -589,6 +636,11 @@ export default function Inbox() {
         forward={composeProps?.forward}
         accountId={accounts[0]?.id || ''}
         accountEmail={accounts[0]?.email || ''}
+      />
+
+      <KeyboardShortcutsHelp
+        isOpen={showShortcutsHelp}
+        onClose={() => setShowShortcutsHelp(false)}
       />
     </div>
   );
