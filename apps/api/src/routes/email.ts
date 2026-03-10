@@ -196,6 +196,9 @@ email.post("/accounts/:id/sync", async (c) => {
 
   const accessToken = await getValidAccessToken(account, c.env, supabase);
 
+  // Sync labels first
+  const labelSync = await syncLabelsForAccount(id, accessToken, supabase);
+
   const messagesResponse = await fetch(
     "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50",
     { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -254,7 +257,16 @@ email.post("/accounts/:id/sync", async (c) => {
     .update({ last_sync_at: new Date().toISOString() })
     .eq("id", id);
 
-  return c.json({ message: "Sync complete", synced: syncedCount });
+  return c.json({
+    success: true,
+    labelSync: {
+      total: labelSync.total,
+      system: labelSync.system,
+      user: labelSync.user,
+      userLabelNames: labelSync.userLabelNames,
+    },
+    emailSync: { synced: syncedCount },
+  });
 });
 
 // ============================================
@@ -531,9 +543,9 @@ email.get("/accounts/:id/sync-labels", async (c) => {
   if (!account) return c.json({ error: "Account not found" }, 404);
 
   const accessToken = await getValidAccessToken(account, c.env, supabase);
-  const labels = await syncLabelsForAccount(id, accessToken, supabase);
+  const result = await syncLabelsForAccount(id, accessToken, supabase);
 
-  return c.json({ labels });
+  return c.json({ labels: result.labels });
 });
 
 // ============================================
@@ -1088,8 +1100,16 @@ async function findRelationship(emailAddr: string, supabase: any): Promise<strin
 // ============================================
 // HELPER: Sync Gmail Labels
 // ============================================
+interface LabelSyncResult {
+  labels: unknown[];
+  total: number;
+  system: number;
+  user: number;
+  userLabelNames: string[];
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function syncLabelsForAccount(accountId: string, accessToken: string, supabase: any): Promise<unknown[]> {
+async function syncLabelsForAccount(accountId: string, accessToken: string, supabase: any): Promise<LabelSyncResult> {
   const response = await fetch(
     "https://gmail.googleapis.com/gmail/v1/users/me/labels",
     { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -1111,6 +1131,7 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
   const { labels } = body;
   console.log(`[Labels] Gmail returned ${labels?.length ?? 0} labels for account ${accountId}`);
   const userLabels = labels?.filter(l => l.type === "user") ?? [];
+  const systemLabels = labels?.filter(l => l.type === "system") ?? [];
   console.log(`[Labels] User labels: ${userLabels.length}, names: ${userLabels.map(l => l.name).join(", ")}`);
 
   const systemLabelIds = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "STARRED", "UNREAD", "IMPORTANT"];
@@ -1166,7 +1187,13 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
     .eq("account_id", accountId)
     .order("sort_order");
 
-  return savedLabels ?? [];
+  return {
+    labels: savedLabels ?? [],
+    total: labels?.length ?? 0,
+    system: systemLabels.length,
+    user: userLabels.length,
+    userLabelNames: userLabels.map(l => l.name),
+  };
 }
 
 // ============================================

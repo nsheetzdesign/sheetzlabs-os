@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useFetcher } from 'react-router';
 import {
   Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail,
-  ChevronDown, ChevronRight, Plus, Tag, RefreshCw, Check, AlertCircle,
+  ChevronDown, ChevronRight, ChevronUp, Plus, Tag, RefreshCw, Check, AlertCircle,
 } from 'lucide-react';
 
 interface Label {
@@ -276,57 +276,133 @@ export function InboxSidebar({
         )}
       </div>
 
-      {/* Sync button */}
+      {/* Sync button + debug panel */}
       <SyncButton />
     </div>
   );
 }
 
+interface SyncAccount {
+  email: string;
+  success: boolean;
+  error: string | null;
+  labels: { total: number; system: number; user: number; userLabelNames: string[] };
+  emails: { synced: number };
+}
+
+interface SyncResult {
+  success: boolean;
+  accounts: SyncAccount[];
+}
+
 function SyncButton() {
   const syncFetcher = useFetcher();
-  const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const isLoading = syncFetcher.state !== 'idle';
+  const [showDetails, setShowDetails] = useState(false);
+  const [lastResult, setLastResult] = useState<SyncResult | null>(null);
+
+  const isLoading = syncFetcher.state === 'submitting' || syncFetcher.state === 'loading';
 
   useEffect(() => {
-    if (syncFetcher.state === 'idle' && syncFetcher.data != null) {
-      const hasFailure = (syncFetcher.data as any).results?.some((r: any) => !r.success);
-      setStatus(hasFailure ? 'error' : 'success');
-      const timer = setTimeout(() => setStatus('idle'), hasFailure ? 3000 : 2000);
-      return () => clearTimeout(timer);
+    if (syncFetcher.data && syncFetcher.state === 'idle') {
+      setLastResult(syncFetcher.data as SyncResult);
+      setShowDetails(true);
     }
   }, [syncFetcher.data, syncFetcher.state]);
 
+  const hasError = lastResult?.accounts?.some(a => !a.success);
+  const hasSuccess = lastResult?.success && !hasError;
+
   return (
-    <div className="p-3 border-t border-zinc-800">
-      <syncFetcher.Form method="post" action="/dashboard/inbox/sync">
-        <button
-          type="submit"
-          disabled={isLoading}
-          className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
-        >
-          {isLoading ? (
-            <>
-              <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>Syncing...</span>
-            </>
-          ) : status === 'success' ? (
-            <>
-              <Check className="w-4 h-4 text-emerald-500" />
-              <span className="text-emerald-500">Synced</span>
-            </>
-          ) : status === 'error' ? (
-            <>
-              <AlertCircle className="w-4 h-4 text-red-500" />
-              <span className="text-red-500">Sync failed</span>
-            </>
-          ) : (
-            <>
-              <RefreshCw className="w-4 h-4" />
-              <span>Sync All Inboxes</span>
-            </>
+    <div className="border-t border-zinc-800">
+      {/* Sync Button */}
+      <div className="p-3">
+        <syncFetcher.Form method="post" action="/dashboard/inbox/sync">
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="flex items-center justify-center gap-2 w-full px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
+          >
+            {isLoading ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                <span>Syncing...</span>
+              </>
+            ) : hasSuccess ? (
+              <>
+                <Check className="w-4 h-4 text-emerald-500" />
+                <span className="text-emerald-500">Synced</span>
+              </>
+            ) : hasError ? (
+              <>
+                <AlertCircle className="w-4 h-4 text-amber-500" />
+                <span className="text-amber-500">Sync completed with errors</span>
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-4 h-4" />
+                <span>Sync All Inboxes</span>
+              </>
+            )}
+          </button>
+        </syncFetcher.Form>
+      </div>
+
+      {/* Debug Panel */}
+      {lastResult && (
+        <div className="border-t border-zinc-800">
+          <button
+            onClick={() => setShowDetails(!showDetails)}
+            className="flex items-center justify-between w-full px-3 py-2 text-xs text-zinc-500 hover:text-zinc-400"
+          >
+            <span>Sync Details</span>
+            {showDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+
+          {showDetails && (
+            <div className="px-3 pb-3 space-y-2 text-xs">
+              {lastResult.accounts?.map((account, i) => (
+                <div
+                  key={i}
+                  className={`p-2 rounded ${account.success ? 'bg-zinc-900' : 'bg-red-950/30'}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-300 font-medium truncate max-w-[150px]">
+                      {account.email}
+                    </span>
+                    {account.success ? (
+                      <Check className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-3 h-3 text-red-500 flex-shrink-0" />
+                    )}
+                  </div>
+
+                  {account.success ? (
+                    <div className="mt-1 text-zinc-500 space-y-0.5">
+                      <div>Labels: {account.labels?.total || 0} total, {account.labels?.user || 0} custom</div>
+                      {(account.labels?.userLabelNames?.length ?? 0) > 0 && (
+                        <div className="text-emerald-600">
+                          → {account.labels.userLabelNames.slice(0, 5).join(', ')}
+                          {account.labels.userLabelNames.length > 5 && '...'}
+                        </div>
+                      )}
+                      <div>Emails: {account.emails?.synced || 0} synced</div>
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-red-400">{account.error || 'Unknown error'}</div>
+                  )}
+                </div>
+              ))}
+
+              <button
+                onClick={() => { setLastResult(null); setShowDetails(false); }}
+                className="text-zinc-600 hover:text-zinc-400 text-xs"
+              >
+                Clear
+              </button>
+            </div>
           )}
-        </button>
-      </syncFetcher.Form>
+        </div>
+      )}
     </div>
   );
 }

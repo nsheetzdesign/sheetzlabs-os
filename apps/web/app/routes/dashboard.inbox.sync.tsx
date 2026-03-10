@@ -19,13 +19,42 @@ export async function action({ context }: ActionFunctionArgs) {
         method: 'POST',
       });
       const data = await res.json() as Record<string, unknown>;
-      results.push({ account: account.email, ...data, success: res.ok });
+      if (res.ok) {
+        results.push({
+          email: account.email,
+          success: true,
+          labelSync: data.labelSync as { total: number; system: number; user: number; userLabelNames: string[] } | undefined,
+          emailSync: data.emailSync as { synced: number } | undefined,
+        });
+      } else {
+        results.push({
+          email: account.email,
+          success: false,
+          error: (data.error as string) ?? 'Sync failed',
+        });
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[Sync] Error for ${account.email}:`, message);
-      results.push({ account: account.email, error: message, success: false });
+      results.push({ email: account.email, error: message, success: false });
     }
   }
 
-  return Response.json({ results, synced_at: new Date().toISOString() });
+  return Response.json({
+    success: results.every(r => r.success),
+    accounts: results.map(r => ({
+      email: r.email,
+      success: r.success,
+      error: r.success ? null : (r.error || 'Unknown error'),
+      labels: {
+        total: r.labelSync?.total || 0,
+        system: r.labelSync?.system || 0,
+        user: r.labelSync?.user || 0,
+        userLabelNames: r.labelSync?.userLabelNames || [],
+      },
+      emails: {
+        synced: r.emailSync?.synced || 0,
+      },
+    })),
+  });
 }
