@@ -64,10 +64,23 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     query = query.eq('account_id', account_id);
   }
 
-  const [{ data: emails }, { data: accounts }] = await Promise.all([
+  const [{ data: emails, error: emailsError }, { data: accounts }] = await Promise.all([
     query,
     supabase.from('email_accounts').select('id, email').order('email'),
   ]);
+
+  console.log('[Inbox] Query result:', {
+    count: emails?.length,
+    error: emailsError,
+    folder,
+    accountId: account_id,
+    firstEmail: emails?.[0] ? {
+      id: emails[0].id,
+      subject: emails[0].subject,
+      folder: emails[0].folder,
+      hasBody: !!emails[0].body_text || !!emails[0].body_html,
+    } : null,
+  });
 
   const accountIds = (accounts ?? []).map(a => a.id);
 
@@ -81,17 +94,31 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     : { data: [] };
 
   // Group labels by account
-  const labelsByAccount = (labelsData ?? []).reduce<Record<string, typeof labelsData>>((acc, label) => {
+  const labelsByAccount = (labelsData ?? []).reduce<Record<string, any[]>>((acc, label) => {
     if (!acc[label.account_id]) acc[label.account_id] = [];
     acc[label.account_id]!.push(label);
     return acc;
   }, {});
 
-  // For any account with no labels, auto-trigger sync-labels (fire and forget)
-  const apiUrl = (env as Record<string, string>).API_URL ?? 'https://api.sheetzlabs.com';
+  // For any account with no labels, seed system labels directly
   for (const account of accounts ?? []) {
     if (!labelsByAccount[account.id]?.length) {
-      fetch(`${apiUrl}/email/accounts/${account.id}/sync-labels`).catch(() => {});
+      const systemLabels = [
+        { account_id: account.id, name: 'Inbox', type: 'system', icon: 'Inbox', sort_order: 1 },
+        { account_id: account.id, name: 'Starred', type: 'system', icon: 'Star', sort_order: 2 },
+        { account_id: account.id, name: 'Snoozed', type: 'system', icon: 'Clock', sort_order: 3 },
+        { account_id: account.id, name: 'Sent', type: 'system', icon: 'Send', sort_order: 4 },
+        { account_id: account.id, name: 'Drafts', type: 'system', icon: 'File', sort_order: 5 },
+        { account_id: account.id, name: 'Spam', type: 'system', icon: 'AlertTriangle', sort_order: 90 },
+        { account_id: account.id, name: 'Trash', type: 'system', icon: 'Trash2', sort_order: 91 },
+        { account_id: account.id, name: 'All Mail', type: 'system', icon: 'Mail', sort_order: 92 },
+      ];
+      const { data: seeded } = await supabase
+        .from('email_labels')
+        .upsert(systemLabels, { onConflict: 'account_id,name', ignoreDuplicates: true })
+        .select('*');
+      labelsByAccount[account.id] = seeded ?? systemLabels;
+      console.log(`[Inbox] Seeded ${seeded?.length ?? systemLabels.length} labels for account ${account.id}`);
     }
   }
 

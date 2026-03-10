@@ -2,7 +2,7 @@ import { useState, useRef } from 'react';
 import { useFetcher } from 'react-router';
 import {
   Star, Archive, Trash2, Clock, MoreHorizontal,
-  CheckSquare, Square, Paperclip,
+  CheckSquare, Square, Paperclip, RefreshCw,
 } from 'lucide-react';
 import { SnoozePicker } from './SnoozePicker';
 
@@ -133,8 +133,10 @@ export function EmailList({
         <div className="flex-1" />
         <button
           onClick={() => fetcher.submit({}, { method: 'post', action: '/dashboard/inbox/sync' })}
-          className="text-xs text-zinc-500 hover:text-zinc-300"
+          disabled={fetcher.state !== 'idle'}
+          className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
         >
+          <RefreshCw size={13} className={fetcher.state !== 'idle' ? 'animate-spin' : ''} />
           {fetcher.state !== 'idle' ? 'Syncing...' : 'Refresh'}
         </button>
       </div>
