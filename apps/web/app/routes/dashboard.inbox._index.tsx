@@ -107,14 +107,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       console.log(`[Inbox] Seeding labels for account ${account.email} (${account.id})...`);
 
       const systemLabels = [
-        { name: 'Inbox', icon: 'Inbox', sort_order: 1 },
-        { name: 'Starred', icon: 'Star', sort_order: 2 },
-        { name: 'Snoozed', icon: 'Clock', sort_order: 3 },
-        { name: 'Sent', icon: 'Send', sort_order: 4 },
-        { name: 'Drafts', icon: 'File', sort_order: 5 },
-        { name: 'Spam', icon: 'AlertTriangle', sort_order: 90 },
-        { name: 'Trash', icon: 'Trash2', sort_order: 91 },
-        { name: 'All Mail', icon: 'Mail', sort_order: 92 },
+        { name: 'Inbox',    icon: 'Inbox',         sort_order: 1,  external_id: 'INBOX' },
+        { name: 'Starred',  icon: 'Star',          sort_order: 2,  external_id: 'STARRED' },
+        { name: 'Snoozed',  icon: 'Clock',         sort_order: 3,  external_id: 'SNOOZED' },
+        { name: 'Sent',     icon: 'Send',          sort_order: 4,  external_id: 'SENT' },
+        { name: 'Drafts',   icon: 'File',          sort_order: 5,  external_id: 'DRAFT' },
+        { name: 'Spam',     icon: 'AlertTriangle', sort_order: 90, external_id: 'SPAM' },
+        { name: 'Trash',    icon: 'Trash2',        sort_order: 91, external_id: 'TRASH' },
+        { name: 'All Mail', icon: 'Mail',          sort_order: 92, external_id: 'ALL_MAIL' },
       ];
 
       const seededLabels: any[] = [];
@@ -128,8 +128,9 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
               type: 'system',
               icon: label.icon,
               sort_order: label.sort_order,
+              external_id: label.external_id,
             },
-            { onConflict: 'account_id,name', ignoreDuplicates: false }
+            { onConflict: 'account_id,external_id', ignoreDuplicates: false }
           )
           .select('*')
           .single();

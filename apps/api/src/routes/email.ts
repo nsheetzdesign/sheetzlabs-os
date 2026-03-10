@@ -805,6 +805,9 @@ email.post("/sync", async (c) => {
 
       const accessToken = await getValidAccessToken(account, c.env, supabase);
 
+      // Sync labels first so email-label assignments can be created
+      await syncLabelsForAccount(account.id, accessToken, supabase);
+
       let newMessages = 0;
       if (account.last_history_id && account.full_sync_completed) {
         newMessages = await syncViaHistory(account, accessToken, supabase);
@@ -1049,6 +1052,7 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
   const { labels } = (await response.json()) as { labels?: Array<{
     id: string; name: string; type?: string;
     labelListVisibility?: string;
+    messageListVisibility?: string;
     color?: { backgroundColor?: string };
   }> };
 
@@ -1057,6 +1061,7 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
   for (const label of labels ?? []) {
     if (label.labelListVisibility === "labelHide") continue;
     if (label.id.startsWith("CATEGORY_")) continue;
+    if (label.id === "IMPORTANT" || label.id === "UNREAD") continue;
 
     const isSystem = systemLabelIds.includes(label.id) || label.type === "system";
 
@@ -1064,13 +1069,12 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
     let icon = "Tag";
     let sortOrder = 100;
 
-    if (label.id === "INBOX")   { name = "Inbox";   icon = "Inbox";         sortOrder = 1; }
-    else if (label.id === "STARRED") { name = "Starred"; icon = "Star";     sortOrder = 2; }
-    else if (label.id === "SENT")    { name = "Sent";    icon = "Send";     sortOrder = 4; }
-    else if (label.id === "DRAFT")   { name = "Drafts";  icon = "File";     sortOrder = 5; }
+    if (label.id === "INBOX")        { name = "Inbox";   icon = "Inbox";         sortOrder = 1; }
+    else if (label.id === "STARRED") { name = "Starred"; icon = "Star";          sortOrder = 2; }
+    else if (label.id === "SENT")    { name = "Sent";    icon = "Send";          sortOrder = 4; }
+    else if (label.id === "DRAFT")   { name = "Drafts";  icon = "File";          sortOrder = 5; }
     else if (label.id === "SPAM")    { name = "Spam";    icon = "AlertTriangle"; sortOrder = 90; }
-    else if (label.id === "TRASH")   { name = "Trash";   icon = "Trash2";   sortOrder = 91; }
-    else if (label.id === "IMPORTANT" || label.id === "UNREAD") continue;
+    else if (label.id === "TRASH")   { name = "Trash";   icon = "Trash2";        sortOrder = 91; }
 
     await supabase.from("email_labels").upsert(
       {
@@ -1079,20 +1083,22 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
         type: isSystem ? "system" : "user",
         icon,
         sort_order: sortOrder,
-        color: label.color?.backgroundColor ?? "#2FE8B6",
+        color: label.color?.backgroundColor ?? (isSystem ? "#71717a" : "#2FE8B6"),
         external_id: label.id,
+        label_list_visibility: label.labelListVisibility ?? "labelShow",
+        message_list_visibility: label.messageListVisibility ?? "show",
       },
-      { onConflict: "account_id,name" }
+      { onConflict: "account_id,external_id" }
     );
   }
 
-  // Ensure Snoozed and All Mail exist
+  // Ensure Snoozed and All Mail exist (no Gmail equivalent, use synthetic IDs)
   await supabase.from("email_labels").upsert(
     [
-      { account_id: accountId, name: "Snoozed",  type: "system", icon: "Clock", sort_order: 3,  color: "#71717a" },
-      { account_id: accountId, name: "All Mail", type: "system", icon: "Mail",  sort_order: 92, color: "#71717a" },
+      { account_id: accountId, name: "Snoozed",  external_id: "SNOOZED",  type: "system", icon: "Clock", sort_order: 3,  color: "#71717a" },
+      { account_id: accountId, name: "All Mail", external_id: "ALL_MAIL", type: "system", icon: "Mail",  sort_order: 92, color: "#71717a" },
     ],
-    { onConflict: "account_id,name" }
+    { onConflict: "account_id,external_id" }
   );
 
   const { data: savedLabels } = await supabase
@@ -1102,6 +1108,32 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
     .order("sort_order");
 
   return savedLabels ?? [];
+}
+
+// ============================================
+// HELPER: Assign Gmail label IDs to a synced email
+// ============================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function assignEmailLabels(emailId: string, gmailLabelIds: string[], accountId: string, supabase: any): Promise<void> {
+  if (!gmailLabelIds.length) return;
+
+  const { data: localLabels } = await supabase
+    .from("email_labels")
+    .select("id, external_id")
+    .eq("account_id", accountId)
+    .in("external_id", gmailLabelIds);
+
+  if (!localLabels?.length) return;
+
+  const assignments = (localLabels as Array<{ id: string }>).map((label) => ({
+    email_id: emailId,
+    label_id: label.id,
+  }));
+
+  await supabase.from("email_label_assignments").upsert(assignments, {
+    onConflict: "email_id,label_id",
+    ignoreDuplicates: true,
+  });
 }
 
 // ============================================
@@ -1125,10 +1157,13 @@ async function fullSync(account: any, accessToken: string, supabase: any): Promi
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
-    const fullMsg = await msgResponse.json();
+    const fullMsg = await msgResponse.json() as { labelIds?: string[]; [key: string]: unknown };
     const emailRow = parseGmailMessageFull(fullMsg, account.id);
-    const { error } = await supabase.from("emails").insert(emailRow);
-    if (!error) newCount++;
+    const { data: inserted, error } = await supabase.from("emails").insert(emailRow).select("id").single();
+    if (!error && inserted) {
+      newCount++;
+      await assignEmailLabels(inserted.id, fullMsg.labelIds ?? [], account.id, supabase);
+    }
   }
 
   // Store historyId for incremental syncs
@@ -1175,10 +1210,13 @@ async function syncViaHistory(account: any, accessToken: string, supabase: any):
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${added.message.id}?format=full`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
-      const fullMsg = await msgResponse.json();
+      const fullMsg = await msgResponse.json() as { labelIds?: string[]; [key: string]: unknown };
       const emailRow = parseGmailMessageFull(fullMsg, account.id);
-      const { error } = await supabase.from("emails").insert(emailRow);
-      if (!error) newCount++;
+      const { data: inserted, error } = await supabase.from("emails").insert(emailRow).select("id").single();
+      if (!error && inserted) {
+        newCount++;
+        await assignEmailLabels(inserted.id, fullMsg.labelIds ?? [], account.id, supabase);
+      }
     }
   }
 
