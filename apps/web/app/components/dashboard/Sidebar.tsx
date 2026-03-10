@@ -42,6 +42,7 @@ const navItems = [
 interface SidebarProps {
   user?: { email?: string };
   onOpenPalette: () => void;
+  collapsed?: boolean;
 }
 
 function getInitials(email?: string): string {
@@ -54,44 +55,64 @@ function getInitials(email?: string): string {
   return local.slice(0, 2).toUpperCase();
 }
 
-export function Sidebar({ user, onOpenPalette }: SidebarProps) {
+export function Sidebar({ user, onOpenPalette, collapsed = false }: SidebarProps) {
   const initials = getInitials(user?.email);
   const displayEmail = user?.email ?? "";
 
   return (
-    <aside className="fixed left-0 top-0 flex h-screen w-64 flex-col border-r border-surface-2/50 bg-surface-0">
+    <aside
+      className={`fixed left-0 top-0 flex h-screen flex-col border-r border-surface-2/50 bg-surface-0 transition-all duration-200 ${
+        collapsed ? "w-16" : "w-64"
+      }`}
+    >
       {/* Logo */}
-      <div className="flex items-center gap-3 border-b border-surface-2/50 px-4 py-5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
+      <div
+        className={`flex items-center border-b border-surface-2/50 px-4 py-5 ${
+          collapsed ? "justify-center" : "gap-3"
+        }`}
+      >
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
           SL
         </div>
-        <div>
-          <div className="text-sm font-semibold">Sheetz Labs</div>
-          <div className="font-mono text-xs text-zinc-500">OS v0.1.0</div>
-        </div>
+        {!collapsed && (
+          <div>
+            <div className="text-sm font-semibold">Sheetz Labs</div>
+            <div className="font-mono text-xs text-zinc-500">OS v0.1.0</div>
+          </div>
+        )}
       </div>
 
       {/* Search */}
-      <div className="px-3 py-3">
+      <div className={`py-3 ${collapsed ? "px-2" : "px-3"}`}>
         <button
           onClick={onOpenPalette}
-          className="flex w-full items-center gap-2 rounded-lg border border-surface-2 bg-surface-1/50 px-3 py-2 text-sm text-zinc-500 transition-colors hover:border-surface-3 hover:text-zinc-300"
+          title={collapsed ? "Search (⌘K)" : undefined}
+          className={`flex w-full items-center rounded-lg border border-surface-2 bg-surface-1/50 text-sm text-zinc-500 transition-colors hover:border-surface-3 hover:text-zinc-300 ${
+            collapsed ? "justify-center p-2" : "gap-2 px-3 py-2"
+          }`}
         >
-          <Search className="h-4 w-4" />
-          <span className="flex-1 text-left">Search...</span>
-          <kbd className="font-mono text-xs text-zinc-600">⌘K</kbd>
+          <Search className="h-4 w-4 shrink-0" />
+          {!collapsed && (
+            <>
+              <span className="flex-1 text-left">Search...</span>
+              <kbd className="font-mono text-xs text-zinc-600">⌘K</kbd>
+            </>
+          )}
         </button>
       </div>
 
       {/* Nav */}
-      <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
+      <nav className={`min-h-0 flex-1 space-y-0.5 overflow-y-auto py-2 ${collapsed ? "px-2" : "px-3"}`}>
         {navItems.map(({ icon: Icon, label, to }) => (
           <NavLink
             key={to}
             to={to}
             end={to === "/dashboard"}
+            title={collapsed ? label : undefined}
             className={({ isActive }) =>
-              `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+              `flex items-center rounded-lg py-2 text-sm transition-colors ${
+                collapsed ? "justify-center px-2" : "gap-3 px-3"
+              } ${
                 isActive
                   ? "border border-brand/30 bg-brand/10 text-brand"
                   : "text-zinc-500 hover:bg-surface-1/50 hover:text-zinc-300"
@@ -99,31 +120,51 @@ export function Sidebar({ user, onOpenPalette }: SidebarProps) {
             }
           >
             <Icon className="h-4 w-4 shrink-0" />
-            {label}
+            {!collapsed && label}
           </NavLink>
         ))}
       </nav>
 
       {/* User footer */}
       <div className="border-t border-surface-2/50 p-3">
-        <div className="flex items-center gap-3 rounded-lg px-2 py-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-sm font-semibold text-zinc-300">
-            {initials}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-xs text-zinc-400">{displayEmail}</div>
-            <div className="text-xs text-zinc-600">Founder</div>
-          </div>
-          <Form method="post" action="/auth/logout">
-            <button
-              type="submit"
-              title="Sign out"
-              className="text-zinc-600 transition-colors hover:text-zinc-300"
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-2">
+            <div
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-sm font-semibold text-zinc-300"
+              title={displayEmail}
             >
-              <LogOut className="h-4 w-4" />
-            </button>
-          </Form>
-        </div>
+              {initials}
+            </div>
+            <Form method="post" action="/auth/logout">
+              <button
+                type="submit"
+                title="Sign out"
+                className="text-zinc-600 transition-colors hover:text-zinc-300"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </Form>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 rounded-lg px-2 py-2">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-2 text-sm font-semibold text-zinc-300">
+              {initials}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-xs text-zinc-400">{displayEmail}</div>
+              <div className="text-xs text-zinc-600">Founder</div>
+            </div>
+            <Form method="post" action="/auth/logout">
+              <button
+                type="submit"
+                title="Sign out"
+                className="text-zinc-600 transition-colors hover:text-zinc-300"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </Form>
+          </div>
+        )}
       </div>
     </aside>
   );

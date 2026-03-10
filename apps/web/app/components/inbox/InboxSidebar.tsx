@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useFetcher } from 'react-router';
 import {
   Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail,
@@ -65,8 +65,19 @@ export function InboxSidebar({
   onDragOver,
   onDrop,
 }: Props) {
-  // All accounts start collapsed
+  // All accounts start collapsed, but auto-expand active account
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
+  const prevActiveAccountId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (activeAccountId && activeAccountId !== prevActiveAccountId.current) {
+      prevActiveAccountId.current = activeAccountId;
+      setExpandedAccounts(prev => {
+        if (prev.has(activeAccountId)) return prev;
+        return new Set([...prev, activeAccountId]);
+      });
+    }
+  }, [activeAccountId]);
   const [expandedLabels, setExpandedLabels] = useState<Set<string>>(new Set());
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
   const fetcher = useFetcher();
@@ -87,7 +98,7 @@ export function InboxSidebar({
 
   const handleDragOver = (e: React.DragEvent, targetId: string, type: 'folder' | 'label', accountId: string) => {
     e.preventDefault();
-    setDragOverTarget(targetId);
+    setDragOverTarget(type === 'folder' ? `${accountId}-${targetId}` : `${accountId}-label-${targetId}`);
     onDragOver(e, { type, id: targetId, accountId });
   };
 
