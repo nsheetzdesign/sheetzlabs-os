@@ -1,7 +1,9 @@
-import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, useFetcher } from "react-router";
-import { ArrowLeft, Star, Reply, Wand2 } from "lucide-react";
+import { useState, useEffect } from "react";
+import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react-router";
+import { useLoaderData, Link, useFetcher, useNavigate } from "react-router";
+import { ArrowLeft, Star, Reply, Wand2, Archive, Trash2, Clock } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { SnoozePicker } from "~/components/inbox/SnoozePicker";
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: `${data?.email?.subject ?? "Email"} — Inbox — Sheetz Labs OS` },
@@ -38,16 +40,69 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
   return { email, thread };
 }
 
+export async function action({ request, params, context }: ActionFunctionArgs) {
+  const { id } = params;
+  const env = context.cloudflare.env;
+  const supabase = getSupabaseClient(env);
+  const formData = await request.formData();
+  const intent = formData.get("intent") as string;
+
+  switch (intent) {
+    case "archive":
+      await supabase
+        .from("emails")
+        .update({ is_archived: true, folder: "ARCHIVE" })
+        .eq("id", id!);
+      return Response.json({ success: true, action: "archived" });
+
+    case "trash":
+      await supabase
+        .from("emails")
+        .update({ is_trashed: true, folder: "TRASH" })
+        .eq("id", id!);
+      return Response.json({ success: true, action: "trashed" });
+
+    default:
+      return Response.json({ error: "Unknown intent" }, { status: 400 });
+  }
+}
+
+function forceEmailDarkMode(html: string): string {
+  return html
+    .replace(/color:\s*black/gi, "color: #e4e4e7")
+    .replace(/color:\s*#000000/gi, "color: #e4e4e7")
+    .replace(/color:\s*#000(?![0-9a-f])/gi, "color: #e4e4e7")
+    .replace(/color:\s*rgb\(\s*0\s*,\s*0\s*,\s*0\s*\)/gi, "color: rgb(228, 228, 231)");
+}
+
 export default function EmailDetail() {
   const { email, thread } = useLoaderData<typeof loader>();
   const starFetcher = useFetcher();
+  const actionFetcher = useFetcher();
   const aiFetcher = useFetcher();
+  const navigate = useNavigate();
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
 
   const rel = email.relationships as { id: string; name: string; company: string | null } | null;
   const isStarred =
     starFetcher.formData
       ? starFetcher.formData.get("is_starred") === "true"
       : email.is_starred;
+
+  // Navigate to inbox after archive/trash completes
+  useEffect(() => {
+    if (actionFetcher.state === "idle" && actionFetcher.data) {
+      const data = actionFetcher.data as { success?: boolean; action?: string };
+      if (data.success && (data.action === "archived" || data.action === "trashed")) {
+        navigate("/dashboard/inbox");
+      }
+    }
+  }, [actionFetcher.state, actionFetcher.data, navigate]);
+
+  const isActioning = actionFetcher.state !== "idle";
+
+  const bodyHtml = email.body_html as string | null;
+  const bodyText = email.body_text as string | null;
 
   return (
     <div className="flex flex-1 flex-col">
@@ -61,6 +116,50 @@ export default function EmailDetail() {
           Inbox
         </Link>
         <div className="ml-auto flex items-center gap-2">
+          {/* Archive */}
+          <actionFetcher.Form method="post">
+            <input type="hidden" name="intent" value="archive" />
+            <button
+              type="submit"
+              disabled={isActioning}
+              className="p-1.5 text-zinc-500 transition-colors hover:text-zinc-200 hover:bg-zinc-800 rounded disabled:opacity-50"
+              title="Archive"
+            >
+              <Archive className="h-4 w-4" />
+            </button>
+          </actionFetcher.Form>
+
+          {/* Trash */}
+          <actionFetcher.Form method="post">
+            <input type="hidden" name="intent" value="trash" />
+            <button
+              type="submit"
+              disabled={isActioning}
+              className="p-1.5 text-zinc-500 transition-colors hover:text-red-400 hover:bg-zinc-800 rounded disabled:opacity-50"
+              title="Delete"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </actionFetcher.Form>
+
+          {/* Snooze */}
+          <div className="relative">
+            <button
+              onClick={() => setSnoozeOpen(!snoozeOpen)}
+              className="p-1.5 text-zinc-500 transition-colors hover:text-zinc-200 hover:bg-zinc-800 rounded"
+              title="Snooze"
+            >
+              <Clock className="h-4 w-4" />
+            </button>
+            <SnoozePicker
+              emailId={email.id}
+              isOpen={snoozeOpen}
+              onClose={() => setSnoozeOpen(false)}
+            />
+          </div>
+
+          <div className="w-px h-5 bg-zinc-800" />
+
           <starFetcher.Form method="patch" action={`/dashboard/inbox/${email.id}/star`}>
             <input type="hidden" name="is_starred" value={isStarred ? "false" : "true"} />
             <button
@@ -136,9 +235,23 @@ export default function EmailDetail() {
 
         {/* Body */}
         <div className="rounded-lg border border-surface-2/50 bg-surface-1/20 p-6">
-          <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-300">
-            {email.body_text || email.snippet || "(empty)"}
-          </pre>
+          {bodyHtml ? (
+            <div className="email-body text-zinc-200 text-sm leading-relaxed">
+              <style>{`
+                .email-body, .email-body * { color: #e4e4e7 !important; background: transparent !important; }
+                .email-body a { color: #34d399 !important; }
+                .email-body blockquote { border-left: 2px solid #3f3f46 !important; padding-left: 0.75rem; color: #a1a1aa !important; }
+                .email-body img { max-width: 100%; height: auto; }
+              `}</style>
+              <div
+                dangerouslySetInnerHTML={{ __html: forceEmailDarkMode(bodyHtml) }}
+              />
+            </div>
+          ) : (
+            <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-300">
+              {bodyText || email.snippet || "(empty)"}
+            </pre>
+          )}
         </div>
 
         {/* AI draft result */}

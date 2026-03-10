@@ -299,18 +299,36 @@ function SyncButton() {
   const syncFetcher = useFetcher();
   const [showDetails, setShowDetails] = useState(false);
   const [lastResult, setLastResult] = useState<SyncResult | null>(null);
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+  const [, setTick] = useState(0);
 
   const isLoading = syncFetcher.state === 'submitting' || syncFetcher.state === 'loading';
 
   useEffect(() => {
     if (syncFetcher.data && syncFetcher.state === 'idle') {
       setLastResult(syncFetcher.data as SyncResult);
-      setShowDetails(true);
+      setLastSyncTime(new Date());
+      // No auto-expand
     }
   }, [syncFetcher.data, syncFetcher.state]);
 
+  // Update relative time every minute
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   const hasError = lastResult?.accounts?.some(a => !a.success);
-  const hasSuccess = lastResult?.success && !hasError;
+
+  const formatRelativeTime = (date: Date) => {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return date.toLocaleDateString();
+  };
 
   return (
     <div className="border-t border-zinc-800">
@@ -327,11 +345,6 @@ function SyncButton() {
                 <RefreshCw className="w-4 h-4 animate-spin" />
                 <span>Syncing...</span>
               </>
-            ) : hasSuccess ? (
-              <>
-                <Check className="w-4 h-4 text-emerald-500" />
-                <span className="text-emerald-500">Synced</span>
-              </>
             ) : hasError ? (
               <>
                 <AlertCircle className="w-4 h-4 text-amber-500" />
@@ -345,6 +358,11 @@ function SyncButton() {
             )}
           </button>
         </syncFetcher.Form>
+        {lastSyncTime && (
+          <p className="mt-1 text-xs text-zinc-600 text-center">
+            Last synced: {formatRelativeTime(lastSyncTime)}
+          </p>
+        )}
       </div>
 
       {/* Debug Panel */}
