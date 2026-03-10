@@ -3,6 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react
 import { useLoaderData, Link, useFetcher, useNavigate } from "react-router";
 import { ArrowLeft, Star, Reply, Wand2, Archive, Trash2, Clock } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { forceEmailDarkMode } from "~/lib/email-utils";
 import { SnoozePicker } from "~/components/inbox/SnoozePicker";
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
@@ -67,13 +68,6 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   }
 }
 
-function forceEmailDarkMode(html: string): string {
-  return html
-    .replace(/color:\s*black/gi, "color: #e4e4e7")
-    .replace(/color:\s*#000000/gi, "color: #e4e4e7")
-    .replace(/color:\s*#000(?![0-9a-f])/gi, "color: #e4e4e7")
-    .replace(/color:\s*rgb\(\s*0\s*,\s*0\s*,\s*0\s*\)/gi, "color: rgb(228, 228, 231)");
-}
 
 export default function EmailDetail() {
   const { email, thread } = useLoaderData<typeof loader>();
@@ -155,6 +149,7 @@ export default function EmailDetail() {
               emailId={email.id}
               isOpen={snoozeOpen}
               onClose={() => setSnoozeOpen(false)}
+              onSuccess={() => navigate("/dashboard/inbox")}
             />
           </div>
 
@@ -236,17 +231,10 @@ export default function EmailDetail() {
         {/* Body */}
         <div className="rounded-lg border border-surface-2/50 bg-surface-1/20 p-6">
           {bodyHtml ? (
-            <div className="email-body text-zinc-200 text-sm leading-relaxed">
-              <style>{`
-                .email-body, .email-body * { color: #e4e4e7 !important; background: transparent !important; }
-                .email-body a { color: #34d399 !important; }
-                .email-body blockquote { border-left: 2px solid #3f3f46 !important; padding-left: 0.75rem; color: #a1a1aa !important; }
-                .email-body img { max-width: 100%; height: auto; }
-              `}</style>
-              <div
-                dangerouslySetInnerHTML={{ __html: forceEmailDarkMode(bodyHtml) }}
-              />
-            </div>
+            <div
+              className="text-sm leading-relaxed"
+              dangerouslySetInnerHTML={{ __html: forceEmailDarkMode(bodyHtml) }}
+            />
           ) : (
             <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-300">
               {bodyText || email.snippet || "(empty)"}

@@ -6,10 +6,11 @@ interface Props {
   emailId: string;
   isOpen: boolean;
   onClose: () => void;
+  onSuccess?: () => void;
   position?: { x: number; y: number };
 }
 
-export function SnoozePicker({ emailId, isOpen, onClose, position }: Props) {
+export function SnoozePicker({ emailId, isOpen, onClose, onSuccess, position }: Props) {
   const fetcher = useFetcher();
   const [showCustom, setShowCustom] = useState(false);
   const [customDate, setCustomDate] = useState('');
@@ -85,6 +86,7 @@ export function SnoozePicker({ emailId, isOpen, onClose, position }: Props) {
       { method: 'post', action: `/dashboard/inbox/${emailId}/snooze` }
     );
     onClose();
+    onSuccess?.();
   };
 
   const handleCustomSnooze = () => {
