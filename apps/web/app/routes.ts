@@ -73,6 +73,7 @@ export default [
     ]),
     route("inbox", "routes/dashboard.inbox.tsx", [
       index("routes/dashboard.inbox._index.tsx"),
+      route("sync", "routes/dashboard.inbox.sync.tsx"),
       route("compose", "routes/dashboard.inbox.compose.tsx"),
       route("draft-ai", "routes/dashboard.inbox.draft-ai.tsx"),
       route("send", "routes/dashboard.inbox.send.tsx"),

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useLoaderData, useFetcher, useSearchParams, useNavigate } from 'react-router';
+import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator } from 'react-router';
+import { RefreshCw } from 'lucide-react';
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
 import { InboxSidebar } from '~/components/inbox/InboxSidebar';
@@ -100,25 +101,47 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     return acc;
   }, {});
 
-  // For any account with no labels, seed system labels directly
+  // For any account with no labels, seed system labels one by one
   for (const account of accounts ?? []) {
     if (!labelsByAccount[account.id]?.length) {
+      console.log(`[Inbox] Seeding labels for account ${account.email} (${account.id})...`);
+
       const systemLabels = [
-        { account_id: account.id, name: 'Inbox', type: 'system', icon: 'Inbox', sort_order: 1 },
-        { account_id: account.id, name: 'Starred', type: 'system', icon: 'Star', sort_order: 2 },
-        { account_id: account.id, name: 'Snoozed', type: 'system', icon: 'Clock', sort_order: 3 },
-        { account_id: account.id, name: 'Sent', type: 'system', icon: 'Send', sort_order: 4 },
-        { account_id: account.id, name: 'Drafts', type: 'system', icon: 'File', sort_order: 5 },
-        { account_id: account.id, name: 'Spam', type: 'system', icon: 'AlertTriangle', sort_order: 90 },
-        { account_id: account.id, name: 'Trash', type: 'system', icon: 'Trash2', sort_order: 91 },
-        { account_id: account.id, name: 'All Mail', type: 'system', icon: 'Mail', sort_order: 92 },
+        { name: 'Inbox', icon: 'Inbox', sort_order: 1 },
+        { name: 'Starred', icon: 'Star', sort_order: 2 },
+        { name: 'Snoozed', icon: 'Clock', sort_order: 3 },
+        { name: 'Sent', icon: 'Send', sort_order: 4 },
+        { name: 'Drafts', icon: 'File', sort_order: 5 },
+        { name: 'Spam', icon: 'AlertTriangle', sort_order: 90 },
+        { name: 'Trash', icon: 'Trash2', sort_order: 91 },
+        { name: 'All Mail', icon: 'Mail', sort_order: 92 },
       ];
-      const { data: seeded } = await supabase
-        .from('email_labels')
-        .upsert(systemLabels, { onConflict: 'account_id,name', ignoreDuplicates: true })
-        .select('*');
-      labelsByAccount[account.id] = seeded ?? systemLabels;
-      console.log(`[Inbox] Seeded ${seeded?.length ?? systemLabels.length} labels for account ${account.id}`);
+
+      const seededLabels: any[] = [];
+      for (const label of systemLabels) {
+        const { data: inserted, error: insertError } = await supabase
+          .from('email_labels')
+          .insert({
+            account_id: account.id,
+            name: label.name,
+            type: 'system',
+            icon: label.icon,
+            sort_order: label.sort_order,
+          })
+          .select('*')
+          .single();
+
+        if (insertError) {
+          console.error(`[Inbox] Failed to insert label ${label.name} for ${account.email}:`, insertError.message);
+        } else if (inserted) {
+          seededLabels.push(inserted);
+        }
+      }
+
+      labelsByAccount[account.id] = seededLabels.length > 0
+        ? seededLabels
+        : systemLabels.map(l => ({ ...l, account_id: account.id, type: 'system' }));
+      console.log(`[Inbox] Seeded ${seededLabels.length} labels for ${account.email}`);
     }
   }
 
@@ -191,6 +214,8 @@ export default function Inbox() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const fetcher = useFetcher();
+  const revalidator = useRevalidator();
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activeEmail, setActiveEmail] = useState<PreviewEmail | null>(null);
   const [focusIndex, setFocusIndex] = useState(0);
@@ -294,10 +319,27 @@ export default function Inbox() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [emails, focusIndex, activeEmail]);
 
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await fetch('/dashboard/inbox/sync', { method: 'POST' });
+      revalidator.revalidate();
+    } catch (error) {
+      console.error('[Inbox] Sync failed:', error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   // Auto-sync on window focus
   useEffect(() => {
-    const onFocus = () => {
-      fetcher.submit({}, { method: 'post', action: '/dashboard/inbox/sync' });
+    const onFocus = async () => {
+      try {
+        await fetch('/dashboard/inbox/sync', { method: 'POST' });
+        revalidator.revalidate();
+      } catch {
+        // ignore focus sync errors
+      }
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
@@ -305,8 +347,13 @@ export default function Inbox() {
 
   // Polling sync every 3 minutes
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetcher.submit({}, { method: 'post', action: '/dashboard/inbox/sync' });
+    const interval = setInterval(async () => {
+      try {
+        await fetch('/dashboard/inbox/sync', { method: 'POST' });
+        revalidator.revalidate();
+      } catch {
+        // ignore interval sync errors
+      }
     }, 3 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
@@ -449,16 +496,29 @@ export default function Inbox() {
         {/* Email List */}
         <div className={`${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`}>
           {/* Search Bar */}
-          <form onSubmit={handleSearch} className="p-3 border-b border-zinc-800">
-            <input
-              id="inbox-search"
-              type="text"
-              name="q"
-              defaultValue={search || ''}
-              placeholder="Search emails..."
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
-            />
-          </form>
+          <div className="p-3 border-b border-zinc-800 flex gap-2">
+            <form onSubmit={handleSearch} className="flex-1">
+              <input
+                id="inbox-search"
+                type="text"
+                name="q"
+                defaultValue={search || ''}
+                placeholder="Search emails..."
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
+              />
+            </form>
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing || revalidator.state === 'loading'}
+              title="Sync emails"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw
+                size={14}
+                className={isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : ''}
+              />
+            </button>
+          </div>
           <EmailList
             emails={emails as Email[]}
             selectedIds={selectedIds}
