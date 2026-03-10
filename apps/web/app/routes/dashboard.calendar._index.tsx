@@ -650,7 +650,7 @@ function CalendarSettingsModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-sm bg-zinc-900 border border-zinc-700 rounded-xl p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-xl p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm font-semibold text-zinc-100">Calendar Settings</h2>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200"><X className="h-4 w-4" /></button>
@@ -671,17 +671,17 @@ function CalendarSettingsModal({
 
         <div className="mb-6">
           <label className="block text-xs text-zinc-400 mb-2">Account Color</label>
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-5 gap-3">
             {COLOR_SWATCHES.map((c) => (
               <button
                 key={c}
                 type="button"
                 onClick={() => setColor(c)}
-                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-transform ${color === c ? "ring-2 ring-white ring-offset-2 ring-offset-zinc-900 scale-110" : "hover:scale-105"}`}
+                className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all hover:scale-110 hover:ring-2 hover:ring-white/50 ${color === c ? "ring-2 ring-white ring-offset-2 ring-offset-zinc-900 scale-110" : ""}`}
                 style={{ backgroundColor: c }}
                 title={c}
               >
-                {color === c && <Check className="h-4 w-4 text-white" />}
+                {color === c && <Check className="h-5 w-5 text-white drop-shadow" />}
               </button>
             ))}
           </div>
@@ -722,12 +722,17 @@ export default function Calendar() {
     return entry?.calendars.find((c) => c.external_id === googleCalId);
   }
 
-  // Build sub-cal color (user override first, then DB color, then account color)
+  // Build event color: local session override → account color → sub-cal DB color → default
   function getSubCalColor(googleCalId: string | null, accountId: string): string {
     const sub = findSubCal(googleCalId, accountId);
-    if (sub) return subCalColors[sub.id] ?? sub.color;
+    // Local override (sidebar color picker) always wins
+    if (sub && subCalColors[sub.id]) return subCalColors[sub.id];
+    // Account color is the primary setting (CalendarSettingsModal)
     const account = (accounts as CalendarAccount[]).find((a) => a.id === accountId);
-    return account?.color ?? "#2FE8B6";
+    if (account?.color) return account.color;
+    // Sub-cal DB color as fallback
+    if (sub?.color) return sub.color;
+    return "#2FE8B6";
   }
 
   // Filter events by hidden sub-cals (hiddenSubCals stores DB UUIDs)
