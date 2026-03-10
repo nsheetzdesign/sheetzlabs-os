@@ -942,7 +942,33 @@ email.post("/accounts/:id/full-sync", async (c) => {
             .eq("external_id", msg.id)
             .single();
 
-          if (existing) continue;
+          if (existing) {
+            // Update existing email's labels and folder state from Gmail
+            const minRes = await fetch(
+              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=minimal`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            if (minRes.ok) {
+              const minData = (await minRes.json()) as { labelIds?: string[] };
+              const labelIds: string[] = minData.labelIds ?? [];
+              const gmailLabels = labelIds;
+              let folder = "INBOX";
+              if (gmailLabels.includes("SENT")) folder = "SENT";
+              if (gmailLabels.includes("TRASH")) folder = "TRASH";
+              if (gmailLabels.includes("SPAM")) folder = "SPAM";
+              if (gmailLabels.includes("DRAFT")) folder = "DRAFTS";
+              await supabase.from("emails").update({
+                folder,
+                is_read: !gmailLabels.includes("UNREAD"),
+                is_starred: gmailLabels.includes("STARRED"),
+                is_archived: !gmailLabels.includes("INBOX") && folder === "INBOX",
+                is_trashed: gmailLabels.includes("TRASH"),
+                is_spam: gmailLabels.includes("SPAM"),
+              }).eq("id", existing.id);
+              await assignEmailLabels(existing.id, labelIds, id, supabase);
+            }
+            continue;
+          }
 
           const msgResponse = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
@@ -1551,6 +1577,9 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
 // ============================================
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function assignEmailLabels(emailId: string, gmailLabelIds: string[], accountId: string, supabase: any): Promise<void> {
+  // Always clear existing assignments first so stale labels are removed
+  await supabase.from("email_label_assignments").delete().eq("email_id", emailId);
+
   if (!gmailLabelIds.length) return;
 
   const { data: localLabels } = await supabase
@@ -1566,10 +1595,7 @@ async function assignEmailLabels(emailId: string, gmailLabelIds: string[], accou
     label_id: label.id,
   }));
 
-  await supabase.from("email_label_assignments").upsert(assignments, {
-    onConflict: "email_id,label_id",
-    ignoreDuplicates: true,
-  });
+  await supabase.from("email_label_assignments").insert(assignments);
 }
 
 // ============================================
