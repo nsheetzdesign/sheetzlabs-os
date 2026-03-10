@@ -78,6 +78,8 @@ export default [
       route("draft-ai", "routes/dashboard.inbox.draft-ai.tsx"),
       route("send", "routes/dashboard.inbox.send.tsx"),
       route("bulk", "routes/dashboard.inbox.bulk.tsx"),
+      route("snippets", "routes/dashboard.inbox.snippets.tsx"),
+      route("templates", "routes/dashboard.inbox.templates.tsx"),
       route(":id", "routes/dashboard.inbox.$id.tsx", [
         route("star", "routes/dashboard.inbox.$id.star.tsx"),
         route("snooze", "routes/dashboard.inbox.$id.snooze.tsx"),

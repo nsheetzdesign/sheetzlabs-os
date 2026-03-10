@@ -1041,6 +1041,235 @@ email.get("/counts", async (c) => {
   return c.json({ counts });
 });
 
+// ============================================
+// UNIFIED SEARCH
+// ============================================
+email.get("/search", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const query = c.req.query("q");
+  const accountId = c.req.query("account");
+  const limit = Math.min(parseInt(c.req.query("limit") || "20"), 50);
+
+  if (!query || query.length < 2) {
+    return c.json({ results: [] });
+  }
+
+  const safe = query.replace(/[%_]/g, "\\$&");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let dbQuery: any = supabase
+    .from("emails")
+    .select("id, subject, snippet, from_email, from_name, received_at, account_id")
+    .or(`subject.ilike.%${safe}%,from_email.ilike.%${safe}%,from_name.ilike.%${safe}%,snippet.ilike.%${safe}%`)
+    .order("received_at", { ascending: false })
+    .limit(limit);
+
+  if (accountId) {
+    dbQuery = dbQuery.eq("account_id", accountId);
+  }
+
+  const { data: results, error } = await dbQuery;
+
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+
+  return c.json({ results: results ?? [], query, count: results?.length ?? 0 });
+});
+
+// ============================================
+// SNIPPETS
+// ============================================
+email.get("/snippets", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  // Use a system user id fallback — snippets are per-install for now
+  const { data: snippets, error } = await supabase
+    .from("email_snippets")
+    .select("*")
+    .order("trigger");
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ snippets: snippets ?? [] });
+});
+
+email.post("/snippets", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const body = await c.req.json() as { trigger?: string; title?: string; content?: string };
+  const { trigger, title, content } = body;
+
+  if (!trigger || !content) {
+    return c.json({ error: "trigger and content required" }, 400);
+  }
+
+  const cleanTrigger = trigger.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  const { data, error } = await supabase
+    .from("email_snippets")
+    .upsert(
+      {
+        trigger: cleanTrigger,
+        title: title || cleanTrigger,
+        content,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,trigger" }
+    )
+    .select()
+    .single();
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ snippet: data });
+});
+
+email.delete("/snippets/:trigger", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const trigger = c.req.param("trigger");
+
+  const { error } = await supabase
+    .from("email_snippets")
+    .delete()
+    .eq("trigger", trigger);
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ success: true });
+});
+
+email.post("/snippets/seed-defaults", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: defaults } = await supabase
+    .from("email_snippet_defaults")
+    .select("trigger, title, content");
+
+  if (!defaults) return c.json({ seeded: 0 });
+
+  let seeded = 0;
+  for (const snippet of defaults) {
+    const { error } = await supabase
+      .from("email_snippets")
+      .insert({ trigger: snippet.trigger, title: snippet.title, content: snippet.content });
+    if (!error) seeded++;
+  }
+
+  return c.json({ seeded });
+});
+
+// ============================================
+// EMAIL TEMPLATES
+// ============================================
+email.get("/templates", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const { data: templates, error } = await supabase
+    .from("email_templates")
+    .select("*")
+    .order("name");
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ templates: templates ?? [] });
+});
+
+email.post("/templates", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const body = await c.req.json() as { name?: string; subject?: string; body?: string };
+  const { name, subject, body: templateBody } = body;
+
+  if (!name || !templateBody) {
+    return c.json({ error: "name and body required" }, 400);
+  }
+
+  const { data, error } = await supabase
+    .from("email_templates")
+    .insert({ name, subject: subject || null, body: templateBody })
+    .select()
+    .single();
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ template: data });
+});
+
+email.put("/templates/:id", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const id = c.req.param("id");
+  const body = await c.req.json() as { name?: string; subject?: string; body?: string };
+
+  const { data, error } = await supabase
+    .from("email_templates")
+    .update({ ...body, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ template: data });
+});
+
+email.delete("/templates/:id", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const id = c.req.param("id");
+
+  const { error } = await supabase.from("email_templates").delete().eq("id", id);
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ success: true });
+});
+
+// ============================================
+// AI DRAFT REPLY
+// ============================================
+email.post("/ai-draft-reply", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const body = await c.req.json() as { emailId?: string; style?: string };
+  const { emailId, style = "professional" } = body;
+
+  if (!emailId) return c.json({ error: "emailId required" }, 400);
+
+  const { data: emailData } = await supabase
+    .from("emails")
+    .select("subject, from_name, from_email, body_text, snippet, received_at")
+    .eq("id", emailId)
+    .single();
+
+  if (!emailData) return c.json({ error: "Email not found" }, 404);
+
+  const threadContext = [
+    `From: ${emailData.from_name || emailData.from_email} <${emailData.from_email}>`,
+    `Subject: ${emailData.subject}`,
+    `Date: ${new Date(emailData.received_at).toLocaleDateString()}`,
+    "",
+    emailData.body_text || emailData.snippet || "",
+  ].join("\n").trim();
+
+  const styleMap: Record<string, string> = {
+    professional: "Write a professional, concise reply.",
+    friendly: "Write a warm, friendly reply.",
+    brief: "Write a very brief, to-the-point reply (2-3 sentences max).",
+    detailed: "Write a thorough, detailed reply addressing all points.",
+  };
+
+  const anthropic = new Anthropic({ apiKey: c.env.ANTHROPIC_API_KEY });
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 500,
+    messages: [
+      {
+        role: "user",
+        content: `Draft a reply to this email. ${styleMap[style] ?? styleMap.professional}
+
+Do not include subject line or email headers. Start directly with the greeting. Keep it natural and human-sounding. Sign off with just "Best," and no name (the user will add their signature).
+
+EMAIL TO REPLY TO:
+${threadContext}
+
+DRAFT REPLY:`,
+      },
+    ],
+  });
+
+  const draft =
+    response.content[0].type === "text" ? response.content[0].text.trim() : "";
+
+  return c.json({ draft, style, emailId });
+});
+
 export default email;
 
 // ============================================
