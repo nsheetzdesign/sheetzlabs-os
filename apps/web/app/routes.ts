@@ -75,8 +75,11 @@ export default [
       index("routes/dashboard.inbox._index.tsx"),
       route("compose", "routes/dashboard.inbox.compose.tsx"),
       route("draft-ai", "routes/dashboard.inbox.draft-ai.tsx"),
+      route("send", "routes/dashboard.inbox.send.tsx"),
+      route("bulk", "routes/dashboard.inbox.bulk.tsx"),
       route(":id", "routes/dashboard.inbox.$id.tsx", [
         route("star", "routes/dashboard.inbox.$id.star.tsx"),
+        route("snooze", "routes/dashboard.inbox.$id.snooze.tsx"),
       ]),
     ]),
     route("chat", "routes/dashboard.chat.tsx"),

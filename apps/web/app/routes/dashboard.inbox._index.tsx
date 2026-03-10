@@ -5,6 +5,8 @@ import { getSupabaseClient } from '~/lib/supabase.server';
 import { InboxSidebar } from '~/components/inbox/InboxSidebar';
 import { EmailList, type Email } from '~/components/inbox/EmailList';
 import { EmailPreview, type PreviewEmail } from '~/components/inbox/EmailPreview';
+import { ComposeModal } from '~/components/inbox/ComposeModal';
+import { ThreadView } from '~/components/inbox/ThreadView';
 
 export const meta: MetaFunction = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 
@@ -70,7 +72,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     labels: SYSTEM_LABELS,
   }));
 
-  // Build counts per account (use first account's data for now)
+  // Build counts per account
   const counts: Record<string, { inbox: number; starred: number; snoozed: number; drafts: number; spam: number; trash: number }> = {};
   for (const account of accounts ?? []) {
     counts[account.id] = {
@@ -107,6 +109,32 @@ export default function Inbox() {
   const [activeEmail, setActiveEmail] = useState<PreviewEmail | null>(null);
   const [focusIndex, setFocusIndex] = useState(0);
   const [draggedEmailIds, setDraggedEmailIds] = useState<string[]>([]);
+  const [showCompose, setShowCompose] = useState(false);
+  const [composeProps, setComposeProps] = useState<{
+    replyTo?: any;
+    replyAll?: boolean;
+    forward?: boolean;
+  } | null>(null);
+  const [threadEmails, setThreadEmails] = useState<any[] | null>(null);
+
+  // Handle URL params for compose (reply/forward links)
+  useEffect(() => {
+    const replyId = searchParams.get('reply');
+    const forwardId = searchParams.get('forward');
+    const replyAll = searchParams.get('all') === 'true';
+
+    if (replyId || forwardId) {
+      const email = emails.find((e: any) => e.id === (replyId || forwardId));
+      if (email) {
+        setComposeProps({
+          replyTo: email,
+          replyAll,
+          forward: !!forwardId,
+        });
+        setShowCompose(true);
+      }
+    }
+  }, [searchParams, emails]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -127,13 +155,13 @@ export default function Inbox() {
         case 'Enter':
           e.preventDefault();
           if (emails[focusIndex]) {
-            setActiveEmail(emails[focusIndex] as PreviewEmail);
-            markAsRead(emails[focusIndex].id);
+            handleOpenEmail(emails[focusIndex] as PreviewEmail);
           }
           break;
         case 'u':
           e.preventDefault();
           setActiveEmail(null);
+          setThreadEmails(null);
           break;
         case 'e':
           e.preventDefault();
@@ -157,15 +185,28 @@ export default function Inbox() {
           e.preventDefault();
           document.getElementById('inbox-search')?.focus();
           break;
+        case 'c':
+          e.preventDefault();
+          setShowCompose(true);
+          setComposeProps(null);
+          break;
+        case 'r':
+          e.preventDefault();
+          if (activeEmail) {
+            setComposeProps({ replyTo: activeEmail });
+            setShowCompose(true);
+          }
+          break;
         case 'Escape':
           setActiveEmail(null);
+          setThreadEmails(null);
           setSelectedIds(new Set());
           break;
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [emails, focusIndex]);
+  }, [emails, focusIndex, activeEmail]);
 
   // Auto-sync on window focus
   useEffect(() => {
@@ -183,6 +224,28 @@ export default function Inbox() {
     }, 3 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleOpenEmail = async (email: PreviewEmail) => {
+    setActiveEmail(email);
+    markAsRead(email.id);
+
+    // If email has a thread_id, try to load thread
+    if (email.thread_id) {
+      try {
+        const res = await fetch(`/api/email/thread/${email.thread_id}`);
+        if (res.ok) {
+          const { thread } = await res.json() as { thread: any[] };
+          if (thread && thread.length > 1) {
+            setThreadEmails(thread);
+            return;
+          }
+        }
+      } catch {
+        // Thread load failed — fall back to single email view
+      }
+    }
+    setThreadEmails(null);
+  };
 
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => {
@@ -218,6 +281,7 @@ export default function Inbox() {
     if (newAccountId) params.set('account', newAccountId);
     setSearchParams(params);
     setActiveEmail(null);
+    setThreadEmails(null);
     setSelectedIds(new Set());
   };
 
@@ -227,6 +291,7 @@ export default function Inbox() {
     params.set('account', aid);
     setSearchParams(params);
     setActiveEmail(null);
+    setThreadEmails(null);
   };
 
   const handleDragStart = (_e: React.DragEvent, emailIds: string[]) => {
@@ -270,6 +335,17 @@ export default function Inbox() {
     setSearchParams(q ? { q } : { folder: 'inbox' });
   };
 
+  const closeCompose = () => {
+    setShowCompose(false);
+    setComposeProps(null);
+    // Clear URL params
+    const params = new URLSearchParams(searchParams);
+    params.delete('reply');
+    params.delete('forward');
+    params.delete('all');
+    setSearchParams(params);
+  };
+
   return (
     <div className="flex h-full">
       <InboxSidebar
@@ -305,25 +381,66 @@ export default function Inbox() {
             onSelect={toggleSelect}
             onSelectAll={() => setSelectedIds(new Set(emails.map(e => e.id)))}
             onClearSelection={() => setSelectedIds(new Set())}
-            onOpen={(email) => {
-              setActiveEmail(email as PreviewEmail);
-              markAsRead(email.id);
-            }}
+            onOpen={(email) => handleOpenEmail(email as PreviewEmail)}
             onDragStart={handleDragStart}
           />
         </div>
 
-        {/* Preview Pane */}
+        {/* Preview / Thread Pane */}
         <div className={`${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`}>
-          <EmailPreview
-            email={activeEmail}
-            onClose={() => setActiveEmail(null)}
-            onReply={() => navigate(`/dashboard/inbox/compose?reply_to=${activeEmail?.id}`)}
-            onReplyAll={() => navigate(`/dashboard/inbox/compose?reply_to=${activeEmail?.id}&all=true`)}
-            onForward={() => navigate(`/dashboard/inbox/compose?forward=${activeEmail?.id}`)}
-          />
+          {threadEmails && threadEmails.length > 1 ? (
+            <ThreadView
+              emails={threadEmails}
+              onReply={(email) => {
+                setComposeProps({ replyTo: email });
+                setShowCompose(true);
+              }}
+              onReplyAll={(email) => {
+                setComposeProps({ replyTo: email, replyAll: true });
+                setShowCompose(true);
+              }}
+              onForward={(email) => {
+                setComposeProps({ replyTo: email, forward: true });
+                setShowCompose(true);
+              }}
+              onClose={() => {
+                setActiveEmail(null);
+                setThreadEmails(null);
+              }}
+            />
+          ) : (
+            <EmailPreview
+              email={activeEmail}
+              onClose={() => {
+                setActiveEmail(null);
+                setThreadEmails(null);
+              }}
+              onReply={() => {
+                setComposeProps({ replyTo: activeEmail });
+                setShowCompose(true);
+              }}
+              onReplyAll={() => {
+                setComposeProps({ replyTo: activeEmail, replyAll: true });
+                setShowCompose(true);
+              }}
+              onForward={() => {
+                setComposeProps({ replyTo: activeEmail, forward: true });
+                setShowCompose(true);
+              }}
+            />
+          )}
         </div>
       </div>
+
+      <ComposeModal
+        isOpen={showCompose}
+        onClose={closeCompose}
+        replyTo={composeProps?.replyTo}
+        replyAll={composeProps?.replyAll}
+        forward={composeProps?.forward}
+        accountId={accounts[0]?.id || ''}
+        accountEmail={accounts[0]?.email || ''}
+      />
     </div>
   );
 }

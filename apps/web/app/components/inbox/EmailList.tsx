@@ -4,6 +4,7 @@ import {
   Star, Archive, Trash2, Clock, MoreHorizontal,
   CheckSquare, Square, Paperclip,
 } from 'lucide-react';
+import { SnoozePicker } from './SnoozePicker';
 
 export interface Email {
   id: string;
@@ -42,6 +43,8 @@ export function EmailList({
 }: Props) {
   const fetcher = useFetcher();
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [snoozeEmailId, setSnoozeEmailId] = useState<string | null>(null);
+  const [snoozePosition, setSnoozePosition] = useState<{ x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const handleBulkAction = (action: string) => {
@@ -230,7 +233,12 @@ export function EmailList({
                       <Trash2 size={16} />
                     </button>
                     <button
-                      onClick={(e) => { e.stopPropagation(); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setSnoozePosition({ x: rect.right, y: rect.bottom });
+                        setSnoozeEmailId(email.id);
+                      }}
                       className="p-1.5 hover:bg-zinc-700 rounded"
                       title="Snooze"
                     >
@@ -250,6 +258,18 @@ export function EmailList({
           })
         )}
       </div>
+
+      {snoozeEmailId && (
+        <SnoozePicker
+          emailId={snoozeEmailId}
+          isOpen={true}
+          onClose={() => {
+            setSnoozeEmailId(null);
+            setSnoozePosition(null);
+          }}
+          position={snoozePosition || undefined}
+        />
+      )}
     </div>
   );
 }
