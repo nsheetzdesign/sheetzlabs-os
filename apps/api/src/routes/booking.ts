@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
+import { guestConfirmationEmail, hostNotificationEmail, cancellationEmail } from "../lib/booking-emails";
+import { sendBookingEmail } from "../lib/send-booking-email";
 
 type Bindings = {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
+  RESEND_API_KEY: string;
 };
 
 type HonoEnv = { Bindings: Bindings };
@@ -144,6 +147,74 @@ booking.delete("/links/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// ── Authenticated: Booking management ────────────────────────────────────────
+
+// List bookings for authenticated user
+booking.get("/bookings", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const { data } = await supabase
+    .from("bookings")
+    .select("*, booking_links(title, slug)")
+    .order("scheduled_at", { ascending: true });
+  return c.json({ bookings: data ?? [] });
+});
+
+// Host cancellation (authenticated)
+booking.delete("/bookings/:bookingId", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: bk, error } = await supabase
+    .from("bookings")
+    .select("*, booking_links(title, calendar_accounts(email, display_name, access_token, refresh_token, token_expires_at, id))")
+    .eq("id", bookingId)
+    .single();
+
+  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+
+  await supabase
+    .from("bookings")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", bookingId);
+
+  // Delete Google Calendar event
+  if (bk.calendar_event_id) {
+    try {
+      const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
+      const accessToken = await getValidAccessToken(account, c.env, supabase);
+      await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${bk.calendar_event_id}?sendUpdates=all`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+    } catch {
+      // Calendar deletion failed — booking still cancelled
+    }
+  }
+
+  const hostEmail = bk.booking_links.calendar_accounts.email as string;
+  const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
+
+  const emailData = {
+    guestName: bk.guest_name as string,
+    guestEmail: bk.guest_email as string,
+    hostName,
+    hostEmail,
+    title: bk.booking_links.title as string,
+    dateTime: new Date(bk.scheduled_at as string),
+    duration: bk.duration_minutes as number,
+    timezone: (bk.timezone as string) || "America/Chicago",
+    bookingId: bk.id as string,
+  };
+
+  const guestCancellation = cancellationEmail(emailData, false, "host");
+  await sendBookingEmail({ to: emailData.guestEmail, subject: guestCancellation.subject, html: guestCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  const hostCancellation = cancellationEmail(emailData, true, "host");
+  await sendBookingEmail({ to: hostEmail, subject: hostCancellation.subject, html: hostCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  return c.json({ success: true });
+});
+
 // ── Public: Booking Flow ──────────────────────────────────────────────────────
 
 // Get link info by slug (no auth)
@@ -239,6 +310,78 @@ booking.get("/public/:slug/slots", async (c) => {
   return c.json({ slots, date, duration: link.duration_minutes });
 });
 
+// Public booking lookup (for cancel page)
+booking.get("/public/booking/:bookingId", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: bk, error } = await supabase
+    .from("bookings")
+    .select("id, guest_name, guest_email, scheduled_at, duration_minutes, timezone, status, booking_links(title)")
+    .eq("id", bookingId)
+    .single();
+
+  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+  return c.json({ booking: bk });
+});
+
+// Guest cancellation (public, no auth)
+booking.post("/public/cancel/:bookingId", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: bk, error } = await supabase
+    .from("bookings")
+    .select("*, booking_links(title, calendar_accounts(email, display_name, access_token, refresh_token, token_expires_at, id))")
+    .eq("id", bookingId)
+    .single();
+
+  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+  if (bk.status === "cancelled") return c.json({ error: "Booking already cancelled" }, 400);
+
+  await supabase
+    .from("bookings")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", bookingId);
+
+  // Delete Google Calendar event
+  if (bk.calendar_event_id) {
+    try {
+      const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
+      const accessToken = await getValidAccessToken(account, c.env, supabase);
+      await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${bk.calendar_event_id}?sendUpdates=all`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+    } catch {
+      // Calendar deletion failed — booking still cancelled
+    }
+  }
+
+  const hostEmail = bk.booking_links.calendar_accounts.email as string;
+  const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
+
+  const emailData = {
+    guestName: bk.guest_name as string,
+    guestEmail: bk.guest_email as string,
+    hostName,
+    hostEmail,
+    title: bk.booking_links.title as string,
+    dateTime: new Date(bk.scheduled_at as string),
+    duration: bk.duration_minutes as number,
+    timezone: (bk.timezone as string) || "America/Chicago",
+    bookingId: bk.id as string,
+  };
+
+  const guestCancellation = cancellationEmail(emailData, false, "guest");
+  await sendBookingEmail({ to: emailData.guestEmail, subject: guestCancellation.subject, html: guestCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  const hostCancellation = cancellationEmail(emailData, true, "guest");
+  await sendBookingEmail({ to: hostEmail, subject: hostCancellation.subject, html: hostCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  return c.json({ success: true });
+});
+
 // Create a booking
 booking.post("/public/:slug", async (c) => {
   const { slug } = c.req.param();
@@ -321,6 +464,31 @@ booking.post("/public/:slug", async (c) => {
   } catch {
     // Calendar event creation failed — booking still saved
   }
+
+  // Send confirmation emails
+  const account = link.calendar_accounts as Record<string, unknown>;
+  const hostName = (account.display_name as string) || (account.email as string).split("@")[0];
+  const hostEmailAddr = account.email as string;
+
+  const emailData = {
+    guestName: body.guest_name,
+    guestEmail: body.guest_email,
+    hostName,
+    hostEmail: hostEmailAddr,
+    title: link.title as string,
+    dateTime: new Date(body.scheduled_at),
+    duration: link.duration_minutes as number,
+    timezone,
+    bookingId: newBooking.id,
+    notes: body.guest_notes,
+    cancelUrl: `https://app.sheetzlabs.com/book/cancel/${newBooking.id}`,
+  };
+
+  const guestEmail = guestConfirmationEmail(emailData);
+  await sendBookingEmail({ to: body.guest_email, subject: guestEmail.subject, html: guestEmail.html, resendApiKey: c.env.RESEND_API_KEY });
+
+  const hostEmail = hostNotificationEmail(emailData);
+  await sendBookingEmail({ to: hostEmailAddr, subject: hostEmail.subject, html: hostEmail.html, resendApiKey: c.env.RESEND_API_KEY });
 
   return c.json({
     success: true,

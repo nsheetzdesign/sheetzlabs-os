@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { executeAgent, postToLinkedIn } from "./lib/agent-engine";
+import { reminderEmail } from "./lib/booking-emails";
+import { sendBookingEmail } from "./lib/send-booking-email";
 
 type Env = {
   SUPABASE_URL: string;
@@ -10,6 +12,7 @@ type Env = {
   CLOUDFLARE_BILLING_TOKEN: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   API_URL: string;
+  RESEND_API_KEY: string;
 };
 
 export default {
@@ -75,6 +78,11 @@ export default {
       const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
       ctx.waitUntil(fetch(`${apiUrl}/email/sync`, { method: "POST" }));
     }
+
+    // Process booking reminders every 5 minutes
+    if (now.getUTCMinutes() % 5 === 0) {
+      ctx.waitUntil(processBookingReminders(env));
+    }
   },
 };
 
@@ -123,6 +131,87 @@ async function fetchAllFeeds(
       // continue with remaining feeds
     }
   }
+}
+
+async function processBookingReminders(env: Env) {
+  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  const now = new Date();
+
+  // 24-hour reminders: bookings between 23-25 hours from now
+  const reminder24hStart = new Date(now.getTime() + 23 * 60 * 60 * 1000);
+  const reminder24hEnd = new Date(now.getTime() + 25 * 60 * 60 * 1000);
+
+  const { data: reminders24h } = await supabase
+    .from("bookings")
+    .select("*, booking_links(title, calendar_accounts(email, display_name))")
+    .eq("status", "confirmed")
+    .eq("reminder_24h_sent", false)
+    .gte("scheduled_at", reminder24hStart.toISOString())
+    .lte("scheduled_at", reminder24hEnd.toISOString());
+
+  for (const bk of reminders24h ?? []) {
+    const hostEmail = bk.booking_links.calendar_accounts.email as string;
+    const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
+
+    const emailData = {
+      guestName: bk.guest_name as string,
+      guestEmail: bk.guest_email as string,
+      hostName,
+      hostEmail,
+      title: bk.booking_links.title as string,
+      dateTime: new Date(bk.scheduled_at as string),
+      duration: bk.duration_minutes as number,
+      timezone: (bk.timezone as string) || "America/Chicago",
+      bookingId: bk.id as string,
+    };
+
+    const guestReminder = reminderEmail(emailData, false, 24);
+    await sendBookingEmail({ to: emailData.guestEmail, subject: guestReminder.subject, html: guestReminder.html, resendApiKey: env.RESEND_API_KEY });
+
+    const hostReminder = reminderEmail(emailData, true, 24);
+    await sendBookingEmail({ to: hostEmail, subject: hostReminder.subject, html: hostReminder.html, resendApiKey: env.RESEND_API_KEY });
+
+    await supabase.from("bookings").update({ reminder_24h_sent: true }).eq("id", bk.id);
+  }
+
+  // 1-hour reminders: bookings between 55-65 minutes from now
+  const reminder1hStart = new Date(now.getTime() + 55 * 60 * 1000);
+  const reminder1hEnd = new Date(now.getTime() + 65 * 60 * 1000);
+
+  const { data: reminders1h } = await supabase
+    .from("bookings")
+    .select("*, booking_links(title, calendar_accounts(email, display_name))")
+    .eq("status", "confirmed")
+    .eq("reminder_1h_sent", false)
+    .gte("scheduled_at", reminder1hStart.toISOString())
+    .lte("scheduled_at", reminder1hEnd.toISOString());
+
+  for (const bk of reminders1h ?? []) {
+    const hostEmail = bk.booking_links.calendar_accounts.email as string;
+    const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
+
+    const emailData = {
+      guestName: bk.guest_name as string,
+      guestEmail: bk.guest_email as string,
+      hostName,
+      hostEmail,
+      title: bk.booking_links.title as string,
+      dateTime: new Date(bk.scheduled_at as string),
+      duration: bk.duration_minutes as number,
+      timezone: (bk.timezone as string) || "America/Chicago",
+      bookingId: bk.id as string,
+    };
+
+    const guestReminder = reminderEmail(emailData, false, 1);
+    await sendBookingEmail({ to: emailData.guestEmail, subject: guestReminder.subject, html: guestReminder.html, resendApiKey: env.RESEND_API_KEY });
+
+    const hostReminder = reminderEmail(emailData, true, 1);
+    await sendBookingEmail({ to: hostEmail, subject: hostReminder.subject, html: hostReminder.html, resendApiKey: env.RESEND_API_KEY });
+
+    await supabase.from("bookings").update({ reminder_1h_sent: true }).eq("id", bk.id);
+  }
+
+  console.log(`Processed ${reminders24h?.length ?? 0} 24h reminders, ${reminders1h?.length ?? 0} 1h reminders`);
 }
 
 function shouldRunNow(cronExpr: string, now: Date): boolean {
