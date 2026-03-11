@@ -5,6 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ENVIRONMENT = "production"
+API_URL = "https://api.sheetzlabs.com"
 
 # Custom domains — Cloudflare provisions DNS + TLS automatically
 [[routes]]
