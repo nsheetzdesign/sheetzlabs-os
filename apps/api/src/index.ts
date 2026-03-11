@@ -13,6 +13,7 @@ import contentRouter from "./routes/content";
 import analyticsRouter from "./routes/analytics";
 import chatRouter from "./routes/chat";
 import bookingRouter from "./routes/booking";
+import learningRouter from "./routes/learning";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -63,6 +64,7 @@ app.route("/content", contentRouter);
 app.route("/analytics", analyticsRouter);
 app.route("/chat", chatRouter);
 app.route("/booking", bookingRouter);
+app.route("/learning", learningRouter);
 
 export default {
   fetch: app.fetch,

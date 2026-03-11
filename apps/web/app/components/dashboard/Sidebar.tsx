@@ -11,6 +11,7 @@ import {
   Settings2,
   LogOut,
   Search,
+  GraduationCap,
 } from "lucide-react";
 
 const NAV_ITEMS = [
@@ -22,6 +23,7 @@ const NAV_ITEMS = [
   { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
   { icon: Bot, label: "Agents", to: "/dashboard/agents" },
   { icon: BarChart3, label: "Analytics", to: "/dashboard/analytics" },
+  { icon: GraduationCap, label: "Learning", to: "/dashboard/learning" },
 ];
 
 interface SidebarProps {

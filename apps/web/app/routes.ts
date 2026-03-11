@@ -95,6 +95,14 @@ export default [
         route("snooze", "routes/dashboard.inbox.$id.snooze.tsx"),
       ]),
     ]),
+    route("learning", "routes/dashboard.learning.tsx", [
+      index("routes/dashboard.learning._index.tsx"),
+      route("progress", "routes/dashboard.learning.progress.tsx"),
+      route("tutor", "routes/dashboard.learning.tutor.tsx"),
+      route("generate", "routes/dashboard.learning.generate.tsx"),
+      route("path/:slug", "routes/dashboard.learning.path.$slug.tsx"),
+      route("lesson/:id", "routes/dashboard.learning.lesson.$id.tsx"),
+    ]),
     route("chat", "routes/dashboard.chat.tsx"),
     route("analytics", "routes/dashboard.analytics.tsx"),
     route("settings", "routes/dashboard.settings.tsx", [
