@@ -9,7 +9,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsc --noEmit",
-    "full-download": "npx tsx scripts/full-email-download.ts"
+    "full-download": "npx tsx scripts/full-email-download.ts",
+    "generate-lessons": "npx tsx scripts/generate-lesson-content.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

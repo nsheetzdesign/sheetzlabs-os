@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useState } from "react";
 import { useLoaderData, Link, useFetcher } from "react-router";
-import { ChevronLeft, CheckCircle, Clock } from "lucide-react";
+import { ChevronLeft, CheckCircle, Clock, Sparkles, RefreshCw } from "lucide-react";
 
 export async function loader({ params, context }: LoaderFunctionArgs) {
   const response = await fetch(
@@ -37,6 +37,25 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     );
   }
 
+  if (intent === "generate") {
+    const response = await fetch(
+      `${context.cloudflare.env.API_URL}/learning/lessons/${params.id}/generate`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: request.headers.get("Cookie") || "",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return { error: "Failed to generate content" };
+    }
+
+    return { success: true };
+  }
+
   return { success: true };
 }
 
@@ -68,7 +87,6 @@ function MarkdownContent({ content }: { content: string }) {
         </h1>
       );
     } else if (line.startsWith("```")) {
-      const lang = line.slice(3);
       const codeLines: string[] = [];
       i++;
       while (i < lines.length && !lines[i].startsWith("```")) {
@@ -124,6 +142,10 @@ export default function LessonPage() {
   const pathSlug = lesson.learning_modules.learning_paths.slug;
   const pathTitle = lesson.learning_modules.learning_paths.title;
 
+  const isGenerating =
+    fetcher.state !== "idle" &&
+    fetcher.formData?.get("intent") === "generate";
+
   const handleComplete = () => {
     const timeSpent = Math.round((Date.now() - startTime) / 1000);
     fetcher.submit(
@@ -160,13 +182,52 @@ export default function LessonPage() {
       {/* Content */}
       <div className="mb-8">
         {lesson.content ? (
-          <MarkdownContent content={lesson.content} />
+          <>
+            <MarkdownContent content={lesson.content} />
+
+            {/* Regenerate button */}
+            <div className="mt-8 pt-4 border-t border-zinc-800">
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="generate" />
+                <button
+                  type="submit"
+                  disabled={isGenerating}
+                  className="flex items-center gap-2 text-sm text-zinc-400 hover:text-zinc-200 disabled:opacity-50"
+                >
+                  <RefreshCw
+                    className={`w-4 h-4 ${isGenerating ? "animate-spin" : ""}`}
+                  />
+                  {isGenerating ? "Regenerating..." : "Regenerate with AI"}
+                </button>
+              </fetcher.Form>
+            </div>
+          </>
         ) : (
           <div className="bg-zinc-800 rounded-lg p-8 text-center">
-            <p className="text-zinc-400">Lesson content not yet generated.</p>
-            <p className="text-xs text-zinc-500 mt-2">
-              Use the AI generator to create content for this lesson.
+            <Sparkles className="w-12 h-12 text-emerald-400 mx-auto mb-4" />
+            <p className="text-zinc-300 mb-4">
+              This lesson hasn&apos;t been written yet.
             </p>
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="generate" />
+              <button
+                type="submit"
+                disabled={isGenerating}
+                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white font-medium disabled:opacity-50 flex items-center gap-2 mx-auto"
+              >
+                {isGenerating ? (
+                  <>
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-5 h-5" />
+                    Generate with AI
+                  </>
+                )}
+              </button>
+            </fetcher.Form>
           </div>
         )}
       </div>
@@ -179,7 +240,10 @@ export default function LessonPage() {
           className="flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white font-medium disabled:opacity-50"
         >
           <CheckCircle className="w-5 h-5" />
-          {fetcher.state !== "idle" ? "Saving..." : "Mark Complete"}
+          {fetcher.state !== "idle" &&
+          fetcher.formData?.get("intent") === "complete"
+            ? "Saving..."
+            : "Mark Complete"}
         </button>
       </div>
     </div>

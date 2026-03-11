@@ -130,6 +130,81 @@ app.post("/lessons/:id/complete", async (c) => {
   return c.json({ progress: data });
 });
 
+// Generate content for a single lesson (AI)
+app.post("/lessons/:id/generate", async (c) => {
+  const lessonId = c.req.param("id");
+  const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: lesson, error } = await supabase
+    .from("learning_lessons")
+    .select(`*, learning_modules!inner(title, learning_paths!inner(title, slug))`)
+    .eq("id", lessonId)
+    .single();
+
+  if (error || !lesson) {
+    return c.json({ error: "Lesson not found" }, 404);
+  }
+
+  const module = lesson.learning_modules as any;
+  const path = module.learning_paths as any;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": c.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4096,
+      system: `You are an expert technical writer creating lesson content for a developer learning platform.
+
+Write in markdown format. Include:
+- A brief intro (2-3 sentences)
+- Clear explanations with practical focus
+- 2-3 real code examples (use TypeScript when applicable)
+- Common gotchas or tips in a "💡 Pro Tip" callout
+- A "Try It Yourself" exercise at the end
+
+Keep it engaging and practical. Target a developer who learns by doing. Aim for ${lesson.estimated_minutes} minutes of reading time.`,
+      messages: [
+        {
+          role: "user",
+          content: `Write a lesson for:
+
+Course: ${path.title}
+Module: ${module.title}
+Lesson: ${lesson.title}
+
+The lesson should cover this topic thoroughly but concisely.`,
+        },
+      ],
+    }),
+  });
+
+  const data: any = await response.json();
+  if (!data.content?.[0]?.text) {
+    return c.json({ error: "Failed to generate content" }, 500);
+  }
+  const content = data.content[0].text;
+
+  const { error: updateError } = await supabase
+    .from("learning_lessons")
+    .update({
+      content,
+      is_ai_generated: true,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", lessonId);
+
+  if (updateError) {
+    return c.json({ error: updateError.message }, 500);
+  }
+
+  return c.json({ success: true, content });
+});
+
 // Generate curriculum (AI)
 app.post("/generate/curriculum", async (c) => {
   const body = await c.req.json();
