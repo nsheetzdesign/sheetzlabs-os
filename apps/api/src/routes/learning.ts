@@ -39,11 +39,11 @@ app.get("/paths/:slug", async (c) => {
   }
 
   // Sort modules and lessons
-  path.learning_modules = path.learning_modules
+  path.learning_modules = (path.learning_modules || [])
     .sort((a: any, b: any) => a.sort_order - b.sort_order)
     .map((module: any) => ({
       ...module,
-      learning_lessons: module.learning_lessons.sort(
+      learning_lessons: (module.learning_lessons || []).sort(
         (a: any, b: any) => a.sort_order - b.sort_order
       ),
     }));

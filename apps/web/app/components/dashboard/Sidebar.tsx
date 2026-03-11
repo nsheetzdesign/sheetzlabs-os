@@ -12,6 +12,8 @@ import {
   LogOut,
   Search,
   GraduationCap,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 
 const NAV_ITEMS = [
@@ -30,6 +32,7 @@ interface SidebarProps {
   user?: { email?: string };
   onOpenPalette: () => void;
   collapsed?: boolean;
+  onToggle?: () => void;
 }
 
 function getInitials(email?: string): string {
@@ -42,7 +45,7 @@ function getInitials(email?: string): string {
   return local.slice(0, 2).toUpperCase();
 }
 
-export function Sidebar({ user, onOpenPalette, collapsed = false }: SidebarProps) {
+export function Sidebar({ user, onOpenPalette, collapsed = false, onToggle }: SidebarProps) {
   const initials = getInitials(user?.email);
   const displayEmail = user?.email ?? "";
 
@@ -62,10 +65,23 @@ export function Sidebar({ user, onOpenPalette, collapsed = false }: SidebarProps
           SL
         </div>
         {!collapsed && (
-          <div>
+          <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold">Sheetz Labs</div>
             <div className="font-mono text-xs text-zinc-500">OS v0.1.0</div>
           </div>
+        )}
+        {onToggle && (
+          <button
+            onClick={onToggle}
+            title={collapsed ? "Expand sidebar (⌘[)" : "Collapse sidebar (⌘[)"}
+            className="text-zinc-600 hover:text-zinc-300 transition-colors flex-shrink-0"
+          >
+            {collapsed ? (
+              <ChevronsRight className="h-4 w-4" />
+            ) : (
+              <ChevronsLeft className="h-4 w-4" />
+            )}
+          </button>
         )}
       </div>
 

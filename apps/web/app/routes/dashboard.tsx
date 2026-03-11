@@ -21,9 +21,19 @@ export default function DashboardLayout() {
   const { user } = useLoaderData<typeof loader>();
   const location = useLocation();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("sidebar-collapsed") === "true";
+    }
+    return false;
+  });
   // Once user manually toggles, stop auto-collapsing on navigation
   const userToggled = useRef(false);
+
+  // Persist collapse state
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   // Auto-collapse when navigating to pages with secondary sidebars
   useEffect(() => {
@@ -34,6 +44,11 @@ export default function DashboardLayout() {
     setSidebarCollapsed(hasSecondary);
   }, [location.pathname]);
 
+  const toggleSidebar = () => {
+    userToggled.current = true;
+    setSidebarCollapsed((v) => !v);
+  };
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -42,8 +57,7 @@ export default function DashboardLayout() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "[") {
         e.preventDefault();
-        userToggled.current = true;
-        setSidebarCollapsed((v) => !v);
+        toggleSidebar();
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -56,6 +70,7 @@ export default function DashboardLayout() {
         user={user}
         onOpenPalette={() => setPaletteOpen(true)}
         collapsed={sidebarCollapsed}
+        onToggle={toggleSidebar}
       />
       <div
         className={`flex flex-1 flex-col overflow-auto transition-all duration-200 ${
