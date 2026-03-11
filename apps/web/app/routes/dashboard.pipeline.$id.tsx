@@ -198,7 +198,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   // Trigger AI evaluation
   if (intent === "evaluate") {
     await fetch(`https://api.sheetzlabs.com/pipeline/${params.id}/evaluate`, { method: "POST" });
-    return redirect(`/dashboard/pipeline/${params.id}/evaluation`);
+    return redirect(`/dashboard/ventures/pipeline/${params.id}/evaluation`);
   }
 
   // Advance stage
@@ -208,7 +208,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     if (next) {
       await supabase.from("pipeline").update({ stage: next as never }).eq("id", params.id!);
     }
-    return redirect(`/dashboard/pipeline/${params.id}`);
+    return redirect(`/dashboard/ventures/pipeline/${params.id}`);
   }
 
   // Park
@@ -217,7 +217,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       .from("pipeline")
       .update({ stage: "parked" as never })
       .eq("id", params.id!);
-    return redirect("/dashboard/pipeline");
+    return redirect("/dashboard/ventures/pipeline");
   }
 
   // Promote to venture
@@ -290,7 +290,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
   if (error) return data({ errors: { _form: error.message } }, { status: 500 });
 
-  return redirect(`/dashboard/pipeline/${params.id}`);
+  return redirect(`/dashboard/ventures/pipeline/${params.id}`);
 }
 
 function ScoreBadge({ score }: { score: number | null }) {
@@ -562,7 +562,7 @@ export default function EditPipeline() {
 
             <div className="flex items-center gap-3 pt-2">
               <Button type="submit">Save Changes</Button>
-              <Link to="/dashboard/pipeline">
+              <Link to="/dashboard/ventures/pipeline">
                 <Button type="button" variant="secondary">
                   Back
                 </Button>

@@ -45,7 +45,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
   if (error) return data({ errors: { _form: error.message } }, { status: 500 });
 
-  return redirect(`/dashboard/pipeline/${inserted.id}`);
+  return redirect(`/dashboard/ventures/pipeline/${inserted.id}`);
 }
 
 export default function NewPipeline() {
@@ -125,7 +125,7 @@ export default function NewPipeline() {
 
             <div className="flex items-center gap-3 pt-2">
               <Button type="submit">Create Idea</Button>
-              <Link to="/dashboard/pipeline">
+              <Link to="/dashboard/ventures/pipeline">
                 <Button type="button" variant="secondary">
                   Cancel
                 </Button>

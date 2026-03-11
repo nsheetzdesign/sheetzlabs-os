@@ -100,7 +100,7 @@ export default function ContentDetail() {
   async function handleDelete() {
     if (!confirm("Delete this content?")) return;
     await fetch(`/api/content/${item.id}`, { method: "DELETE" });
-    navigate("/dashboard/content");
+    navigate("/dashboard/knowledge/content");
   }
 
   const children = (item.children as any[]) ?? [];
@@ -110,7 +110,7 @@ export default function ContentDetail() {
     <div className="mx-auto max-w-4xl p-6">
       {/* Back */}
       <Link
-        to="/dashboard/content"
+        to="/dashboard/knowledge/content"
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300"
       >
         <ArrowLeft className="h-3.5 w-3.5" />
@@ -194,7 +194,7 @@ export default function ContentDetail() {
       {parent && (
         <div className="mb-4 text-sm text-zinc-500">
           Repurposed from{" "}
-          <Link to={`/dashboard/content/${parent.id}`} className="text-brand hover:text-brand-dark">
+          <Link to={`/dashboard/knowledge/content/${parent.id}`} className="text-brand hover:text-brand-dark">
             {parent.title}
           </Link>
         </div>
@@ -294,7 +294,7 @@ export default function ContentDetail() {
             {children.map((child: any) => (
               <Link
                 key={child.id}
-                to={`/dashboard/content/${child.id}`}
+                to={`/dashboard/knowledge/content/${child.id}`}
                 className="flex items-center justify-between rounded-lg border border-surface-2/50 bg-surface-1/40 p-3 hover:border-surface-3/50"
               >
                 <div>

@@ -32,7 +32,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   if (intent === "evaluate") {
     // Call the API to trigger evaluation
     await fetch(`${API_URL}/pipeline/${params.id}/evaluate`, { method: "POST" });
-    return redirect(`/dashboard/pipeline/${params.id}/evaluation`);
+    return redirect(`/dashboard/ventures/pipeline/${params.id}/evaluation`);
   }
 
   if (intent === "create_tasks") {
@@ -50,7 +50,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
         })
       )
     );
-    return redirect(`/dashboard/pipeline/${params.id}/evaluation`);
+    return redirect(`/dashboard/ventures/pipeline/${params.id}/evaluation`);
   }
 
   return null;
@@ -103,7 +103,7 @@ export default function EvaluationDetail() {
         <div className="mx-auto max-w-3xl space-y-6">
           {/* Back link */}
           <Link
-            to={`/dashboard/pipeline/${item.id}`}
+            to={`/dashboard/ventures/pipeline/${item.id}`}
             className="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -378,7 +378,7 @@ export default function EvaluationDetail() {
 
                 {rec && (rec === "yes" || rec === "strong_yes") && (
                   <Link
-                    to={`/dashboard/pipeline/${item.id}`}
+                    to={`/dashboard/ventures/pipeline/${item.id}`}
                     className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
                   >
                     Promote to Building →

@@ -123,21 +123,21 @@ export default function ContentIndex() {
 
         <div className="mt-auto space-y-0.5 border-t border-surface-2/50 pt-3">
           <Link
-            to="/dashboard/content/calendar"
+            to="/dashboard/knowledge/content/calendar"
             className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-500 transition-colors hover:bg-surface-2/30 hover:text-zinc-200"
           >
             <Calendar className="h-3.5 w-3.5 shrink-0" />
             Calendar
           </Link>
           <Link
-            to="/dashboard/content/newsletter"
+            to="/dashboard/knowledge/content/newsletter"
             className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-500 transition-colors hover:bg-surface-2/30 hover:text-zinc-200"
           >
             <Newspaper className="h-3.5 w-3.5 shrink-0" />
             Newsletter
           </Link>
           <Link
-            to="/dashboard/content/templates"
+            to="/dashboard/knowledge/content/templates"
             className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-zinc-500 transition-colors hover:bg-surface-2/30 hover:text-zinc-200"
           >
             <FileText className="h-3.5 w-3.5 shrink-0" />

@@ -14,6 +14,13 @@ export default [
     route("ventures", "routes/dashboard.ventures.tsx", [
       index("routes/dashboard.ventures._index.tsx"),
       route("new", "routes/dashboard.ventures.new.tsx"),
+      route("pipeline", "routes/dashboard.pipeline.tsx", [
+        index("routes/dashboard.pipeline._index.tsx"),
+        route("new", "routes/dashboard.pipeline.new.tsx"),
+        route(":id", "routes/dashboard.pipeline.$id.tsx", [
+          route("evaluation", "routes/dashboard.pipeline.$id.evaluation.tsx"),
+        ]),
+      ]),
       route(":slug", "routes/dashboard.ventures.$slug.tsx", [
         index("routes/dashboard.ventures.$slug._index.tsx"),
         route("stack", "routes/dashboard.ventures.$slug.stack.tsx"),
@@ -23,11 +30,6 @@ export default [
         route("tasks", "routes/dashboard.ventures.$slug.tasks.tsx"),
         route("docs", "routes/dashboard.ventures.$slug.docs.tsx"),
       ]),
-    ]),
-    route("pipeline", "routes/dashboard.pipeline.tsx", [
-      index("routes/dashboard.pipeline._index.tsx"),
-      route("new", "routes/dashboard.pipeline.new.tsx"),
-      route(":id", "routes/dashboard.pipeline.$id.tsx"),
     ]),
     route("revenue", "routes/dashboard.revenue.tsx", [
       index("routes/dashboard.revenue._index.tsx"),
@@ -54,12 +56,14 @@ export default [
     route("knowledge", "routes/dashboard.knowledge.tsx", [
       index("routes/dashboard.knowledge._index.tsx"),
       route("new", "routes/dashboard.knowledge.new.tsx"),
+      route("captures", "routes/dashboard.knowledge.captures.tsx"),
+      route("feeds", "routes/dashboard.knowledge.feeds.tsx"),
+      route("content", "routes/dashboard.content.tsx", [
+        index("routes/dashboard.content._index.tsx"),
+        route("new", "routes/dashboard.content.new.tsx"),
+        route(":id", "routes/dashboard.content.$id.tsx"),
+      ]),
       route(":slug", "routes/dashboard.knowledge.$slug.tsx"),
-    ]),
-    route("content", "routes/dashboard.content.tsx", [
-      index("routes/dashboard.content._index.tsx"),
-      route("new", "routes/dashboard.content.new.tsx"),
-      route(":id", "routes/dashboard.content.$id.tsx"),
     ]),
     route("agents", "routes/dashboard.agents.tsx", [
       index("routes/dashboard.agents._index.tsx"),
@@ -68,6 +72,7 @@ export default [
         route(":id", "routes/dashboard.agents.runs.$id.tsx"),
       ]),
       route("content", "routes/dashboard.agents.content.tsx"),
+      route("performance", "routes/dashboard.agents.performance.tsx"),
       route(":slug", "routes/dashboard.agents.$slug.tsx"),
     ]),
     route("calendar", "routes/dashboard.calendar.tsx", [

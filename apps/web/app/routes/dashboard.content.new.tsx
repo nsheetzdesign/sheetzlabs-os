@@ -49,7 +49,7 @@ export default function NewContent() {
     });
     const { item } = await res.json();
     setLoading(false);
-    if (item) navigate(`/dashboard/content/${item.id}`);
+    if (item) navigate(`/dashboard/knowledge/content/${item.id}`);
   }
 
   async function handleGenerate() {
@@ -62,13 +62,13 @@ export default function NewContent() {
     });
     const { item } = await res.json();
     setLoading(false);
-    if (item) navigate(`/dashboard/content/${item.id}`);
+    if (item) navigate(`/dashboard/knowledge/content/${item.id}`);
   }
 
   return (
     <div className="mx-auto max-w-2xl p-6">
       <Link
-        to="/dashboard/content"
+        to="/dashboard/knowledge/content"
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300"
       >
         <ArrowLeft className="h-3.5 w-3.5" />

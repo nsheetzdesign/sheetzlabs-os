@@ -698,7 +698,7 @@ function CalendarSettingsModal({
 
 // ── Main Calendar Component ───────────────────────────────────────────────────
 
-export default function Calendar() {
+export default function CalendarPage() {
   const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher();

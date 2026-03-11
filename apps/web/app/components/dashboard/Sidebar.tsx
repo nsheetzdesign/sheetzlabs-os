@@ -1,42 +1,27 @@
 import { NavLink, Form } from "react-router";
 import {
-  LayoutDashboard,
-  Box,
-  Rocket,
-  DollarSign,
-  Receipt,
+  Home,
+  Briefcase,
   Users,
-  CheckSquare,
   BookOpen,
-  Brain,
+  Mail,
+  Calendar,
+  Bot,
+  BarChart3,
   Settings2,
   LogOut,
   Search,
-  Ticket,
-  Inbox,
-  Calendar,
-  PenSquare,
-  BarChart3,
-  MessageSquare,
 } from "lucide-react";
 
-const navItems = [
-  { icon: LayoutDashboard, label: "Command Center", to: "/dashboard" },
-  { icon: MessageSquare, label: "Chat", to: "/dashboard/chat" },
-  { icon: Inbox, label: "Inbox", to: "/dashboard/inbox" },
-  { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
-  { icon: Box, label: "Ventures", to: "/dashboard/ventures" },
-  { icon: Rocket, label: "Pipeline", to: "/dashboard/pipeline" },
-  { icon: DollarSign, label: "Revenue", to: "/dashboard/revenue" },
-  { icon: Receipt, label: "Expenses", to: "/dashboard/expenses" },
-  { icon: Ticket, label: "Tickets", to: "/dashboard/tickets" },
+const NAV_ITEMS = [
+  { icon: Home, label: "Home", to: "/dashboard", exact: true },
+  { icon: Briefcase, label: "Ventures", to: "/dashboard/ventures" },
   { icon: Users, label: "Relationships", to: "/dashboard/relationships" },
-  { icon: CheckSquare, label: "Tasks", to: "/dashboard/tasks" },
   { icon: BookOpen, label: "Knowledge", to: "/dashboard/knowledge" },
-  { icon: PenSquare, label: "Content", to: "/dashboard/content" },
-  { icon: Brain, label: "AI Agents", to: "/dashboard/agents" },
+  { icon: Mail, label: "Inbox", to: "/dashboard/inbox" },
+  { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
+  { icon: Bot, label: "Agents", to: "/dashboard/agents" },
   { icon: BarChart3, label: "Analytics", to: "/dashboard/analytics" },
-  { icon: Settings2, label: "Settings", to: "/dashboard/settings/stripe" },
 ];
 
 interface SidebarProps {
@@ -101,13 +86,13 @@ export function Sidebar({ user, onOpenPalette, collapsed = false }: SidebarProps
         </button>
       </div>
 
-      {/* Nav */}
+      {/* Main Nav */}
       <nav className={`min-h-0 flex-1 space-y-0.5 overflow-y-auto py-2 ${collapsed ? "px-2" : "px-3"}`}>
-        {navItems.map(({ icon: Icon, label, to }) => (
+        {NAV_ITEMS.map(({ icon: Icon, label, to, exact }) => (
           <NavLink
             key={to}
             to={to}
-            end={to === "/dashboard"}
+            end={exact}
             title={collapsed ? label : undefined}
             className={({ isActive }) =>
               `flex items-center rounded-lg py-2 text-sm transition-colors ${
@@ -124,6 +109,26 @@ export function Sidebar({ user, onOpenPalette, collapsed = false }: SidebarProps
           </NavLink>
         ))}
       </nav>
+
+      {/* Settings (bottom) */}
+      <div className={`border-t border-surface-2/50 pt-2 ${collapsed ? "px-2" : "px-3"}`}>
+        <NavLink
+          to="/dashboard/settings"
+          title={collapsed ? "Settings" : undefined}
+          className={({ isActive }) =>
+            `flex items-center rounded-lg py-2 text-sm transition-colors ${
+              collapsed ? "justify-center px-2" : "gap-3 px-3"
+            } ${
+              isActive
+                ? "border border-brand/30 bg-brand/10 text-brand"
+                : "text-zinc-500 hover:bg-surface-1/50 hover:text-zinc-300"
+            }`
+          }
+        >
+          <Settings2 className="h-4 w-4 shrink-0" />
+          {!collapsed && "Settings"}
+        </NavLink>
+      </div>
 
       {/* User footer */}
       <div className="border-t border-surface-2/50 p-3">
