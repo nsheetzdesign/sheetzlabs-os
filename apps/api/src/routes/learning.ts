@@ -314,6 +314,77 @@ Key concepts to cover: ${key_concepts?.join(", ") || "N/A"}`,
   return c.json({ content });
 });
 
+// Get all conversations
+app.get("/conversations", async (c) => {
+  const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data, error } = await supabase
+    .from("learning_conversations")
+    .select("id, title, created_at, updated_at")
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+
+  return c.json({ conversations: data });
+});
+
+// Get messages for a conversation
+app.get("/conversations/:id/messages", async (c) => {
+  const conversationId = c.req.param("id");
+  const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data, error } = await supabase
+    .from("learning_messages")
+    .select("role, content, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at");
+
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+
+  return c.json({ messages: data });
+});
+
+// Rename conversation
+app.patch("/conversations/:id", async (c) => {
+  const conversationId = c.req.param("id");
+  const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const body = await c.req.json();
+
+  const { data, error } = await supabase
+    .from("learning_conversations")
+    .update({ title: body.title, updated_at: new Date().toISOString() })
+    .eq("id", conversationId)
+    .select()
+    .single();
+
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+
+  return c.json({ conversation: data });
+});
+
+// Delete conversation
+app.delete("/conversations/:id", async (c) => {
+  const conversationId = c.req.param("id");
+  const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { error } = await supabase
+    .from("learning_conversations")
+    .delete()
+    .eq("id", conversationId);
+
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+
+  return c.json({ success: true });
+});
+
 // Tutor chat
 app.post("/chat", async (c) => {
   const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
