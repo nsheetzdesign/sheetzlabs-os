@@ -1684,11 +1684,16 @@ async function fullSync(account: any, accessToken: string, supabase: any): Promi
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function syncViaHistory(account: any, accessToken: string, supabase: any): Promise<number> {
   const historyResponse = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${account.last_history_id}&historyTypes=messageAdded`,
+    `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${account.last_history_id}&historyTypes=messageAdded&historyTypes=messageDeleted&historyTypes=labelAdded&historyTypes=labelRemoved`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   const { history, historyId } = (await historyResponse.json()) as {
-    history?: Array<{ messagesAdded?: Array<{ message: { id: string } }> }>;
+    history?: Array<{
+      messagesAdded?: Array<{ message: { id: string } }>;
+      messagesDeleted?: Array<{ message: { id: string } }>;
+      labelsAdded?: Array<{ message: { id: string }; labelIds: string[] }>;
+      labelsRemoved?: Array<{ message: { id: string }; labelIds: string[] }>;
+    }>;
     historyId?: string;
   };
 
@@ -1701,6 +1706,38 @@ async function syncViaHistory(account: any, accessToken: string, supabase: any):
 
   let newCount = 0;
   for (const h of history) {
+    // Handle permanently deleted messages
+    for (const deleted of h.messagesDeleted ?? []) {
+      await supabase
+        .from("emails")
+        .update({ is_trashed: true })
+        .eq("external_id", deleted.message.id)
+        .eq("account_id", account.id);
+    }
+
+    // Handle messages moved to TRASH (label added)
+    for (const labelChange of h.labelsAdded ?? []) {
+      if (labelChange.labelIds?.includes("TRASH")) {
+        await supabase
+          .from("emails")
+          .update({ is_trashed: true })
+          .eq("external_id", labelChange.message.id)
+          .eq("account_id", account.id);
+      }
+    }
+
+    // Handle messages restored from TRASH (label removed)
+    for (const labelChange of h.labelsRemoved ?? []) {
+      if (labelChange.labelIds?.includes("TRASH")) {
+        await supabase
+          .from("emails")
+          .update({ is_trashed: false })
+          .eq("external_id", labelChange.message.id)
+          .eq("account_id", account.id);
+      }
+    }
+
+    // Handle new messages
     for (const added of h.messagesAdded ?? []) {
       const { data: existing } = await supabase.from("emails").select("id").eq("external_id", added.message.id).single();
       if (existing) continue;

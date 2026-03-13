@@ -358,7 +358,19 @@ export default function Inbox() {
       { method: 'post', action: '/dashboard/inbox/bulk' }
     );
     setSelectedIds(new Set());
-  }, [selectedIds, filteredEmails, focusIndex, fetcher]);
+
+    // If the active email is being removed from the current view, advance or close
+    const removesFromView = ['trash', 'archive', 'spam'].includes(action);
+    if (removesFromView && activeEmail && ids.includes(activeEmail.id)) {
+      const currentIndex = filteredEmails.findIndex((e: any) => e.id === activeEmail.id);
+      const nextEmail = filteredEmails[currentIndex + 1] ?? filteredEmails[currentIndex - 1] ?? null;
+      setActiveEmail(nextEmail as PreviewEmail | null);
+      setThreadEmails(null);
+      if (nextEmail) {
+        setFocusIndex(currentIndex + 1 < filteredEmails.length - 1 ? currentIndex + 1 : Math.max(0, currentIndex - 1));
+      }
+    }
+  }, [selectedIds, filteredEmails, focusIndex, fetcher, activeEmail]);
 
   const markAsRead = (id: string) => {
     fetcher.submit(
