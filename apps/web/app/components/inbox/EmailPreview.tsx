@@ -28,9 +28,10 @@ interface Props {
   onReply: () => void;
   onReplyAll: () => void;
   onForward: () => void;
+  onBulkAction?: (action: string) => void;
 }
 
-export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward }: Props) {
+export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward, onBulkAction }: Props) {
   const fetcher = useFetcher();
   const [showDetails, setShowDetails] = useState(false);
 
@@ -46,6 +47,11 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward }:
   }
 
   const handleAction = (action: string) => {
+    // Route view-removing actions through parent so it can advance to next email
+    if (onBulkAction && ['trash', 'archive', 'spam'].includes(action)) {
+      onBulkAction(action);
+      return;
+    }
     fetcher.submit(
       { action, email_ids: JSON.stringify([email.id]) },
       { method: 'post', action: '/dashboard/inbox/bulk' }

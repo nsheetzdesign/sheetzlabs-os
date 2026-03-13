@@ -1710,7 +1710,7 @@ async function syncViaHistory(account: any, accessToken: string, supabase: any):
     for (const deleted of h.messagesDeleted ?? []) {
       await supabase
         .from("emails")
-        .update({ is_trashed: true })
+        .update({ is_trashed: true, is_deleted: true, deleted_at: new Date().toISOString() })
         .eq("external_id", deleted.message.id)
         .eq("account_id", account.id);
     }

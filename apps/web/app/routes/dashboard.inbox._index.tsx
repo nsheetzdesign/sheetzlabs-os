@@ -39,6 +39,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       triage_category,
       email_label_assignments(label_id, email_labels(id, name, color))
     `)
+    .eq('is_deleted', false)
     .order('received_at', { ascending: false })
     .limit(100);
 
@@ -348,10 +349,12 @@ export default function Inbox() {
     });
   };
 
-  const handleBulkAction = useCallback((action: string) => {
-    const ids = selectedIds.size > 0
-      ? Array.from(selectedIds)
-      : filteredEmails[focusIndex] ? [filteredEmails[focusIndex].id] : [];
+  const handleBulkAction = useCallback((action: string, overrideEmailId?: string) => {
+    const ids = overrideEmailId
+      ? [overrideEmailId]
+      : selectedIds.size > 0
+        ? Array.from(selectedIds)
+        : filteredEmails[focusIndex] ? [filteredEmails[focusIndex].id] : [];
     if (ids.length === 0) return;
     fetcher.submit(
       { action, email_ids: JSON.stringify(ids) },
@@ -360,7 +363,7 @@ export default function Inbox() {
     setSelectedIds(new Set());
 
     // If the active email is being removed from the current view, advance or close
-    const removesFromView = ['trash', 'archive', 'spam'].includes(action);
+    const removesFromView = ['trash', 'archive', 'spam', 'delete'].includes(action);
     if (removesFromView && activeEmail && ids.includes(activeEmail.id)) {
       const currentIndex = filteredEmails.findIndex((e: any) => e.id === activeEmail.id);
       const nextEmail = filteredEmails[currentIndex + 1] ?? filteredEmails[currentIndex - 1] ?? null;
@@ -629,6 +632,7 @@ export default function Inbox() {
                 setComposeProps({ replyTo: activeEmail, forward: true });
                 setShowCompose(true);
               }}
+              onBulkAction={(action) => handleBulkAction(action, activeEmail?.id)}
             />
           )}
         </div>
