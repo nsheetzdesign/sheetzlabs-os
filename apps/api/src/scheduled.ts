@@ -3,6 +3,7 @@ import { executeAgent, postToLinkedIn } from "./lib/agent-engine";
 import { reminderEmail } from "./lib/booking-emails";
 import { sendBookingEmail } from "./lib/send-booking-email";
 import { runEmailSync } from "./routes/email";
+import { getValidAccessToken as getGoogleAccessToken, ReauthRequiredError } from "./lib/google-auth";
 
 type Env = {
   ENVIRONMENT: string;
@@ -84,8 +85,9 @@ export default {
       );
     }
 
-    // Unsnooze emails every minute
-    ctx.waitUntil(Promise.resolve(supabase.rpc("unsnooze_emails")));
+    // Unsnooze emails every minute — in TS so each restore writes back to Gmail
+    // and returns the message to its original folder (ES-9).
+    ctx.waitUntil(unsnoozeEmails(env, supabase));
 
     // Sweep expired OAuth state nonces every minute (Prompt 51B).
     ctx.waitUntil(
@@ -106,6 +108,67 @@ export default {
     }
   },
 };
+
+/**
+ * Restore due-snoozed emails (Prompt 52A Part 5 — ES-9). Replaces the old
+ * unconditional `unsnooze_emails()` RPC: restores the stored original folder AND
+ * re-adds the Gmail INBOX label per row so the message returns on every device.
+ * A Gmail/token failure leaves the row snoozed for the next run rather than
+ * clearing it silently.
+ */
+async function unsnoozeEmails(env: Env, supabase: ReturnType<typeof createClient<any>>) {
+  const nowIso = new Date().toISOString();
+  const { data: due, error } = await supabase
+    .from("emails")
+    .select("id, external_id, snooze_return_folder, email_accounts(*)")
+    .not("snoozed_until", "is", null)
+    .lte("snoozed_until", nowIso)
+    .eq("is_deleted", false)
+    .limit(100);
+
+  if (error) {
+    console.error(`[unsnooze] query failed: ${error.message}`);
+    return;
+  }
+
+  for (const row of due ?? []) {
+    const returnFolder = (row.snooze_return_folder as string) || "INBOX";
+    try {
+      if (returnFolder === "INBOX") {
+        const token = await getGoogleAccessToken(
+          row.email_accounts as unknown as Record<string, unknown>,
+          env,
+          supabase,
+          "email_accounts"
+        );
+        const res = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${row.external_id}/modify`,
+          {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ addLabelIds: ["INBOX"] }),
+          }
+        );
+        if (!res.ok) {
+          console.error(`[unsnooze] Gmail modify failed for ${row.id}: ${res.status}`);
+          continue; // leave snoozed; retry next run
+        }
+      }
+
+      const { error: upErr } = await supabase
+        .from("emails")
+        .update({ snoozed_until: null, folder: returnFolder, snooze_return_folder: null })
+        .eq("id", row.id);
+      if (upErr) console.error(`[unsnooze] DB update failed for ${row.id}: ${upErr.message}`);
+    } catch (err) {
+      if (err instanceof ReauthRequiredError) {
+        console.warn(`[unsnooze] ${err.email} needs reauth; leaving snoozed`);
+      } else {
+        console.error(`[unsnooze] row ${row.id} failed:`, err);
+      }
+    }
+  }
+}
 
 async function postScheduledContent(
   post: { id: string; content: string; platform: string },
@@ -151,8 +214,8 @@ async function fetchAllFeeds(
         method: "POST",
         headers: internalHeaders(env),
       });
-    } catch {
-      // continue with remaining feeds
+    } catch (err) {
+      console.error(`[feeds] fetch failed for ${feed.id}:`, err);
     }
   }
 }

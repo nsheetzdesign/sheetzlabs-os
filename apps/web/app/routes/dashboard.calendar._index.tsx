@@ -3,7 +3,7 @@ import { useLoaderData, Link, Form, useFetcher, redirect } from "react-router";
 import { useState, useEffect, useRef } from "react";
 import {
   RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin,
-  Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar,
+  Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar, AlertTriangle,
 } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { apiFetch } from "~/lib/api";
@@ -159,7 +159,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       .gte("start_at", start.toISOString())
       .lte("start_at", end.toISOString())
       .order("start_at"),
-    supabase.from("calendar_accounts").select("id, email, color, sync_enabled, last_sync_at").order("email"),
+    supabase.from("calendar_accounts").select("id, email, color, sync_enabled, last_sync_at, needs_reauth").order("email"),
     supabase.from("tasks").select("id, title, due_date, priority, status").in("status", ["todo", "in_progress"]).order("due_date", { nullsFirst: false }),
   ]);
 
@@ -181,9 +181,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     })
   );
 
+  const reauthAccounts = (accountsRes.data ?? [])
+    .filter((a) => (a as { needs_reauth?: boolean }).needs_reauth)
+    .map((a) => ({ id: a.id, email: a.email }));
+
   return {
     events: eventsRes.data ?? [],
     accounts: accountsRes.data ?? [],
+    reauthAccounts,
     tasks: unscheduled,
     subCalendars,
     view,
@@ -711,8 +716,10 @@ function CalendarSettingsModal({
 // ── Main Calendar Component ───────────────────────────────────────────────────
 
 export default function CalendarPage() {
-  const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart } =
+  const { events, accounts, reauthAccounts, tasks, subCalendars, view, weekOffset, weekStart } =
     useLoaderData<typeof loader>();
+  const [dismissedReauth, setDismissedReauth] = useState<Set<string>>(new Set());
+  const visibleReauth = reauthAccounts.filter((a) => !dismissedReauth.has(a.id));
   const fetcher = useFetcher();
 
   const [draggedTask, setDraggedTask] = useState<{ id: string; title: string } | null>(null);
@@ -819,7 +826,36 @@ export default function CalendarPage() {
   const nextOffset = weekOffset + 1;
 
   return (
-    <div className="flex h-full overflow-hidden" onClick={() => setColorPickerFor(null)}>
+    <div className="flex flex-col h-full overflow-hidden" onClick={() => setColorPickerFor(null)}>
+      {visibleReauth.map((acct) => (
+        <div
+          key={acct.id}
+          className="flex items-center gap-3 px-4 py-2 bg-amber-950/40 border-b border-amber-800/50 text-sm text-amber-200"
+        >
+          <AlertTriangle size={16} className="shrink-0 text-amber-400" />
+          <span className="flex-1">
+            Google Calendar access for <strong>{acct.email}</strong> was revoked — sync is paused until you reconnect.
+          </span>
+          <Form method="post">
+            <input type="hidden" name="intent" value="connect" />
+            <button
+              type="submit"
+              className="px-3 py-1 rounded bg-amber-500 text-amber-950 font-medium hover:bg-amber-400 transition-colors"
+            >
+              Reconnect {acct.email}
+            </button>
+          </Form>
+          <button
+            type="button"
+            onClick={() => setDismissedReauth((prev) => new Set(prev).add(acct.id))}
+            title="Dismiss"
+            className="text-amber-400 hover:text-amber-200"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      ))}
+      <div className="flex flex-1 overflow-hidden">
       {/* Modals */}
       {newEventModal && accounts.length > 0 && (
         <NewEventModal
@@ -1110,6 +1146,7 @@ export default function CalendarPage() {
             accounts.length > 0 && <span className="text-zinc-600">Click a slot to create an event · Click an event to open it</span>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

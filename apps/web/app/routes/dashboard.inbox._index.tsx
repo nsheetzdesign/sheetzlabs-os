@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator } from 'react-router';
-import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell } from 'lucide-react';
+import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator, Form } from 'react-router';
+import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell, AlertTriangle, X } from 'lucide-react';
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
 import { InboxSidebar } from '~/components/inbox/InboxSidebar';
@@ -72,21 +72,13 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
   const [{ data: emails, error: emailsError }, { data: accounts }] = await Promise.all([
     query,
-    supabase.from('email_accounts').select('id, email').order('email'),
+    supabase.from('email_accounts').select('id, email, needs_reauth').order('email'),
   ]);
 
-  console.log('[Inbox] Query result:', {
-    count: emails?.length,
-    error: emailsError,
-    folder,
-    accountId: account_id,
-    firstEmail: emails?.[0] ? {
-      id: emails[0].id,
-      subject: emails[0].subject,
-      folder: emails[0].folder,
-      hasBody: !!emails[0].body_text || !!emails[0].body_html,
-    } : null,
-  });
+  if (emailsError) console.error('[Inbox] emails query failed:', emailsError.message);
+
+  // Accounts flagged for reconnection drive the reconnect banner (ES-3 Part 1).
+  const reauthAccounts = (accounts ?? []).filter(a => a.needs_reauth).map(a => ({ id: a.id, email: a.email }));
 
   const accountIds = (accounts ?? []).map(a => a.id);
 
@@ -161,30 +153,20 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     labels: labelsByAccount[account.id] ?? [],
   }));
 
-  // Global counts (across all accounts)
-  const [
-    { count: gInbox },
-    { count: gStarred },
-    { count: gSnoozed },
-    { count: gSpam },
-    { count: gTrash },
-    { count: gDrafts },
-  ] = await Promise.all([
-    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_read', false),
-    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_starred', true).eq('is_trashed', false),
-    supabase.from('emails').select('id', { count: 'exact', head: true }).not('snoozed_until', 'is', null),
-    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_spam', true).eq('is_trashed', false),
-    supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_trashed', true),
-    supabase.from('email_drafts').select('id', { count: 'exact', head: true }).eq('status', 'draft'),
-  ]);
+  // Global counts (across all accounts) — single round trip via get_email_counts
+  // (Prompt 52A Part 7). Excludes deleted everywhere; snoozed excludes expired.
+  const { data: countsRow, error: countsError } = await supabase
+    .rpc('get_email_counts', { p_account_id: null })
+    .single<{ inbox: number; starred: number; snoozed: number; drafts: number; spam: number; trash: number }>();
+  if (countsError) console.error('[Inbox] get_email_counts failed:', countsError.message);
 
   const globalCounts = {
-    inbox: gInbox ?? 0,
-    starred: gStarred ?? 0,
-    snoozed: gSnoozed ?? 0,
-    spam: gSpam ?? 0,
-    trash: gTrash ?? 0,
-    drafts: gDrafts ?? 0,
+    inbox: Number(countsRow?.inbox ?? 0),
+    starred: Number(countsRow?.starred ?? 0),
+    snoozed: Number(countsRow?.snoozed ?? 0),
+    spam: Number(countsRow?.spam ?? 0),
+    trash: Number(countsRow?.trash ?? 0),
+    drafts: Number(countsRow?.drafts ?? 0),
   };
 
   // Per-account counts (simple: just unread inbox for each)
@@ -210,6 +192,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       labels: (e.email_label_assignments ?? []).map((a: any) => a.email_labels).filter(Boolean),
     })),
     accounts: accountsWithLabels,
+    reauthAccounts,
     counts,
     globalCounts,
     folder,
@@ -228,7 +211,9 @@ const TRIAGE_TABS = [
 ] as const;
 
 export default function Inbox() {
-  const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
+  const { emails, accounts, reauthAccounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
+  const [dismissedReauth, setDismissedReauth] = useState<Set<string>>(new Set());
+  const visibleReauth = reauthAccounts.filter(a => !dismissedReauth.has(a.id));
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const fetcher = useFetcher();
@@ -504,7 +489,35 @@ export default function Inbox() {
   });
 
   return (
-    <div className="flex h-full">
+    <div className="flex flex-col h-full">
+      {visibleReauth.map((acct) => (
+        <div
+          key={acct.id}
+          className="flex items-center gap-3 px-4 py-2 bg-amber-950/40 border-b border-amber-800/50 text-sm text-amber-200"
+        >
+          <AlertTriangle size={16} className="shrink-0 text-amber-400" />
+          <span className="flex-1">
+            Gmail access for <strong>{acct.email}</strong> was revoked — sync is paused until you reconnect.
+          </span>
+          <Form method="post" action="/dashboard/inbox/connect-gmail">
+            <button
+              type="submit"
+              className="px-3 py-1 rounded bg-amber-500 text-amber-950 font-medium hover:bg-amber-400 transition-colors"
+            >
+              Reconnect {acct.email}
+            </button>
+          </Form>
+          <button
+            type="button"
+            onClick={() => setDismissedReauth((prev) => new Set(prev).add(acct.id))}
+            title="Dismiss"
+            className="text-amber-400 hover:text-amber-200"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      ))}
+      <div className="flex flex-1 overflow-hidden">
       <InboxSidebar
         accounts={accounts}
         counts={counts}
@@ -636,6 +649,7 @@ export default function Inbox() {
             />
           )}
         </div>
+      </div>
       </div>
 
       <ComposeModal

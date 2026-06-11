@@ -3,6 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react
 import { useLoaderData, Link, useFetcher, useNavigate } from "react-router";
 import { ArrowLeft, Star, Reply, Wand2, Archive, Trash2, Clock } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 import { EmailHtmlFrame } from "~/components/inbox/EmailHtmlFrame";
 import { SnoozePicker } from "~/components/inbox/SnoozePicker";
 
@@ -10,7 +11,7 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: `${data?.email?.subject ?? "Email"} — Inbox — Sheetz Labs OS` },
 ];
 
-export async function loader({ params, context }: LoaderFunctionArgs) {
+export async function loader({ params, request, context }: LoaderFunctionArgs) {
   const { id } = params;
   const env = context.cloudflare.env;
   const supabase = getSupabaseClient(env);
@@ -19,6 +20,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
     .from("emails")
     .select("*, email_accounts(email), relationships(id, name, company)")
     .eq("id", id!)
+    .eq("is_deleted", false)
     .single();
 
   if (!email) throw new Response("Not found", { status: 404 });
@@ -29,13 +31,18 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
       .from("emails")
       .select("id, subject, from_email, from_name, snippet, received_at")
       .eq("thread_id", email.thread_id)
+      .eq("is_deleted", false)
       .order("received_at");
     thread = data ?? [];
   }
 
-  // Mark as read
+  // Mark as read — via the API so it writes back to Gmail (ES-1), not Supabase only.
   if (!email.is_read) {
-    await supabase.from("emails").update({ is_read: true }).eq("id", id!);
+    await apiFetch(request, env, `/email/messages/${id}/read`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_read: true }),
+    }).catch((err) => console.error("[inbox] mark-read failed", err));
   }
 
   return { email, thread };
@@ -44,28 +51,25 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 export async function action({ request, params, context }: ActionFunctionArgs) {
   const { id } = params;
   const env = context.cloudflare.env;
-  const supabase = getSupabaseClient(env);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
-  switch (intent) {
-    case "archive":
-      await supabase
-        .from("emails")
-        .update({ is_archived: true, folder: "ARCHIVE" })
-        .eq("id", id!);
-      return Response.json({ success: true, action: "archived" });
-
-    case "trash":
-      await supabase
-        .from("emails")
-        .update({ is_trashed: true, folder: "TRASH" })
-        .eq("id", id!);
-      return Response.json({ success: true, action: "trashed" });
-
-    default:
-      return Response.json({ error: "Unknown intent" }, { status: 400 });
+  if (intent !== "archive" && intent !== "trash") {
+    return Response.json({ error: "Unknown intent" }, { status: 400 });
   }
+
+  // Route through the API bulk endpoint so the action reaches Gmail (ES-1).
+  const res = await apiFetch(request, env, "/email/bulk", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: intent, email_ids: [id] }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Action failed" }));
+    return Response.json(err, { status: res.status });
+  }
+  return Response.json({ success: true, action: intent === "archive" ? "archived" : "trashed" });
 }
 
 

@@ -3,6 +3,10 @@ import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
 import { executeAgent } from "../lib/agent-engine";
 import { createOAuthState, consumeOAuthState } from "../lib/oauth-state";
+import {
+  getValidAccessToken as getGoogleAccessToken,
+  ReauthRequiredError,
+} from "../lib/google-auth";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -26,7 +30,7 @@ email.get("/accounts", async (c) => {
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
   const { data } = await supabase
     .from("email_accounts")
-    .select("id, email, provider, sync_enabled, last_sync_at")
+    .select("id, email, provider, sync_enabled, last_sync_at, needs_reauth, sync_error")
     .order("email");
   return c.json({ accounts: data ?? [] });
 });
@@ -110,6 +114,9 @@ email.get("/auth/gmail/callback", async (c) => {
         token_expires_at: new Date(
           Date.now() + (tokens.expires_in as number) * 1000
         ).toISOString(),
+        // A successful (re)link clears any prior reauth flag (ES-3 Part 1).
+        needs_reauth: false,
+        sync_error: null,
       },
       { onConflict: "email" }
     )
@@ -205,92 +212,9 @@ email.delete("/aliases/:id", async (c) => {
 // ============================================
 // EMAIL SYNC
 // ============================================
-email.post("/accounts/:id/sync", async (c) => {
-  const { id } = c.req.param();
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-
-  const { data: account } = await supabase
-    .from("email_accounts")
-    .select("*")
-    .eq("id", id)
-    .single();
-
-  if (!account) return c.json({ error: "Account not found" }, 404);
-
-  const accessToken = await getValidAccessToken(account, c.env, supabase);
-
-  // Sync labels first
-  const labelSync = await syncLabelsForAccount(id, accessToken, supabase);
-
-  const messagesResponse = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50",
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const { messages } = (await messagesResponse.json()) as { messages?: Array<{ id: string }> };
-
-  let syncedCount = 0;
-
-  for (const msg of messages ?? []) {
-    const { data: existing } = await supabase
-      .from("emails")
-      .select("id")
-      .eq("account_id", id)
-      .eq("external_id", msg.id)
-      .single();
-
-    if (existing) continue;
-
-    const fullMsgRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    const msgData = (await fullMsgRes.json()) as Record<string, unknown>;
-
-    const parsed = parseGmailMessage(msgData);
-    const triage = await triageEmail(parsed, c.env);
-    const relationshipId = await findRelationship(parsed.from_email, supabase);
-
-    await supabase.from("emails").insert({
-      account_id: id,
-      external_id: msg.id,
-      thread_id: msgData.threadId,
-      ...parsed,
-      ...triage,
-      relationship_id: relationshipId,
-    });
-
-    if (relationshipId) {
-      await supabase.from("interactions").insert({
-        relationship_id: relationshipId,
-        type: "email",
-        direction: "incoming",
-        summary: `Received: ${parsed.subject}`,
-      });
-      await supabase
-        .from("relationships")
-        .update({ last_contact: new Date().toISOString() })
-        .eq("id", relationshipId);
-    }
-
-    syncedCount++;
-  }
-
-  await supabase
-    .from("email_accounts")
-    .update({ last_sync_at: new Date().toISOString() })
-    .eq("id", id);
-
-  return c.json({
-    success: true,
-    labelSync: {
-      total: labelSync.total,
-      system: labelSync.system,
-      user: labelSync.user,
-      userLabelNames: labelSync.userLabelNames,
-    },
-    emailSync: { synced: syncedCount },
-  });
-});
+// Legacy `POST /accounts/:id/sync` (parseGmailMessage + inline per-message triage)
+// removed in Prompt 52A (ES-7): it imported every message as INBOX and wrote wrong
+// folder/trash/spam state. Use `POST /sync` (runEmailSync) instead.
 
 // ============================================
 // EMAIL OPERATIONS
@@ -301,17 +225,18 @@ email.get("/messages", async (c) => {
   const account_id = c.req.query("account_id");
   const unread_only = c.req.query("unread_only") === "true";
 
-  let query = supabase
-    .from("emails")
-    .select("*, email_accounts(email)")
+  // Default list excludes deleted/trashed/spam (ES-5).
+  let query = baseEmailQuery(supabase, account_id, "*, email_accounts(email)")
+    .eq("is_trashed", false)
+    .eq("is_spam", false)
     .order("received_at", { ascending: false })
     .limit(50);
 
   if (category && category !== "all") query = query.eq("ai_category", category);
-  if (account_id) query = query.eq("account_id", account_id);
   if (unread_only) query = query.eq("is_read", false);
 
-  const { data } = await query;
+  const { data, error } = await query;
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ emails: data ?? [] });
 });
 
@@ -319,24 +244,37 @@ email.get("/messages/:id", async (c) => {
   const { id } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data: emailData } = await supabase
-    .from("emails")
-    .select("*, email_accounts(email), relationships(id, name, company)")
+  const { data: emailData } = await baseEmailQuery(
+    supabase,
+    null,
+    "*, email_accounts(*), relationships(id, name, company)"
+  )
     .eq("id", id)
     .single();
 
+  if (!emailData) return c.json({ error: "Email not found" }, 404);
+
   let thread: unknown[] = [];
-  if (emailData?.thread_id) {
-    const { data } = await supabase
-      .from("emails")
-      .select("*")
+  if (emailData.thread_id) {
+    const { data } = await baseEmailQuery(supabase, null, "*")
       .eq("thread_id", emailData.thread_id)
       .order("received_at");
     thread = data ?? [];
   }
 
-  if (!emailData?.is_read) {
-    await supabase.from("emails").update({ is_read: true }).eq("id", id);
+  // Opening an email marks it read — write back to Gmail too (ES-1).
+  if (!emailData.is_read) {
+    try {
+      const token = await getValidAccessToken(emailData.email_accounts, c.env, supabase);
+      await gmailModify(token, emailData.external_id, { removeLabelIds: ["UNREAD"] });
+      await supabase.from("emails").update({ is_read: true }).eq("id", id);
+    } catch (err) {
+      if (err instanceof ReauthRequiredError) {
+        console.warn(`[email] mark-read skipped, ${err.email} needs reauth`);
+      } else {
+        console.error(`[email] mark-read write-back failed for ${id}:`, err);
+      }
+    }
   }
 
   return c.json({ email: emailData, thread });
@@ -346,7 +284,21 @@ email.patch("/messages/:id/read", async (c) => {
   const { id } = c.req.param();
   const { is_read } = await c.req.json<{ is_read: boolean }>();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  await supabase.from("emails").update({ is_read }).eq("id", id);
+
+  const em = await loadEmailWithAccount(supabase, id);
+  if (!em) return c.json({ error: "Email not found" }, 404);
+
+  // Gmail FIRST, then DB (ES-1). UNREAD is the inverse of is_read.
+  try {
+    const token = await getValidAccessToken(em.account, c.env, supabase);
+    await gmailModify(token, em.external_id, is_read ? { removeLabelIds: ["UNREAD"] } : { addLabelIds: ["UNREAD"] });
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+    return c.json({ error: err instanceof Error ? err.message : "Gmail write failed" }, 502);
+  }
+
+  const { error } = await supabase.from("emails").update({ is_read }).eq("id", id);
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ success: true });
 });
 
@@ -354,7 +306,20 @@ email.patch("/messages/:id/star", async (c) => {
   const { id } = c.req.param();
   const { is_starred } = await c.req.json<{ is_starred: boolean }>();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  await supabase.from("emails").update({ is_starred }).eq("id", id);
+
+  const em = await loadEmailWithAccount(supabase, id);
+  if (!em) return c.json({ error: "Email not found" }, 404);
+
+  try {
+    const token = await getValidAccessToken(em.account, c.env, supabase);
+    await gmailModify(token, em.external_id, is_starred ? { addLabelIds: ["STARRED"] } : { removeLabelIds: ["STARRED"] });
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+    return c.json({ error: err instanceof Error ? err.message : "Gmail write failed" }, 502);
+  }
+
+  const { error } = await supabase.from("emails").update({ is_starred }).eq("id", id);
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ success: true });
 });
 
@@ -510,10 +475,11 @@ email.post("/draft-with-ai", async (c) => {
 email.post("/resync-bodies", async (c) => {
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  // Fetch up to 100 emails with missing body
+  // Fetch up to 100 (non-deleted) emails with missing body (ES-5)
   const { data: missing } = await supabase
     .from("emails")
     .select("id, external_id, account_id")
+    .eq("is_deleted", false)
     .is("body_text", null)
     .is("body_html", null)
     .limit(100);
@@ -542,8 +508,8 @@ email.post("/resync-bodies", async (c) => {
         await supabase.from("emails").update({ body_text: bodyText || null, body_html: bodyHtml || null }).eq("id", row.id);
         resynced++;
       }
-    } catch {
-      // Skip failures
+    } catch (err) {
+      console.error(`[resync-bodies] row ${row.id} failed:`, err);
     }
   }
 
@@ -590,12 +556,50 @@ email.post("/labels", async (c) => {
   const body = await c.req.json<{ account_id: string; name: string; color?: string; sort_order?: number }>();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data } = await supabase
+  if (!body.account_id || !body.name) return c.json({ error: "account_id and name required" }, 400);
+
+  // Create in Gmail FIRST so the label is real and applyable Gmail-side (ES-8).
+  const { data: account } = await supabase.from("email_accounts").select("*").eq("id", body.account_id).single();
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  let externalId: string;
+  try {
+    const token = await getValidAccessToken(account, c.env, supabase);
+    const res = await fetch(`${GMAIL_API}/labels`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: body.name,
+        labelListVisibility: "labelShow",
+        messageListVisibility: "show",
+      }),
+    });
+    if (res.status === 409) return c.json({ error: `A label named "${body.name}" already exists` }, 409);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return c.json({ error: `Gmail label create failed (${res.status}): ${text}` }, 502);
+    }
+    const created = (await res.json()) as { id: string };
+    externalId = created.id;
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+    return c.json({ error: err instanceof Error ? err.message : "Gmail label create failed" }, 502);
+  }
+
+  const { data, error } = await supabase
     .from("email_labels")
-    .insert({ account_id: body.account_id, name: body.name, color: body.color ?? "#2FE8B6", type: "user", sort_order: body.sort_order ?? 100 })
+    .insert({
+      account_id: body.account_id,
+      name: body.name,
+      color: body.color ?? "#2FE8B6",
+      type: "user",
+      sort_order: body.sort_order ?? 100,
+      external_id: externalId,
+    })
     .select()
     .single();
 
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ label: data });
 });
 
@@ -633,12 +637,16 @@ email.post("/:id/labels/:labelId", async (c) => {
   const { id, labelId } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data } = await supabase
+  const reauth = await writeBackLabel(supabase, c.env, id, labelId, true);
+  if (reauth) return c.json(reauth.body, reauth.status);
+
+  const { data, error } = await supabase
     .from("email_label_assignments")
     .upsert({ email_id: id, label_id: labelId })
     .select()
     .single();
 
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ assignment: data });
 });
 
@@ -646,76 +654,144 @@ email.delete("/:id/labels/:labelId", async (c) => {
   const { id, labelId } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  await supabase
+  const reauth = await writeBackLabel(supabase, c.env, id, labelId, false);
+  if (reauth) return c.json(reauth.body, reauth.status);
+
+  const { error } = await supabase
     .from("email_label_assignments")
     .delete()
     .eq("email_id", id)
     .eq("label_id", labelId);
 
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ success: true });
 });
 
 // ============================================
 // BULK ACTIONS
 // ============================================
+// Map each flag/folder bulk action to the Gmail label delta + local DB patch.
+// `delete` is intentionally folded into `trash` (ES-4): no hard delete remains.
+const BULK_LABEL_OPS: Record<
+  string,
+  { add?: string[]; remove?: string[]; patch: Record<string, unknown> } | "trash" | "untrash"
+> = {
+  archive:   { remove: ["INBOX"], patch: { is_archived: true, folder: "INBOX" } },
+  unarchive: { add: ["INBOX"], patch: { is_archived: false, folder: "INBOX" } },
+  spam:      { add: ["SPAM"], remove: ["INBOX"], patch: { is_spam: true, folder: "SPAM" } },
+  not_spam:  { remove: ["SPAM"], add: ["INBOX"], patch: { is_spam: false, folder: "INBOX" } },
+  read:      { remove: ["UNREAD"], patch: { is_read: true } },
+  unread:    { add: ["UNREAD"], patch: { is_read: false } },
+  star:      { add: ["STARRED"], patch: { is_starred: true } },
+  unstar:    { remove: ["STARRED"], patch: { is_starred: false } },
+  trash:     "trash",
+  delete:    "trash",
+  untrash:   "untrash",
+};
+
 email.post("/bulk", async (c) => {
   const { action, email_ids, label_id } = await c.req.json<{ action: string; email_ids: string[]; label_id?: string }>();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   if (!email_ids?.length) return c.json({ error: "No emails specified" }, 400);
 
-  let affected = 0;
+  // Resolve every target's Gmail id + owning account.
+  const { data: targets, error: loadErr } = await supabase
+    .from("emails")
+    .select("id, external_id, account_id, folder")
+    .in("id", email_ids);
+  if (loadErr) return c.json({ error: loadErr.message }, 500);
+  if (!targets?.length) return c.json({ success: true, succeeded: 0, failed: [] });
 
-  switch (action) {
-    case "archive":
-      { const { count } = await supabase.from("emails").update({ is_archived: true, folder: "ARCHIVE" }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "unarchive":
-      { const { count } = await supabase.from("emails").update({ is_archived: false, folder: "INBOX" }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "trash":
-      { const { count } = await supabase.from("emails").update({ is_trashed: true, folder: "TRASH" }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "untrash":
-      { const { count } = await supabase.from("emails").update({ is_trashed: false, folder: "INBOX" }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "delete":
-      { const { count } = await supabase.from("emails").delete().in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "spam":
-      { const { count } = await supabase.from("emails").update({ is_spam: true, folder: "SPAM" }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "not_spam":
-      { const { count } = await supabase.from("emails").update({ is_spam: false, folder: "INBOX" }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "read":
-      { const { count } = await supabase.from("emails").update({ is_read: true }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "unread":
-      { const { count } = await supabase.from("emails").update({ is_read: false }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "star":
-      { const { count } = await supabase.from("emails").update({ is_starred: true }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "unstar":
-      { const { count } = await supabase.from("emails").update({ is_starred: false }).in("id", email_ids);
-      affected = count ?? 0; break; }
-    case "add_label":
-      if (!label_id) return c.json({ error: "label_id required" }, 400);
-      for (const email_id of email_ids) {
-        await supabase.from("email_label_assignments").upsert({ email_id, label_id });
-      }
-      affected = email_ids.length;
-      break;
-    case "remove_label":
-      if (!label_id) return c.json({ error: "label_id required" }, 400);
-      { const { count } = await supabase.from("email_label_assignments").delete().in("email_id", email_ids).eq("label_id", label_id);
-      affected = count ?? 0; break; }
-    default:
-      return c.json({ error: "Unknown action" }, 400);
+  type Target = { id: string; external_id: string; account_id: string; folder: string | null };
+  const byAccount = new Map<string, Target[]>();
+  for (const t of targets as Target[]) {
+    if (!byAccount.has(t.account_id)) byAccount.set(t.account_id, []);
+    byAccount.get(t.account_id)!.push(t);
   }
 
-  return c.json({ success: true, affected });
+  const failed: Array<{ id: string; error: string }> = [];
+
+  // --- Label actions (single account-scoped label across the selection) -----
+  if (action === "add_label" || action === "remove_label") {
+    if (!label_id) return c.json({ error: "label_id required" }, 400);
+    const add = action === "add_label";
+    const { data: label } = await supabase
+      .from("email_labels")
+      .select("external_id, account_id")
+      .eq("id", label_id)
+      .single();
+    if (!label) return c.json({ error: "Label not found" }, 404);
+
+    if (label.external_id) {
+      const sameAcct = (targets as Target[]).filter((t) => t.account_id === label.account_id);
+      if (sameAcct.length) {
+        try {
+          const { data: acct } = await supabase.from("email_accounts").select("*").eq("id", label.account_id).single();
+          const token = await getValidAccessToken(acct, c.env, supabase);
+          await gmailBatchModify(token, sameAcct.map((t) => t.external_id), add ? { addLabelIds: [label.external_id] } : { removeLabelIds: [label.external_id] });
+        } catch (err) {
+          const msg = err instanceof ReauthRequiredError ? "Account needs reconnection" : err instanceof Error ? err.message : "Gmail label write failed";
+          return c.json({ success: false, succeeded: 0, failed: sameAcct.map((t) => ({ id: t.id, error: msg })) }, err instanceof ReauthRequiredError ? 409 : 502);
+        }
+      }
+    }
+
+    if (add) {
+      const { error } = await supabase.from("email_label_assignments").upsert(email_ids.map((eid) => ({ email_id: eid, label_id })));
+      if (error) return c.json({ error: error.message }, 500);
+    } else {
+      const { error } = await supabase.from("email_label_assignments").delete().in("email_id", email_ids).eq("label_id", label_id);
+      if (error) return c.json({ error: error.message }, 500);
+    }
+    return c.json({ success: true, succeeded: email_ids.length, failed: [] });
+  }
+
+  const op = BULK_LABEL_OPS[action];
+  if (!op) return c.json({ error: "Unknown action" }, 400);
+
+  // --- Flag/folder actions: Gmail FIRST (per account), then DB for survivors --
+  const okIds: string[] = [];
+  for (const [accountId, items] of byAccount) {
+    let token: string;
+    try {
+      const { data: acct } = await supabase.from("email_accounts").select("*").eq("id", accountId).single();
+      token = await getValidAccessToken(acct, c.env, supabase);
+    } catch (err) {
+      const msg = err instanceof ReauthRequiredError ? "Account needs reconnection" : err instanceof Error ? err.message : "Token error";
+      for (const it of items) failed.push({ id: it.id, error: msg });
+      continue;
+    }
+
+    if (op === "trash" || op === "untrash") {
+      // No batch endpoint for trash — loop with per-item error collection (ES-1).
+      for (const it of items) {
+        try {
+          await gmailTrash(token, it.external_id, op === "untrash");
+          okIds.push(it.id);
+        } catch (err) {
+          failed.push({ id: it.id, error: err instanceof Error ? err.message : "Gmail trash failed" });
+        }
+      }
+    } else {
+      try {
+        await gmailBatchModify(token, items.map((i) => i.external_id), { addLabelIds: op.add, removeLabelIds: op.remove });
+        for (const it of items) okIds.push(it.id);
+      } catch (err) {
+        for (const it of items) failed.push({ id: it.id, error: err instanceof Error ? err.message : "Gmail batch failed" });
+      }
+    }
+  }
+
+  if (okIds.length) {
+    const patch = op === "trash" ? { is_trashed: true, folder: "TRASH" }
+      : op === "untrash" ? { is_trashed: false, is_archived: false, folder: "INBOX" }
+      : op.patch;
+    const { error } = await supabase.from("emails").update(patch).in("id", okIds);
+    if (error) return c.json({ error: error.message }, 500);
+  }
+
+  return c.json({ success: failed.length === 0, succeeded: okIds.length, failed });
 });
 
 // ============================================
@@ -726,12 +802,31 @@ email.post("/:id/snooze", async (c) => {
   const { until } = await c.req.json<{ until: string }>();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data } = await supabase
+  // Validate `until`: must be a parseable, future timestamp (ES-9).
+  const ts = until ? new Date(until).getTime() : NaN;
+  if (!Number.isFinite(ts) || ts <= Date.now()) {
+    return c.json({ error: "`until` must be a valid future timestamp" }, 422);
+  }
+
+  const em = await loadEmailWithAccount(supabase, id);
+  if (!em) return c.json({ error: "Email not found" }, 404);
+
+  // Remove from Gmail inbox so it's hidden on other devices too (ES-1/ES-9).
+  try {
+    const token = await getValidAccessToken(em.account, c.env, supabase);
+    await gmailModify(token, em.external_id, { removeLabelIds: ["INBOX"] });
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+    return c.json({ error: err instanceof Error ? err.message : "Gmail write failed" }, 502);
+  }
+
+  const { data, error } = await supabase
     .from("emails")
-    .update({ snoozed_until: until, folder: "SNOOZED" })
+    .update({ snoozed_until: until, folder: "SNOOZED", snooze_return_folder: em.folder ?? "INBOX" })
     .eq("id", id)
     .select()
     .single();
+  if (error) return c.json({ error: error.message }, 500);
 
   return c.json({ email: data });
 });
@@ -740,12 +835,37 @@ email.delete("/:id/snooze", async (c) => {
   const { id } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data } = await supabase
+  const { data: row } = await supabase
     .from("emails")
-    .update({ snoozed_until: null, folder: "INBOX" })
+    .select("external_id, snooze_return_folder, email_accounts(*)")
+    .eq("id", id)
+    .single();
+  if (!row) return c.json({ error: "Email not found" }, 404);
+
+  const returnFolder = (row.snooze_return_folder as string) || "INBOX";
+
+  // Re-add to Gmail inbox only if the message originated there (ES-9).
+  if (returnFolder === "INBOX") {
+    try {
+      const token = await getValidAccessToken(
+        row.email_accounts as unknown as Record<string, unknown>,
+        c.env,
+        supabase
+      );
+      await gmailModify(token, row.external_id, { addLabelIds: ["INBOX"] });
+    } catch (err) {
+      if (err instanceof ReauthRequiredError) return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+      return c.json({ error: err instanceof Error ? err.message : "Gmail write failed" }, 502);
+    }
+  }
+
+  const { data, error } = await supabase
+    .from("emails")
+    .update({ snoozed_until: null, folder: returnFolder, snooze_return_folder: null })
     .eq("id", id)
     .select()
     .single();
+  if (error) return c.json({ error: error.message }, 500);
 
   return c.json({ email: data });
 });
@@ -757,9 +877,11 @@ email.get("/thread/:threadId", async (c) => {
   const { threadId } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data } = await supabase
-    .from("emails")
-    .select("*, email_label_assignments(label_id, email_labels(*))")
+  const { data } = await baseEmailQuery(
+    supabase,
+    null,
+    "*, email_label_assignments(label_id, email_labels(*))"
+  )
     .eq("thread_id", threadId)
     .order("received_at", { ascending: true });
 
@@ -787,18 +909,19 @@ email.get("/search", async (c) => {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let query: any = supabase
-    .from("emails")
-    .select("*, email_label_assignments(label_id, email_labels(*))")
-    .eq("is_trashed", false)
+  // Escape LIKE wildcards so `%`/`_` in user input are literal (ported from the
+  // now-deleted duplicate handler — XC-6 / Part 3).
+  const esc = (s: string) => s.replace(/[%_\\]/g, "\\$&");
+
+  // Exclude deleted (ES-5); trashed shown only when explicitly requested via in:trash.
+  let query = baseEmailQuery(supabase, account_id, "*, email_label_assignments(label_id, email_labels(*))")
     .order("received_at", { ascending: false })
     .limit(50);
+  if (filters.in !== "trash") query = query.eq("is_trashed", false);
 
-  if (account_id) query = query.eq("account_id", account_id);
-  if (filters.from) query = query.ilike("from_email", `%${filters.from}%`);
-  if (filters.to) query = query.ilike("to_emails", `%${filters.to}%`);
-  if (filters.subject) query = query.ilike("subject", `%${filters.subject}%`);
+  if (filters.from) query = query.ilike("from_email", `%${esc(filters.from)}%`);
+  if (filters.to) query = query.ilike("to_emails", `%${esc(filters.to)}%`);
+  if (filters.subject) query = query.ilike("subject", `%${esc(filters.subject)}%`);
   if (filters.has === "attachment") query = query.eq("has_attachments", true);
   if (filters.is === "unread") query = query.eq("is_read", false);
   if (filters.is === "read") query = query.eq("is_read", true);
@@ -810,10 +933,12 @@ email.get("/search", async (c) => {
   if (filters.after) query = query.gte("received_at", filters.after);
   if (filters.before) query = query.lte("received_at", filters.before);
   if (textQuery) {
-    query = query.or(`subject.ilike.%${textQuery}%,body_text.ilike.%${textQuery}%,from_name.ilike.%${textQuery}%`);
+    const t = esc(textQuery);
+    query = query.or(`subject.ilike.%${t}%,body_text.ilike.%${t}%,from_name.ilike.%${t}%`);
   }
 
-  const { data } = await query;
+  const { data, error } = await query;
+  if (error) return c.json({ error: error.message }, 500);
   return c.json({ emails: data ?? [], query: q, filters });
 });
 
@@ -844,6 +969,11 @@ export async function runEmailSync(
   const results: Array<Record<string, unknown>> = [];
 
   for (const account of accounts ?? []) {
+    // Skip accounts already flagged for reconnection — don't burn a refresh attempt.
+    if (account.needs_reauth) {
+      results.push({ account_id: account.id, email: account.email, skipped: "needs_reauth" });
+      continue;
+    }
     try {
       await supabase
         .from("email_accounts")
@@ -855,6 +985,8 @@ export async function runEmailSync(
       // Sync labels first so email-label assignments can be created
       await syncLabelsForAccount(account.id, accessToken, supabase);
 
+      // fullSync now manages full_sync_completed (it may span multiple cron runs
+      // via sync_page_token), so we no longer force it true here (ES-7).
       let newMessages = 0;
       if (account.last_history_id && account.full_sync_completed) {
         newMessages = await syncViaHistory(account, accessToken, supabase);
@@ -864,11 +996,18 @@ export async function runEmailSync(
 
       await supabase
         .from("email_accounts")
-        .update({ sync_status: "idle", last_sync_at: new Date().toISOString(), full_sync_completed: true })
+        .update({ sync_status: "idle", last_sync_at: new Date().toISOString() })
         .eq("id", account.id);
 
       results.push({ account_id: account.id, email: account.email, new_messages: newMessages });
     } catch (error: unknown) {
+      // ReauthRequiredError already flagged the account row (needs_reauth + sync_error);
+      // just record and continue with the other accounts — never abort the loop.
+      if (error instanceof ReauthRequiredError) {
+        await supabase.from("email_accounts").update({ sync_status: "error" }).eq("id", account.id);
+        results.push({ account_id: account.id, email: account.email, needs_reauth: true });
+        continue;
+      }
       const msg = error instanceof Error ? error.message : "Unknown error";
       await supabase
         .from("email_accounts")
@@ -905,107 +1044,57 @@ email.post("/accounts/:id/full-sync", async (c) => {
 
   const accessToken = await getValidAccessToken(account, c.env, supabase);
 
-  // Sync labels first
+  // Sync labels first so assignments resolve.
   await syncLabelsForAccount(id, accessToken, supabase);
 
-  let pageToken: string | undefined;
+  let pageToken: string | undefined = account.sync_page_token || undefined;
+
+  // Capture the history anchor BEFORE listing — only when starting fresh (no
+  // continuation token) so a resumed run doesn't advance past unprocessed mail (ES-7).
+  const anchorHistoryId = pageToken ? null : await fetchProfileHistoryId(accessToken);
   let totalSynced = 0;
   let pageCount = 0;
-  const maxPages = 100; // 100 pages × 100 messages = 10,000 emails max
+  // One manual "kickstart" pass imports up to ~1,000 messages to stay within the
+  // Workers subrequest budget; the 5-minute cron `fullSync` continues the long
+  // tail via sync_page_token.
+  const maxPages = 10;
 
   try {
     do {
-      const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+      const listUrl = new URL(`${GMAIL_API}/messages`);
       listUrl.searchParams.set("maxResults", "100");
       if (pageToken) listUrl.searchParams.set("pageToken", pageToken);
 
       const listResponse = await fetch(listUrl.toString(), {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-
       if (!listResponse.ok) {
         throw new Error(`Gmail API error: ${listResponse.status}`);
       }
 
       const listData = (await listResponse.json()) as { messages?: Array<{ id: string }>; nextPageToken?: string };
-      const messages = listData.messages ?? [];
+      const ids = (listData.messages ?? []).map((m) => m.id);
       pageToken = listData.nextPageToken;
 
-      for (const msg of messages) {
-        try {
-          const { data: existing } = await supabase
-            .from("emails")
-            .select("id")
-            .eq("external_id", msg.id)
-            .single();
-
-          if (existing) {
-            // Update existing email's labels and folder state from Gmail
-            const minRes = await fetch(
-              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=minimal`,
-              { headers: { Authorization: `Bearer ${accessToken}` } }
-            );
-            if (minRes.ok) {
-              const minData = (await minRes.json()) as { labelIds?: string[] };
-              const labelIds: string[] = minData.labelIds ?? [];
-              const gmailLabels = labelIds;
-              let folder = "INBOX";
-              if (gmailLabels.includes("SENT")) folder = "SENT";
-              if (gmailLabels.includes("TRASH")) folder = "TRASH";
-              if (gmailLabels.includes("SPAM")) folder = "SPAM";
-              if (gmailLabels.includes("DRAFT")) folder = "DRAFTS";
-              await supabase.from("emails").update({
-                folder,
-                is_read: !gmailLabels.includes("UNREAD"),
-                is_starred: gmailLabels.includes("STARRED"),
-                is_archived: !gmailLabels.includes("INBOX") && folder === "INBOX",
-                is_trashed: gmailLabels.includes("TRASH"),
-                is_spam: gmailLabels.includes("SPAM"),
-              }).eq("id", existing.id);
-              await assignEmailLabels(existing.id, labelIds, id, supabase);
-            }
-            continue;
-          }
-
-          const msgResponse = await fetch(
-            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-          );
-
-          if (!msgResponse.ok) continue;
-
-          const fullMsg = (await msgResponse.json()) as { labelIds?: string[]; [key: string]: unknown };
-          const emailRow = parseGmailMessageFull(fullMsg, id);
-          const { data: inserted, error } = await supabase
-            .from("emails")
-            .insert(emailRow)
-            .select("id")
-            .single();
-
-          if (!error && inserted) {
-            totalSynced++;
-            await assignEmailLabels(inserted.id, fullMsg.labelIds ?? [], id, supabase);
-          }
-        } catch {
-          // Skip individual message failures
-        }
-      }
+      // Batched upsert (onConflict account_id,external_id) — new + existing rows
+      // alike get correct folder/flag/label state via applyLabelStateToEmail.
+      totalSynced += await importMessages(ids, id, accessToken, supabase);
 
       pageCount++;
-      console.log(`[FullSync] Page ${pageCount}: processed ${messages.length} messages, total synced: ${totalSynced}`);
     } while (pageToken && pageCount < maxPages);
 
+    const complete = !pageToken;
     await supabase
       .from("email_accounts")
-      .update({ last_sync_at: new Date().toISOString(), full_sync_completed: true })
+      .update({
+        last_sync_at: new Date().toISOString(),
+        full_sync_completed: complete,
+        sync_page_token: complete ? null : pageToken,
+        ...(anchorHistoryId ? { last_history_id: anchorHistoryId } : {}),
+      })
       .eq("id", id);
 
-    return c.json({
-      success: true,
-      totalSynced,
-      pages: pageCount,
-      complete: !pageToken,
-    });
+    return c.json({ success: true, totalSynced, pages: pageCount, complete });
   } catch (error) {
     return c.json({
       success: false,
@@ -1022,46 +1111,25 @@ email.get("/counts", async (c) => {
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
   const account_id = c.req.query("account_id");
 
-  const counts: Record<string, number> = {};
+  // Single round-trip via get_email_counts() (ES-10/ES-11). Excludes deleted rows
+  // everywhere and excludes trashed/deleted/expired from the snoozed count (ES-9).
+  const { data, error } = await supabase
+    .rpc("get_email_counts", { p_account_id: account_id ?? null })
+    .single();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const withAccount = (q: any) => (account_id ? q.eq("account_id", account_id) : q);
+  if (error) return c.json({ error: error.message }, 500);
 
-  const { count: inboxCount } = await withAccount(
-    supabase.from("emails").select("id", { count: "exact", head: true })
-      .eq("folder", "INBOX").eq("is_archived", false).eq("is_trashed", false).eq("is_read", false)
-  );
-  counts.inbox = inboxCount ?? 0;
-
-  const { count: starredCount } = await withAccount(
-    supabase.from("emails").select("id", { count: "exact", head: true })
-      .eq("is_starred", true).eq("is_trashed", false)
-  );
-  counts.starred = starredCount ?? 0;
-
-  const { count: snoozedCount } = await withAccount(
-    supabase.from("emails").select("id", { count: "exact", head: true })
-      .not("snoozed_until", "is", null)
-  );
-  counts.snoozed = snoozedCount ?? 0;
-
-  const { count: draftsCount } = await withAccount(
-    supabase.from("email_drafts").select("id", { count: "exact", head: true }).eq("status", "draft")
-  );
-  counts.drafts = draftsCount ?? 0;
-
-  const { count: spamCount } = await withAccount(
-    supabase.from("emails").select("id", { count: "exact", head: true })
-      .eq("is_spam", true).eq("is_trashed", false)
-  );
-  counts.spam = spamCount ?? 0;
-
-  const { count: trashCount } = await withAccount(
-    supabase.from("emails").select("id", { count: "exact", head: true }).eq("is_trashed", true)
-  );
-  counts.trash = trashCount ?? 0;
-
-  return c.json({ counts });
+  const row = (data ?? {}) as Record<string, number>;
+  return c.json({
+    counts: {
+      inbox: Number(row.inbox ?? 0),
+      starred: Number(row.starred ?? 0),
+      snoozed: Number(row.snoozed ?? 0),
+      drafts: Number(row.drafts ?? 0),
+      spam: Number(row.spam ?? 0),
+      trash: Number(row.trash ?? 0),
+    },
+  });
 });
 
 // ============================================
@@ -1082,16 +1150,22 @@ email.get("/check-updates", async (c) => {
     .gt("received_at", since)
     .eq("folder", "INBOX")
     .eq("is_archived", false)
-    .eq("is_trashed", false);
+    .eq("is_trashed", false)
+    .eq("is_deleted", false);
 
   const hasUpdates = (count ?? 0) > 0;
 
-  // Return the newest received_at so the client can advance its cursor
+  // Return the newest INBOX received_at so the cursor can't skip past unseen mail
+  // because of a newer SENT/SPAM row (ES-11).
   let newestAt = since;
   if (hasUpdates) {
     const { data: newest } = await supabase
       .from("emails")
       .select("received_at")
+      .eq("folder", "INBOX")
+      .eq("is_archived", false)
+      .eq("is_trashed", false)
+      .eq("is_deleted", false)
       .order("received_at", { ascending: false })
       .limit(1)
       .single();
@@ -1101,40 +1175,9 @@ email.get("/check-updates", async (c) => {
   return c.json({ hasUpdates, newestAt });
 });
 
-// ============================================
-// UNIFIED SEARCH
-// ============================================
-email.get("/search", async (c) => {
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  const query = c.req.query("q");
-  const accountId = c.req.query("account");
-  const limit = Math.min(parseInt(c.req.query("limit") || "20"), 50);
-
-  if (!query || query.length < 2) {
-    return c.json({ results: [] });
-  }
-
-  const safe = query.replace(/[%_]/g, "\\$&");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let dbQuery: any = supabase
-    .from("emails")
-    .select("id, subject, snippet, from_email, from_name, received_at, account_id")
-    .or(`subject.ilike.%${safe}%,from_email.ilike.%${safe}%,from_name.ilike.%${safe}%,snippet.ilike.%${safe}%`)
-    .order("received_at", { ascending: false })
-    .limit(limit);
-
-  if (accountId) {
-    dbQuery = dbQuery.eq("account_id", accountId);
-  }
-
-  const { data: results, error } = await dbQuery;
-
-  if (error) {
-    return c.json({ error: error.message }, 500);
-  }
-
-  return c.json({ results: results ?? [], query, count: results?.length ?? 0 });
-});
+// NOTE: a second `GET /search` used to live here — unreachable, since Hono's first
+// registration (above) wins. Removed in Prompt 52A (XC-6); its `%`/`_` wildcard
+// escaping was ported into the live handler.
 
 // ============================================
 // SNIPPETS
@@ -1335,67 +1378,252 @@ export default email;
 // ============================================
 // HELPER FUNCTIONS
 // ============================================
+
+// Thin wrapper over the shared Google token helper (Prompt 52A Part 1) so the
+// many in-file call sites keep their 3-arg shape. The shared helper detects
+// invalid_grant, flags needs_reauth, and serializes concurrent refreshes.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getValidAccessToken(account: Record<string, unknown>, env: Bindings, supabase: any): Promise<string> {
-  if (new Date(account.token_expires_at as string) > new Date(Date.now() + 60000)) {
-    return account.access_token as string;
-  }
-
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      refresh_token: account.refresh_token as string,
-      grant_type: "refresh_token",
-    }),
-  });
-
-  const tokens = (await response.json()) as { access_token: string; expires_in: number };
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (supabase as any)
-    .from("email_accounts")
-    .update({
-      access_token: tokens.access_token,
-      token_expires_at: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
-    })
-    .eq("id", account.id as string);
-
-  return tokens.access_token;
+function getValidAccessToken(account: Record<string, unknown>, env: Bindings, supabase: any): Promise<string> {
+  return getGoogleAccessToken(account, env, supabase, "email_accounts");
 }
 
-function parseGmailMessage(msg: Record<string, unknown>) {
-  const payload = msg.payload as Record<string, unknown>;
-  const headers = (payload?.headers as Array<{ name: string; value: string }>) ?? [];
-  const getHeader = (name: string) =>
-    headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
+const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 
-  const fromHeader = getHeader("From");
-  const fromMatch = fromHeader.match(/^(?:"?([^"]*)"?\s*)?<?([^>]+)>?$/);
+/**
+ * Centralized read query for the `emails` table (Prompt 52A Part 5 — ES-5).
+ * ALWAYS excludes soft-deleted rows (deleted in Gmail) so they can't resurface in
+ * any list/detail/thread/search/count. Callers add folder-specific filters on top.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function baseEmailQuery(supabase: any, accountId?: string | null, select = "*") {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let q: any = supabase.from("emails").select(select).eq("is_deleted", false);
+  if (accountId) q = q.eq("account_id", accountId);
+  return q;
+}
 
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Single source of truth for deriving local folder/flag state from a Gmail
+ * message's full labelId set (Prompt 52A Part 2 — ES-7). Used by the full-sync
+ * parser, the full-sync update path, history-delta application, and write-back
+ * confirmation. Kills the triplicated folder-derivation logic.
+ */
+function applyLabelStateToEmail(labels: string[]): {
+  folder: string;
+  is_read: boolean;
+  is_starred: boolean;
+  is_archived: boolean;
+  is_trashed: boolean;
+  is_spam: boolean;
+} {
+  let folder = "INBOX";
+  if (labels.includes("SENT")) folder = "SENT";
+  if (labels.includes("TRASH")) folder = "TRASH";
+  if (labels.includes("SPAM")) folder = "SPAM";
+  if (labels.includes("DRAFT")) folder = "DRAFTS";
   return {
-    subject: getHeader("Subject"),
-    from_email: fromMatch?.[2] ?? fromHeader,
-    from_name: fromMatch?.[1] ?? "",
-    to_emails: getHeader("To")
-      .split(",")
-      .map((e) => e.trim().replace(/.*<|>/g, ""))
-      .filter(Boolean),
-    cc_emails: getHeader("Cc")
-      .split(",")
-      .map((e) => e.trim().replace(/.*<|>/g, ""))
-      .filter(Boolean),
-    snippet: msg.snippet as string,
-    body_text: extractBody(payload, "text/plain"),
-    body_html: extractBody(payload, "text/html"),
-    labels: (msg.labelIds as string[]) ?? [],
-    is_read: !(msg.labelIds as string[])?.includes("UNREAD"),
-    is_starred: (msg.labelIds as string[])?.includes("STARRED") ?? false,
-    has_attachments: hasAttachments(payload),
-    received_at: new Date(parseInt(msg.internalDate as string)).toISOString(),
+    folder,
+    is_read: !labels.includes("UNREAD"),
+    is_starred: labels.includes("STARRED"),
+    is_archived: !labels.includes("INBOX") && folder === "INBOX",
+    is_trashed: labels.includes("TRASH"),
+    is_spam: labels.includes("SPAM"),
   };
+}
+
+/** Look up an email + its owning account row (with tokens) by local id. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function loadEmailWithAccount(supabase: any, id: string): Promise<{
+  external_id: string;
+  account_id: string;
+  folder: string | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  account: any;
+} | null> {
+  const { data } = await supabase
+    .from("emails")
+    .select("external_id, account_id, folder, email_accounts(*)")
+    .eq("id", id)
+    .single();
+  if (!data) return null;
+  return {
+    external_id: data.external_id,
+    account_id: data.account_id,
+    folder: data.folder,
+    account: data.email_accounts,
+  };
+}
+
+/** Gmail users.messages.modify for a single message. Throws on non-OK. */
+async function gmailModify(
+  accessToken: string,
+  externalId: string,
+  body: { addLabelIds?: string[]; removeLabelIds?: string[] }
+): Promise<void> {
+  const res = await fetch(`${GMAIL_API}/messages/${externalId}/modify`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Gmail modify failed (${res.status}): ${text}`);
+  }
+}
+
+/** Gmail users.messages.trash / untrash for a single message. Throws on non-OK. */
+async function gmailTrash(accessToken: string, externalId: string, untrash = false): Promise<void> {
+  const res = await fetch(`${GMAIL_API}/messages/${externalId}/${untrash ? "untrash" : "trash"}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Gmail ${untrash ? "untrash" : "trash"} failed (${res.status}): ${text}`);
+  }
+}
+
+/** Gmail users.messages.batchModify over up to 1000 ids/chunk. Throws on non-OK. */
+async function gmailBatchModify(
+  accessToken: string,
+  externalIds: string[],
+  body: { addLabelIds?: string[]; removeLabelIds?: string[] }
+): Promise<void> {
+  for (const ids of chunk(externalIds, 1000)) {
+    const res = await fetch(`${GMAIL_API}/messages/batchModify`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, ...body }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Gmail batchModify failed (${res.status}): ${text}`);
+    }
+  }
+}
+
+/**
+ * Write a single label add/remove back to Gmail (Prompt 52A Part 4). Local-only
+ * labels (no `external_id`) are DB-only and skipped. Returns an error envelope to
+ * surface (409 reauth / 502 Gmail) or null on success/skip.
+ */
+async function writeBackLabel(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  env: Bindings,
+  emailId: string,
+  labelId: string,
+  add: boolean
+): Promise<{ status: 409 | 502 | 404; body: Record<string, unknown> } | null> {
+  const { data: label } = await supabase
+    .from("email_labels")
+    .select("external_id, account_id")
+    .eq("id", labelId)
+    .single();
+  if (!label) return { status: 404, body: { error: "Label not found" } };
+
+  // Local-only label → DB-only, no Gmail call.
+  if (!label.external_id) return null;
+
+  const em = await loadEmailWithAccount(supabase, emailId);
+  if (!em) return { status: 404, body: { error: "Email not found" } };
+
+  try {
+    const token = await getValidAccessToken(em.account, env, supabase);
+    await gmailModify(token, em.external_id, add ? { addLabelIds: [label.external_id] } : { removeLabelIds: [label.external_id] });
+    return null;
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) return { status: 409, body: { error: "Account needs reconnection", needs_reauth: true } };
+    return { status: 502, body: { error: err instanceof Error ? err.message : "Gmail label write failed" } };
+  }
+}
+
+/**
+ * Fetch full message bodies for a batch of Gmail ids and upsert them (Prompt 52A
+ * Part 3 — ES-10). Replaces per-message SELECT-then-INSERT with batched
+ * upsert(onConflict account_id,external_id) and batched label assignment. Returns
+ * the number of rows written.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function importMessages(messageIds: string[], accountId: string, accessToken: string, supabase: any): Promise<number> {
+  if (!messageIds.length) return 0;
+
+  const rows: Record<string, unknown>[] = [];
+  const labelsByExternalId = new Map<string, string[]>();
+
+  for (const msgId of messageIds) {
+    const res = await fetch(`${GMAIL_API}/messages/${msgId}?format=full`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      console.error(`[sync] message ${msgId} fetch failed: ${res.status}`);
+      continue;
+    }
+    const fullMsg = (await res.json()) as { id: string; labelIds?: string[]; [k: string]: unknown };
+    rows.push(parseGmailMessageFull(fullMsg, accountId));
+    labelsByExternalId.set(fullMsg.id, fullMsg.labelIds ?? []);
+  }
+
+  let written = 0;
+  for (const batch of chunk(rows, 100)) {
+    const { data, error } = await supabase
+      .from("emails")
+      .upsert(batch, { onConflict: "account_id,external_id" })
+      .select("id, external_id");
+    if (error) {
+      console.error(`[sync] upsert batch failed: ${error.message}`);
+      continue;
+    }
+    written += data?.length ?? 0;
+    await assignLabelsBatched(
+      (data ?? []) as Array<{ id: string; external_id: string }>,
+      labelsByExternalId,
+      accountId,
+      supabase
+    );
+  }
+  return written;
+}
+
+/** Replace label assignments for a batch of emails in bulk (Prompt 52A Part 3). */
+async function assignLabelsBatched(
+  emails: Array<{ id: string; external_id: string }>,
+  labelsByExternalId: Map<string, string[]>,
+  accountId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any
+): Promise<void> {
+  if (!emails.length) return;
+
+  const { data: localLabels } = await supabase
+    .from("email_labels")
+    .select("id, external_id")
+    .eq("account_id", accountId);
+  const byExternal = new Map<string, string>(
+    (localLabels ?? []).map((l: { id: string; external_id: string }) => [l.external_id, l.id])
+  );
+
+  const emailIds = emails.map((e) => e.id);
+  await supabase.from("email_label_assignments").delete().in("email_id", emailIds);
+
+  const assignments: Array<{ email_id: string; label_id: string }> = [];
+  for (const e of emails) {
+    for (const ext of labelsByExternalId.get(e.external_id) ?? []) {
+      const labelId = byExternal.get(ext);
+      if (labelId) assignments.push({ email_id: e.id, label_id: labelId });
+    }
+  }
+  for (const batch of chunk(assignments, 200)) {
+    if (!batch.length) continue;
+    const { error } = await supabase.from("email_label_assignments").insert(batch);
+    if (error) console.error(`[sync] label-assignment insert failed: ${error.message}`);
+  }
 }
 
 function decodeBase64(data: string): string {
@@ -1429,72 +1657,6 @@ function extractBody(payload: Record<string, unknown> | undefined, mimeType: str
   return "";
 }
 
-function hasAttachments(payload: Record<string, unknown> | undefined): boolean {
-  if (!payload) return false;
-  if (payload.filename) return true;
-  if (payload.parts) {
-    return (payload.parts as Array<Record<string, unknown>>).some((p) => hasAttachments(p));
-  }
-  return false;
-}
-
-async function triageEmail(
-  emailData: { from_name: string; from_email: string; subject: string; snippet: string },
-  env: Bindings
-) {
-  try {
-    const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 200,
-      system:
-        'Categorize this email. Respond with JSON only: {"category": "action_required|fyi|newsletter|automated|spam", "priority": "high|medium|low", "summary": "one sentence summary"}',
-      messages: [
-        {
-          role: "user",
-          content: `From: ${emailData.from_name} <${emailData.from_email}>\nSubject: ${emailData.subject}\n\n${emailData.snippet}`,
-        },
-      ],
-    });
-
-    const text =
-      response.content[0].type === "text" ? response.content[0].text : "{}";
-    const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, "")) as {
-      category?: string;
-      priority?: string;
-      summary?: string;
-    };
-
-    const aiCategory = parsed.category ?? "fyi";
-    return {
-      ai_category: aiCategory,
-      ai_priority: parsed.priority ?? "medium",
-      ai_summary: parsed.summary ?? "",
-      triage_category: mapTriageCategory(aiCategory),
-      triage_confidence: 0.8,
-      triaged_at: new Date().toISOString(),
-    };
-  } catch {
-    return {
-      ai_category: "fyi",
-      ai_priority: "medium",
-      ai_summary: "",
-      triage_category: "other",
-      triage_confidence: 0.5,
-      triaged_at: new Date().toISOString(),
-    };
-  }
-}
-
-function mapTriageCategory(aiCategory: string): string {
-  switch (aiCategory) {
-    case "action_required": return "important";
-    case "newsletter":      return "newsletter";
-    case "automated":       return "notification";
-    default:                return "other";
-  }
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function findRelationship(emailAddr: string, supabase: any): Promise<string | null> {
@@ -1546,6 +1708,9 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
 
   const systemLabelIds = ["INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "STARRED", "UNREAD", "IMPORTANT"];
 
+  // Track the external_ids we keep this run so we can reconcile deletions (ES-8).
+  const keptExternalIds = new Set<string>(["SNOOZED", "ALL_MAIL"]);
+
   for (const label of labels ?? []) {
     // Skip category tabs (Promotions, Social, etc.) — not useful as labels
     if (label.id.startsWith("CATEGORY_")) continue;
@@ -1553,6 +1718,7 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
     // For system labels: skip hidden ones. For user labels: always sync regardless of visibility.
     if (label.type !== "user" && label.labelListVisibility === "labelHide") continue;
 
+    keptExternalIds.add(label.id);
     const isSystem = systemLabelIds.includes(label.id) || label.type === "system";
 
     let name = label.name;
@@ -1591,6 +1757,22 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
     { onConflict: "account_id,external_id" }
   );
 
+  // Reconcile deletions (ES-8): drop local labels whose Gmail external_id no longer
+  // exists in the label list. User-created local-only labels (external_id IS NULL)
+  // are exempt. Assignments cascade via the FK (migration 020).
+  const { data: localSynced } = await supabase
+    .from("email_labels")
+    .select("id, external_id")
+    .eq("account_id", accountId)
+    .not("external_id", "is", null);
+  const stale = (localSynced ?? [])
+    .filter((l: { external_id: string }) => !keptExternalIds.has(l.external_id))
+    .map((l: { id: string }) => l.id);
+  if (stale.length) {
+    const { error: delErr } = await supabase.from("email_labels").delete().in("id", stale);
+    if (delErr) console.error(`[Labels] stale-label cleanup failed for ${accountId}: ${delErr.message}`);
+  }
+
   const { data: savedLabels } = await supabase
     .from("email_labels")
     .select("*")
@@ -1606,73 +1788,66 @@ async function syncLabelsForAccount(accountId: string, accessToken: string, supa
   };
 }
 
-// ============================================
-// HELPER: Assign Gmail label IDs to a synced email
-// ============================================
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function assignEmailLabels(emailId: string, gmailLabelIds: string[], accountId: string, supabase: any): Promise<void> {
-  // Always clear existing assignments first so stale labels are removed
-  await supabase.from("email_label_assignments").delete().eq("email_id", emailId);
-
-  if (!gmailLabelIds.length) return;
-
-  const { data: localLabels } = await supabase
-    .from("email_labels")
-    .select("id, external_id")
-    .eq("account_id", accountId)
-    .in("external_id", gmailLabelIds);
-
-  if (!localLabels?.length) return;
-
-  const assignments = (localLabels as Array<{ id: string }>).map((label) => ({
-    email_id: emailId,
-    label_id: label.id,
-  }));
-
-  await supabase.from("email_label_assignments").insert(assignments);
+/** users.getProfile historyId — the safe incremental anchor (ES-7). */
+async function fetchProfileHistoryId(accessToken: string): Promise<string | null> {
+  const res = await fetch(`${GMAIL_API}/profile`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    console.error(`[sync] getProfile failed: ${res.status}`);
+    return null;
+  }
+  const data = (await res.json()) as { historyId?: string };
+  return data.historyId ?? null;
 }
 
 // ============================================
-// HELPER: Full Sync (first-time or reset)
+// HELPER: Full Sync (first-time or reset; continues across cron runs)
 // ============================================
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function fullSync(account: any, accessToken: string, supabase: any): Promise<number> {
-  const listResponse = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100",
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const { messages } = (await listResponse.json()) as { messages?: Array<{ id: string }> };
-  if (!messages?.length) return 0;
+  // Per-run cap keeps total Gmail subrequests well under the Workers 1,000 limit;
+  // the long tail of a large mailbox continues on the next 5-minute cron run via
+  // the persisted `sync_page_token` (ES-7).
+  const MAX_MESSAGES_PER_RUN = 400;
+  let pageToken: string | undefined = account.sync_page_token || undefined;
 
-  let newCount = 0;
-  for (const msg of messages) {
-    const { data: existing } = await supabase.from("emails").select("id").eq("external_id", msg.id).single();
-    if (existing) continue;
-
-    const msgResponse = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    const fullMsg = await msgResponse.json() as { labelIds?: string[]; [key: string]: unknown };
-    const emailRow = parseGmailMessageFull(fullMsg, account.id);
-    const { data: inserted, error } = await supabase.from("emails").insert(emailRow).select("id").single();
-    if (!error && inserted) {
-      newCount++;
-      await assignEmailLabels(inserted.id, fullMsg.labelIds ?? [], account.id, supabase);
+  // On the first run of a fresh full sync, anchor last_history_id from getProfile
+  // BEFORE listing so the eventual switch to incremental misses no window.
+  if (!pageToken) {
+    const anchor = await fetchProfileHistoryId(accessToken);
+    if (anchor) {
+      await supabase.from("email_accounts").update({ last_history_id: anchor }).eq("id", account.id);
     }
   }
 
-  // Store historyId for incremental syncs
-  const latestRes = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messages[0].id}?format=metadata`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const { historyId } = (await latestRes.json()) as { historyId?: string };
-  if (historyId) {
-    await supabase.from("email_accounts").update({ last_history_id: historyId }).eq("id", account.id);
-  }
+  let imported = 0;
+  let processed = 0;
+  do {
+    const listUrl = new URL(`${GMAIL_API}/messages`);
+    listUrl.searchParams.set("maxResults", "100");
+    if (pageToken) listUrl.searchParams.set("pageToken", pageToken);
 
-  return newCount;
+    const res = await fetch(listUrl.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Gmail messages.list failed (${res.status}): ${text}`);
+    }
+    const data = (await res.json()) as { messages?: Array<{ id: string }>; nextPageToken?: string };
+    const ids = (data.messages ?? []).map((m) => m.id);
+
+    imported += await importMessages(ids, account.id, accessToken, supabase);
+    processed += ids.length;
+    pageToken = data.nextPageToken;
+  } while (pageToken && processed < MAX_MESSAGES_PER_RUN);
+
+  const complete = !pageToken;
+  await supabase
+    .from("email_accounts")
+    .update({ full_sync_completed: complete, sync_page_token: complete ? null : pageToken })
+    .eq("id", account.id);
+
+  return imported;
 }
 
 // ============================================
@@ -1680,83 +1855,125 @@ async function fullSync(account: any, accessToken: string, supabase: any): Promi
 // ============================================
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function syncViaHistory(account: any, accessToken: string, supabase: any): Promise<number> {
-  const historyResponse = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${account.last_history_id}&historyTypes=messageAdded&historyTypes=messageDeleted&historyTypes=labelAdded&historyTypes=labelRemoved`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const { history, historyId } = (await historyResponse.json()) as {
-    history?: Array<{
-      messagesAdded?: Array<{ message: { id: string } }>;
-      messagesDeleted?: Array<{ message: { id: string } }>;
-      labelsAdded?: Array<{ message: { id: string }; labelIds: string[] }>;
-      labelsRemoved?: Array<{ message: { id: string }; labelIds: string[] }>;
-    }>;
-    historyId?: string;
-  };
+  const added = new Set<string>();
+  const deleted = new Set<string>();
+  const changed = new Set<string>();
+  let pageToken: string | undefined;
+  let latestHistoryId: string | undefined;
 
-  if (!history?.length) {
-    if (historyId) {
-      await supabase.from("email_accounts").update({ last_history_id: historyId }).eq("id", account.id);
+  // Paginate ALL history pages before advancing the cursor (ES-6).
+  do {
+    const url = new URL(`${GMAIL_API}/history`);
+    url.searchParams.set("startHistoryId", String(account.last_history_id));
+    for (const t of ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]) {
+      url.searchParams.append("historyTypes", t);
     }
-    return 0;
-  }
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
 
-  let newCount = 0;
-  for (const h of history) {
-    // Handle permanently deleted messages
-    for (const deleted of h.messagesDeleted ?? []) {
+    const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+
+    // Expired historyId (too old, ~1 week) → clear + full resync + re-anchor (ES-2).
+    if (res.status === 404) {
+      console.warn(`[sync] historyId expired for ${account.email}; running full resync`);
       await supabase
-        .from("emails")
-        .update({ is_trashed: true, is_deleted: true, deleted_at: new Date().toISOString() })
-        .eq("external_id", deleted.message.id)
-        .eq("account_id", account.id);
-    }
-
-    // Handle messages moved to TRASH (label added)
-    for (const labelChange of h.labelsAdded ?? []) {
-      if (labelChange.labelIds?.includes("TRASH")) {
-        await supabase
-          .from("emails")
-          .update({ is_trashed: true })
-          .eq("external_id", labelChange.message.id)
-          .eq("account_id", account.id);
+        .from("email_accounts")
+        .update({ last_history_id: null, full_sync_completed: false, sync_page_token: null })
+        .eq("id", account.id);
+      const n = await fullSync({ ...account, sync_page_token: null }, accessToken, supabase);
+      const reanchor = await fetchProfileHistoryId(accessToken);
+      if (reanchor) {
+        await supabase.from("email_accounts").update({ last_history_id: reanchor }).eq("id", account.id);
       }
+      return n;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Gmail history failed (${res.status}): ${text}`);
     }
 
-    // Handle messages restored from TRASH (label removed)
-    for (const labelChange of h.labelsRemoved ?? []) {
-      if (labelChange.labelIds?.includes("TRASH")) {
-        await supabase
-          .from("emails")
-          .update({ is_trashed: false })
-          .eq("external_id", labelChange.message.id)
-          .eq("account_id", account.id);
-      }
+    const data = (await res.json()) as {
+      history?: Array<{
+        messagesAdded?: Array<{ message: { id: string } }>;
+        messagesDeleted?: Array<{ message: { id: string } }>;
+        labelsAdded?: Array<{ message: { id: string }; labelIds: string[] }>;
+        labelsRemoved?: Array<{ message: { id: string }; labelIds: string[] }>;
+      }>;
+      historyId?: string;
+      nextPageToken?: string;
+    };
+    if (data.historyId) latestHistoryId = data.historyId;
+    for (const h of data.history ?? []) {
+      for (const a of h.messagesAdded ?? []) added.add(a.message.id);
+      for (const d of h.messagesDeleted ?? []) deleted.add(d.message.id);
+      for (const l of h.labelsAdded ?? []) changed.add(l.message.id);
+      for (const l of h.labelsRemoved ?? []) changed.add(l.message.id);
     }
+    pageToken = data.nextPageToken;
+  } while (pageToken);
 
-    // Handle new messages
-    for (const added of h.messagesAdded ?? []) {
-      const { data: existing } = await supabase.from("emails").select("id").eq("external_id", added.message.id).single();
-      if (existing) continue;
-
-      const msgResponse = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${added.message.id}?format=full`,
-        { headers: { Authorization: `Bearer ${accessToken}` } }
-      );
-      const fullMsg = await msgResponse.json() as { labelIds?: string[]; [key: string]: unknown };
-      const emailRow = parseGmailMessageFull(fullMsg, account.id);
-      const { data: inserted, error } = await supabase.from("emails").insert(emailRow).select("id").single();
-      if (!error && inserted) {
-        newCount++;
-        await assignEmailLabels(inserted.id, fullMsg.labelIds ?? [], account.id, supabase);
-      }
-    }
+  // Permanently deleted → soft delete locally.
+  if (deleted.size) {
+    await supabase
+      .from("emails")
+      .update({ is_trashed: true, is_deleted: true, deleted_at: new Date().toISOString() })
+      .eq("account_id", account.id)
+      .in("external_id", [...deleted]);
   }
 
-  if (historyId) {
-    await supabase.from("email_accounts").update({ last_history_id: historyId }).eq("id", account.id);
+  // New messages → full import.
+  const toImport = [...added].filter((id) => !deleted.has(id));
+  const imported = await importMessages(toImport, account.id, accessToken, supabase);
+
+  // Label deltas on existing messages → refresh full state via the shared helper.
+  const toRefresh = [...changed].filter((id) => !added.has(id) && !deleted.has(id));
+  await refreshLabelState(toRefresh, account.id, accessToken, supabase);
+
+  // Advance the cursor only after every page processed successfully.
+  if (latestHistoryId) {
+    await supabase.from("email_accounts").update({ last_history_id: latestHistoryId }).eq("id", account.id);
   }
-  return newCount;
+  return imported;
+}
+
+/**
+ * Re-derive local folder/flag/label state for messages whose labels changed on
+ * another device (Prompt 52A Part 2 — ES-6). Fetches each message's current full
+ * label set (minimal) and applies applyLabelStateToEmail — the same single helper
+ * used by the parser and write-back, so UNREAD/STARRED/INBOX/TRASH/SPAM all stay
+ * in sync.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function refreshLabelState(externalIds: string[], accountId: string, accessToken: string, supabase: any): Promise<void> {
+  if (!externalIds.length) return;
+
+  const { data: existing } = await supabase
+    .from("emails")
+    .select("id, external_id")
+    .eq("account_id", accountId)
+    .in("external_id", externalIds);
+  if (!existing?.length) return;
+
+  const idByExternal = new Map<string, string>(
+    (existing as Array<{ id: string; external_id: string }>).map((e) => [e.external_id, e.id])
+  );
+  const labelsByExternalId = new Map<string, string[]>();
+
+  for (const ext of idByExternal.keys()) {
+    const res = await fetch(`${GMAIL_API}/messages/${ext}?format=minimal`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) continue;
+    const data = (await res.json()) as { labelIds?: string[] };
+    const labels = data.labelIds ?? [];
+    labelsByExternalId.set(ext, labels);
+    const { error } = await supabase.from("emails").update(applyLabelStateToEmail(labels)).eq("id", idByExternal.get(ext));
+    if (error) console.error(`[sync] label-state update failed for ${ext}: ${error.message}`);
+  }
+
+  const refreshed = (existing as Array<{ id: string; external_id: string }>).filter((e) =>
+    labelsByExternalId.has(e.external_id)
+  );
+  await assignLabelsBatched(refreshed, labelsByExternalId, accountId, supabase);
 }
 
 // ============================================
@@ -1777,12 +1994,6 @@ function parseGmailMessageFull(msg: any, accountId: string): Record<string, unkn
   );
 
   const labels: string[] = msg.labelIds ?? [];
-  let folder = "INBOX";
-  if (labels.includes("SENT")) folder = "SENT";
-  if (labels.includes("TRASH")) folder = "TRASH";
-  if (labels.includes("SPAM")) folder = "SPAM";
-  if (labels.includes("DRAFT")) folder = "DRAFTS";
-
   const fromHeader = getHeader("from");
   const fromMatch = fromHeader.match(/^(?:"?([^"]*)"?\s*)?<?([^>]+)>?$/);
 
@@ -1799,12 +2010,7 @@ function parseGmailMessageFull(msg: any, accountId: string): Record<string, unkn
     body_html: bodyHtml,
     snippet: msg.snippet ?? "",
     received_at: new Date(parseInt(msg.internalDate)).toISOString(),
-    folder,
-    is_read: !labels.includes("UNREAD"),
-    is_starred: labels.includes("STARRED"),
-    is_archived: !labels.includes("INBOX") && folder === "INBOX",
-    is_trashed: labels.includes("TRASH"),
-    is_spam: labels.includes("SPAM"),
+    ...applyLabelStateToEmail(labels),
     has_attachments: attachmentParts.length > 0,
     attachment_count: attachmentParts.length,
   };

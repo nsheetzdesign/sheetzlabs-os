@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { executeAgentWithTools } from "../lib/agent-engine";
 import { sanitizeAccount } from "../lib/sanitize";
 import { createOAuthState, consumeOAuthState } from "../lib/oauth-state";
+import { getValidAccessToken as getGoogleAccessToken } from "../lib/google-auth";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -111,6 +112,8 @@ calendar.get("/auth/google/callback", async (c) => {
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
       token_expires_at: new Date(Date.now() + (tokens.expires_in ?? 3600) * 1000).toISOString(),
+      // A successful (re)link clears any prior reauth flag (CS-3 Part 1).
+      needs_reauth: false,
     },
     { onConflict: "email" }
   );
@@ -863,38 +866,15 @@ export default calendar;
 // HELPER FUNCTIONS
 // ============================================
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getValidAccessToken(
+// Delegates to the shared Google token helper (Prompt 52A Part 1 — CS-3). Detects
+// invalid_grant, flags needs_reauth, and never writes an undefined token.
+function getValidAccessToken(
   account: Record<string, unknown>,
   env: { GOOGLE_CLIENT_ID: string; GOOGLE_CLIENT_SECRET: string },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   supabase: any
 ): Promise<string> {
-  if (new Date(account.token_expires_at as string) > new Date(Date.now() + 60000)) {
-    return account.access_token as string;
-  }
-
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      refresh_token: account.refresh_token as string,
-      grant_type: "refresh_token",
-    }),
-  });
-
-  const tokens = (await response.json()) as { access_token: string; expires_in: number };
-
-  await supabase
-    .from("calendar_accounts")
-    .update({
-      access_token: tokens.access_token,
-      token_expires_at: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
-    })
-    .eq("id", account.id as string);
-
-  return tokens.access_token;
+  return getGoogleAccessToken(account, env, supabase, "calendar_accounts");
 }
 
 function parseGoogleEvent(event: Record<string, unknown>) {
