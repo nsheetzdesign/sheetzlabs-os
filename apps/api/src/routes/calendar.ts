@@ -3,13 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
 import { executeAgentWithTools } from "../lib/agent-engine";
 import { sanitizeAccount } from "../lib/sanitize";
-import {
-  generateStateNonce,
-  setStateCookie,
-  verifyAndClearState,
-} from "../lib/oauth-state";
-
-const CAL_STATE_COOKIE = "cal_oauth_state";
+import { createOAuthState, consumeOAuthState } from "../lib/oauth-state";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -22,7 +16,7 @@ type Bindings = {
   APP_URL: string;
 };
 
-type HonoEnv = { Bindings: Bindings };
+type HonoEnv = { Bindings: Bindings; Variables: { userId: string } };
 
 const calendar = new Hono<HonoEnv>();
 
@@ -39,8 +33,10 @@ calendar.get("/accounts", async (c) => {
   return c.json({ accounts: data ?? [] });
 });
 
-// Start Google Calendar OAuth flow
-calendar.get("/auth/google", async (c) => {
+// Start Google Calendar OAuth flow — authenticated (behind the auth middleware).
+// Binds a single-use `state` nonce to the founder's user id and returns the Google
+// auth URL for the app to redirect to. Replaces the old public `<a href>` route.
+calendar.post("/auth/google/start", async (c) => {
   const scopes = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.events",
@@ -48,8 +44,8 @@ calendar.get("/auth/google", async (c) => {
   ].join(" ");
 
   const apiUrl = c.env.API_URL || "https://api.sheetzlabs.com";
-  const state = generateStateNonce();
-  setStateCookie(c, CAL_STATE_COOKIE, state);
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const state = await createOAuthState(supabase, c.get("userId"), "google");
 
   const authUrl =
     `https://accounts.google.com/o/oauth2/v2/auth?` +
@@ -61,16 +57,20 @@ calendar.get("/auth/google", async (c) => {
     `&prompt=consent` +
     `&state=${state}`;
 
-  return c.redirect(authUrl);
+  return c.json({ url: authUrl });
 });
 
-// OAuth callback
+// OAuth callback (public — Google redirects here with no auth header). The state
+// nonce binds this back to the user who started the flow.
 calendar.get("/auth/google/callback", async (c) => {
   const code = c.req.query("code");
   if (!code) return c.json({ error: "No code provided" }, 400);
 
-  // Verify CSRF state nonce before trusting the code.
-  if (!verifyAndClearState(c, CAL_STATE_COOKIE, c.req.query("state"))) {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  // Validate + consume the single-use state row before trusting the code.
+  const { valid } = await consumeOAuthState(supabase, c.req.query("state"), "google");
+  if (!valid) {
     return c.json({ error: "Invalid OAuth state" }, 403);
   }
 
@@ -104,7 +104,6 @@ calendar.get("/auth/google/callback", async (c) => {
   const user = (await userResponse.json()) as { email: string };
 
   const appUrl = c.env.APP_URL || "https://app.sheetzlabs.com";
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
   const { error: upsertError } = await supabase.from("calendar_accounts").upsert(
     {
       email: user.email,

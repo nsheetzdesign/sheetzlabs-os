@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Link, useFetcher } from 'react-router';
+import { Link, Form, useFetcher } from 'react-router';
 import {
   Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail,
   ChevronDown, ChevronRight, ChevronUp, Plus, Tag, RefreshCw, Check, AlertCircle,
@@ -39,8 +39,6 @@ interface Props {
   onSelectLabel: (labelId: string, accountId: string) => void;
   onDragOver: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
   onDrop: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
-  /** Public API origin for the Gmail OAuth start link (browser navigation). */
-  apiBase?: string;
 }
 
 const systemIcons: Record<string, React.ComponentType<{ size?: number }>> = {
@@ -66,7 +64,6 @@ export function InboxSidebar({
   onSelectLabel,
   onDragOver,
   onDrop,
-  apiBase = 'https://api.sheetzlabs.com',
 }: Props) {
   // All accounts start collapsed, but auto-expand active account
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
@@ -280,13 +277,15 @@ export function InboxSidebar({
         })}
 
         {accounts.length === 0 && (
-          <a
-            href={`${apiBase}/email/auth/gmail`}
-            className="flex items-center gap-2 px-3 py-2 text-sm text-emerald-400 hover:text-emerald-300"
-          >
-            <Plus size={16} />
-            Connect Gmail
-          </a>
+          <Form method="post" action="/dashboard/inbox/connect-gmail">
+            <button
+              type="submit"
+              className="flex items-center gap-2 px-3 py-2 text-sm text-emerald-400 hover:text-emerald-300"
+            >
+              <Plus size={16} />
+              Connect Gmail
+            </button>
+          </Form>
         )}
       </div>
 

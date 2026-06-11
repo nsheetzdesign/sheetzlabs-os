@@ -87,6 +87,13 @@ export default {
     // Unsnooze emails every minute
     ctx.waitUntil(Promise.resolve(supabase.rpc("unsnooze_emails")));
 
+    // Sweep expired OAuth state nonces every minute (Prompt 51B).
+    ctx.waitUntil(
+      Promise.resolve(
+        supabase.from("oauth_states").delete().lt("expires_at", now.toISOString())
+      )
+    );
+
     // Auto-sync all email accounts every 5 minutes — call the sync logic directly
     // instead of HTTP-fetching our own (now-authenticated) endpoint.
     if (now.getUTCMinutes() % 5 === 0) {

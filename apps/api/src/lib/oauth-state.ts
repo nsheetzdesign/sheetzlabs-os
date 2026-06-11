@@ -1,12 +1,21 @@
-import type { Context } from "hono";
-import { getCookie, setCookie, deleteCookie } from "hono/cookie";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * CSRF protection for OAuth flows (XC-2). The start route generates a random
- * nonce, stashes it in a short-lived HttpOnly cookie, and forwards it to Google
- * as the `state` param. The callback verifies the returned `state` against the
- * cookie before trusting the code, then clears the cookie.
+ * CSRF + ownership protection for OAuth flows (XC-2 / Prompt 51B).
+ *
+ * OAuth is initiated from the authenticated app. The authenticated start endpoint
+ * generates a random nonce, persists it bound to the founder's `user_id` (10-min
+ * TTL), and forwards it to Google as the `state` param. The public callback (which
+ * Google redirects to, so it can't carry an Authorization header) looks the nonce
+ * up, deletes it (single-use), and rejects unknown/expired/wrong-provider states.
+ *
+ * This replaces the old HttpOnly state cookie: the API lives on a different
+ * subdomain than the app, so the callback couldn't see an app-set cookie, and an
+ * unauthenticated start let anyone link their own Google account into the
+ * single-tenant DB. The state row binds the flow to the user who started it.
  */
+
+const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export function generateStateNonce(): string {
   const bytes = new Uint8Array(32);
@@ -14,25 +23,48 @@ export function generateStateNonce(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function setStateCookie(c: Context, cookieName: string, nonce: string): void {
-  setCookie(c, cookieName, nonce, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "Lax",
-    path: "/",
-    maxAge: 600, // 10 minutes
-  });
+/**
+ * Create a single-use OAuth state row bound to `userId` + `provider`, returning the
+ * nonce to forward to Google as `state`.
+ */
+export async function createOAuthState(
+  supabase: SupabaseClient,
+  userId: string,
+  provider: string
+): Promise<string> {
+  const nonce = generateStateNonce();
+  const expiresAt = new Date(Date.now() + STATE_TTL_MS).toISOString();
+  await supabase
+    .from("oauth_states")
+    .insert({ nonce, user_id: userId, provider, expires_at: expiresAt });
+  return nonce;
 }
 
 /**
- * Returns true if the received state matches the cookie. Always clears the cookie.
+ * Validate the `state` returned by Google against the stored row and consume it.
+ * Always deletes the row if found (single-use). Returns `{ valid: false }` for an
+ * unknown, expired, or wrong-provider state; otherwise the bound `userId`.
  */
-export function verifyAndClearState(
-  c: Context,
-  cookieName: string,
-  received: string | undefined
-): boolean {
-  const expected = getCookie(c, cookieName);
-  deleteCookie(c, cookieName, { path: "/" });
-  return Boolean(expected) && Boolean(received) && expected === received;
+export async function consumeOAuthState(
+  supabase: SupabaseClient,
+  nonce: string | undefined,
+  provider: string
+): Promise<{ valid: boolean; userId?: string }> {
+  if (!nonce) return { valid: false };
+
+  const { data } = await supabase
+    .from("oauth_states")
+    .select("user_id, provider, expires_at")
+    .eq("nonce", nonce)
+    .maybeSingle();
+
+  if (!data) return { valid: false };
+
+  // Single-use: delete on every lookup hit, even if it later fails validation.
+  await supabase.from("oauth_states").delete().eq("nonce", nonce);
+
+  if (data.provider !== provider) return { valid: false };
+  if (new Date(data.expires_at as string).getTime() < Date.now()) return { valid: false };
+
+  return { valid: true, userId: data.user_id as string };
 }

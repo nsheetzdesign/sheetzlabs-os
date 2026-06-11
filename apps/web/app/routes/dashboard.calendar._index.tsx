@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, useFetcher } from "react-router";
+import { useLoaderData, Link, Form, useFetcher, redirect } from "react-router";
 import { useState, useEffect, useRef } from "react";
 import {
   RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin,
@@ -189,7 +189,6 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     view,
     weekOffset,
     weekStart: start.toISOString(),
-    apiBase: (env as Record<string, string>).API_URL ?? "https://api.sheetzlabs.com",
   };
 }
 
@@ -200,6 +199,21 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
+
+  // Authenticated Google Calendar OAuth initiation (Prompt 51B). Call the API's
+  // authenticated start endpoint (user-bound `state` nonce) and redirect to Google.
+  if (intent === "connect") {
+    const res = await apiFetch(request, env, "/calendar/auth/google/start", { method: "POST" });
+    if (!res.ok) {
+      return redirect(
+        `/dashboard/calendar?connected=false&error=${encodeURIComponent(
+          "Could not start Calendar connection"
+        )}`
+      );
+    }
+    const { url } = (await res.json()) as { url: string };
+    return redirect(url);
+  }
 
   if (intent === "sync") {
     await apiFetch(request, env, `/calendar/accounts/${fd.get("account_id")}/sync`, { method: "POST" });
@@ -697,7 +711,7 @@ function CalendarSettingsModal({
 // ── Main Calendar Component ───────────────────────────────────────────────────
 
 export default function CalendarPage() {
-  const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart, apiBase } =
+  const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher();
 
@@ -850,10 +864,13 @@ export default function CalendarPage() {
         <div className="p-3 border-t border-zinc-800 shrink-0">
           <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2">Calendars</div>
           {accounts.length === 0 ? (
-            <a href={`${apiBase}/calendar/auth/google`}
-              className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300">
-              <Plus className="h-3 w-3" />Connect Google Calendar
-            </a>
+            <Form method="post">
+              <input type="hidden" name="intent" value="connect" />
+              <button type="submit"
+                className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300">
+                <Plus className="h-3 w-3" />Connect Google Calendar
+              </button>
+            </Form>
           ) : (
             <div className="space-y-3">
               {(accounts as CalendarAccount[]).map((account) => {
@@ -961,10 +978,13 @@ export default function CalendarPage() {
                 );
               })}
 
-              <a href={`${apiBase}/calendar/auth/google`}
-                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
-                <Plus className="h-3 w-3" />Add account
-              </a>
+              <Form method="post" className="mt-1">
+                <input type="hidden" name="intent" value="connect" />
+                <button type="submit"
+                  className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300">
+                  <Plus className="h-3 w-3" />Add account
+                </button>
+              </Form>
               <Link to="/dashboard/calendar/booking-links"
                 className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
                 <Link2 className="h-3 w-3" />Booking Links

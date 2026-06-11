@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState, useEffect, useRef } from 'react';
-import { Link, useFetcher } from 'react-router';
+import { Link, Form, useFetcher } from 'react-router';
 import { Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail, ChevronDown, ChevronRight, ChevronUp, Plus, Tag, RefreshCw, Check, AlertCircle, } from 'lucide-react';
 const systemIcons = {
     Inbox,
@@ -13,7 +13,7 @@ const systemIcons = {
     Mail,
     Tag,
 };
-export function InboxSidebar({ accounts, counts, globalCounts, activeFolder, activeAccountId, activeLabel, onSelectFolder, onSelectLabel, onDragOver, onDrop, apiBase = 'https://api.sheetzlabs.com', }) {
+export function InboxSidebar({ accounts, counts, globalCounts, activeFolder, activeAccountId, activeLabel, onSelectFolder, onSelectLabel, onDragOver, onDrop, }) {
     // All accounts start collapsed, but auto-expand active account
     const [expandedAccounts, setExpandedAccounts] = useState(new Set());
     const prevActiveAccountId = useRef(null);
@@ -92,7 +92,7 @@ export function InboxSidebar({ accounts, counts, globalCounts, activeFolder, act
                                                                     fetcher.submit({ account_id: account.id, name }, { method: 'post', action: '/dashboard/inbox/labels' });
                                                                 }
                                                             }, className: "flex items-center gap-2 w-full px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300", children: [_jsx(Plus, { size: 12 }), "Create label"] })] }))] }))] }))] }, account.id));
-                    }), accounts.length === 0 && (_jsxs("a", { href: `${apiBase}/email/auth/gmail`, className: "flex items-center gap-2 px-3 py-2 text-sm text-emerald-400 hover:text-emerald-300", children: [_jsx(Plus, { size: 16 }), "Connect Gmail"] }))] }), _jsx(SyncButton, {})] }));
+                    }), accounts.length === 0 && (_jsx(Form, { method: "post", action: "/dashboard/inbox/connect-gmail", children: _jsxs("button", { type: "submit", className: "flex items-center gap-2 px-3 py-2 text-sm text-emerald-400 hover:text-emerald-300", children: [_jsx(Plus, { size: 16 }), "Connect Gmail"] }) }))] }), _jsx(SyncButton, {})] }));
 }
 function SyncButton() {
     const syncFetcher = useFetcher();

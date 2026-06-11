@@ -4,10 +4,6 @@ const DEFAULT_API = "https://api.sheetzlabs.com";
 export function getApiBase(env) {
     return env.INTERNAL_API_URL ?? env.API_URL ?? DEFAULT_API;
 }
-/** Public, browser-reachable API origin (e.g. for OAuth `<a href>` links). */
-export function getPublicApiBase(env) {
-    return env.API_URL ?? DEFAULT_API;
-}
 /** Read the current Supabase access token from the request cookies, if any. */
 export async function getAccessToken(request, env) {
     const { supabase } = createSupabaseServerClient(request, env);

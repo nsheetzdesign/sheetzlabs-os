@@ -37,8 +37,6 @@ interface Props {
         id: string;
         accountId: string;
     }) => void;
-    /** Public API origin for the Gmail OAuth start link (browser navigation). */
-    apiBase?: string;
 }
-export declare function InboxSidebar({ accounts, counts, globalCounts, activeFolder, activeAccountId, activeLabel, onSelectFolder, onSelectLabel, onDragOver, onDrop, apiBase, }: Props): import("react/jsx-runtime").JSX.Element;
+export declare function InboxSidebar({ accounts, counts, globalCounts, activeFolder, activeAccountId, activeLabel, onSelectFolder, onSelectLabel, onDragOver, onDrop, }: Props): import("react/jsx-runtime").JSX.Element;
 export {};

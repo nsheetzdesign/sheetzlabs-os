@@ -26,11 +26,6 @@ export function getApiBase(env: ApiEnv): string {
   return env.INTERNAL_API_URL ?? env.API_URL ?? DEFAULT_API;
 }
 
-/** Public, browser-reachable API origin (e.g. for OAuth `<a href>` links). */
-export function getPublicApiBase(env: ApiEnv): string {
-  return env.API_URL ?? DEFAULT_API;
-}
-
 /** Read the current Supabase access token from the request cookies, if any. */
 export async function getAccessToken(request: Request, env: ApiEnv): Promise<string | null> {
   const { supabase } = createSupabaseServerClient(request, env);

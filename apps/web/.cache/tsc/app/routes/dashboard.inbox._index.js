@@ -196,7 +196,6 @@ export async function loader({ request, context }) {
         accountId: account_id,
         labelId: label_id,
         search,
-        apiBase: env.API_URL ?? 'https://api.sheetzlabs.com',
     };
 }
 const TRIAGE_TABS = [
@@ -207,7 +206,7 @@ const TRIAGE_TABS = [
     { id: 'notification', label: 'Notifications', Icon: Bell },
 ];
 export default function Inbox() {
-    const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search, apiBase } = useLoaderData();
+    const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData();
     const [searchParams, setSearchParams] = useSearchParams();
     const navigate = useNavigate();
     const fetcher = useFetcher();
@@ -451,7 +450,7 @@ export default function Inbox() {
         onSearch: () => document.getElementById('inbox-search')?.focus(),
         onShowHelp: () => setShowShortcutsHelp(true),
     });
-    return (_jsxs("div", { className: "flex h-full", children: [_jsx(InboxSidebar, { accounts: accounts, counts: counts, globalCounts: globalCounts, activeFolder: folder, activeAccountId: accountId, activeLabel: labelId, onSelectFolder: handleFolderSelect, onSelectLabel: handleLabelSelect, onDragOver: handleDragOver, onDrop: handleDrop, apiBase: apiBase }), _jsxs("div", { className: "flex-1 flex overflow-hidden", children: [_jsxs("div", { className: `${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`, children: [_jsxs("div", { className: "p-3 border-b border-zinc-800 flex gap-2", children: [_jsx("form", { onSubmit: handleSearch, className: "flex-1", children: _jsx("input", { id: "inbox-search", type: "text", name: "q", defaultValue: search || '', placeholder: "Search emails...", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500" }) }), _jsx("button", { onClick: handleRefresh, disabled: isRefreshing || revalidator.state === 'loading', title: "Sync emails", className: "flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors", children: _jsx(RefreshCw, { size: 14, className: isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : '' }) })] }), _jsx("div", { className: "flex border-b border-zinc-800 overflow-x-auto scrollbar-none", children: TRIAGE_TABS.map(({ id, label }) => {
+    return (_jsxs("div", { className: "flex h-full", children: [_jsx(InboxSidebar, { accounts: accounts, counts: counts, globalCounts: globalCounts, activeFolder: folder, activeAccountId: accountId, activeLabel: labelId, onSelectFolder: handleFolderSelect, onSelectLabel: handleLabelSelect, onDragOver: handleDragOver, onDrop: handleDrop }), _jsxs("div", { className: "flex-1 flex overflow-hidden", children: [_jsxs("div", { className: `${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`, children: [_jsxs("div", { className: "p-3 border-b border-zinc-800 flex gap-2", children: [_jsx("form", { onSubmit: handleSearch, className: "flex-1", children: _jsx("input", { id: "inbox-search", type: "text", name: "q", defaultValue: search || '', placeholder: "Search emails...", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500" }) }), _jsx("button", { onClick: handleRefresh, disabled: isRefreshing || revalidator.state === 'loading', title: "Sync emails", className: "flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors", children: _jsx(RefreshCw, { size: 14, className: isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : '' }) })] }), _jsx("div", { className: "flex border-b border-zinc-800 overflow-x-auto scrollbar-none", children: TRIAGE_TABS.map(({ id, label }) => {
                                     const count = triageCounts[id] ?? 0;
                                     const isActive = triageFilter === id;
                                     if (id !== 'all' && count === 0)

@@ -17,8 +17,6 @@ type ApiEnv = {
 };
 /** Base URL for server-to-server calls (may use an internal hostname). */
 export declare function getApiBase(env: ApiEnv): string;
-/** Public, browser-reachable API origin (e.g. for OAuth `<a href>` links). */
-export declare function getPublicApiBase(env: ApiEnv): string;
 /** Read the current Supabase access token from the request cookies, if any. */
 export declare function getAccessToken(request: Request, env: ApiEnv): Promise<string | null>;
 /**

@@ -11,13 +11,12 @@ import type { Context, Next } from "hono";
  *  - `GET /` and `GET /health`
  *  - `/booking/public/*` (slot display / create / cancel / reschedule — these get
  *    their own validation + rate limiting)
- *  - The Google OAuth start + callback routes. These are reached by full-page
- *    browser navigation (and Google's redirect), neither of which can carry an
- *    Authorization header; they are protected by an HttpOnly `state` nonce cookie
- *    instead (see the OAuth handlers). NOTE: the prompt asked for the OAuth *start*
- *    routes to require auth, but that is incompatible with `<a href>` initiation and
- *    the cross-subdomain state cookie that the callback depends on. The audit (XC-2)
- *    only requires a `state` nonce, which we implement — flagged in the summary.
+ *  - The Google OAuth *callback* routes only (Prompt 51B). Google redirects the
+ *    browser here with no Authorization header, so they can't be authenticated;
+ *    instead they validate a single-use, user-bound `state` nonce against the
+ *    `oauth_states` table. The OAuth *start* routes (`POST .../start`) are NOT on
+ *    the allowlist — they run behind this middleware so the nonce is bound to the
+ *    authenticated founder, closing the open-link-anyone's-account hole (XC-2).
  *
  * Trusted server-to-server callers (the cron) may instead present
  * `X-Internal-Secret: <CRON_SECRET>` to reach internal endpoints.
@@ -29,14 +28,18 @@ type Bindings = {
   CRON_SECRET?: string;
 };
 
-// Exact-path allowlist (no auth required).
-const PUBLIC_EXACT = new Set(["/", "/health"]);
+// Exact-path allowlist (no auth required). The OAuth callbacks are exact paths so
+// the `.../start` initiation routes (which require auth) are NOT exempted.
+const PUBLIC_EXACT = new Set([
+  "/",
+  "/health",
+  "/email/auth/gmail/callback", // Google redirect — validated by user-bound state nonce
+  "/calendar/auth/google/callback", // Google redirect — validated by user-bound state nonce
+]);
 
 // Prefix allowlist (no auth required).
 const PUBLIC_PREFIXES = [
   "/booking/public/",
-  "/email/auth/gmail", // start + /callback
-  "/calendar/auth/google", // start + /callback
   "/stripe/webhook/", // Stripe-signed webhooks (verified by signature, not JWT)
 ];
 

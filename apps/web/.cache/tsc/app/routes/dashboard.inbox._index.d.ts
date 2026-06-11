@@ -27,6 +27,5 @@ export declare function loader({ request, context }: LoaderFunctionArgs): Promis
     accountId: string | null;
     labelId: string | null;
     search: string | null;
-    apiBase: any;
 }>;
 export default function Inbox(): import("react/jsx-runtime").JSX.Element;

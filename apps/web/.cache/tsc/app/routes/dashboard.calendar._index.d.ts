@@ -34,15 +34,14 @@ export declare function loader({ request, context }: LoaderFunctionArgs): Promis
         id: string;
         title: string;
         due_date: string | null;
-        priority: "medium" | "urgent" | "high" | "low" | null;
+        priority: "urgent" | "high" | "medium" | "low" | null;
         status: "backlog" | "todo" | "in-progress" | "review" | "done" | "blocked" | null;
     }[];
     subCalendars: SubCalendarEntry[];
     view: string;
     weekOffset: number;
     weekStart: string;
-    apiBase: string;
 }>;
-export declare function action({ request, context }: ActionFunctionArgs): Promise<null>;
+export declare function action({ request, context }: ActionFunctionArgs): Promise<Response | null>;
 export default function CalendarPage(): import("react/jsx-runtime").JSX.Element;
 export {};
