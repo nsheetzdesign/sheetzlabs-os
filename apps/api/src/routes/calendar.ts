@@ -4,7 +4,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { executeAgentWithTools } from "../lib/agent-engine";
 import { sanitizeAccount } from "../lib/sanitize";
 import { createOAuthState, consumeOAuthState } from "../lib/oauth-state";
-import { getValidAccessToken as getGoogleAccessToken } from "../lib/google-auth";
+import { getValidAccessToken as getGoogleAccessToken, ReauthRequiredError } from "../lib/google-auth";
+import { syncCalendarAccount } from "../lib/calendar-sync";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -153,13 +154,64 @@ calendar.patch("/accounts/:id", async (c) => {
   return c.json({ account: sanitizeAccount(data) });
 });
 
-// Disconnect account
+// Disconnect account (CS-9). Refuses while active bookings exist (409), revokes the
+// Google refresh token best-effort, then deletes in order with every step checked —
+// no more {success:true} while the row (and its plaintext tokens) silently survive.
+// Migration 043 made the booking FKs ON DELETE SET NULL so historical bookings live on.
 calendar.delete("/accounts/:id", async (c) => {
   const { id } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  await supabase.from("calendar_events").delete().eq("account_id", id);
-  await supabase.from("calendar_accounts").delete().eq("id", id);
+  const { data: account, error: accErr } = await supabase
+    .from("calendar_accounts")
+    .select("id, refresh_token")
+    .eq("id", id)
+    .single();
+  if (accErr || !account) return c.json({ error: "Account not found" }, 404);
+
+  // Guard: active = non-cancelled bookings in the future. Block until they clear.
+  const { count: activeCount, error: countErr } = await supabase
+    .from("bookings")
+    .select("id", { count: "exact", head: true })
+    .eq("calendar_account_id", id)
+    .neq("status", "cancelled")
+    .gte("scheduled_at", new Date().toISOString());
+  if (countErr) return c.json({ error: countErr.message }, 500);
+  if ((activeCount ?? 0) > 0) {
+    return c.json(
+      {
+        error: "ACTIVE_BOOKINGS",
+        count: activeCount,
+        message: `Cancel or wait out ${activeCount} upcoming booking${
+          activeCount === 1 ? "" : "s"
+        } before disconnecting this account.`,
+      },
+      409
+    );
+  }
+
+  // Best-effort token revocation (don't block the delete on its failure).
+  if (account.refresh_token) {
+    try {
+      const res = await fetch("https://oauth2.googleapis.com/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: account.refresh_token as string }),
+      });
+      if (!res.ok) {
+        console.error(`[calendar] token revoke for ${id} returned ${res.status}`);
+      }
+    } catch (err) {
+      console.error(`[calendar] token revoke for ${id} failed:`, err);
+    }
+  }
+
+  const { error: evErr } = await supabase.from("calendar_events").delete().eq("account_id", id);
+  if (evErr) return c.json({ error: `Failed to delete events: ${evErr.message}` }, 500);
+
+  // Deletes the account; cascades booking_links and nulls bookings' FKs (migration 043).
+  const { error: delErr } = await supabase.from("calendar_accounts").delete().eq("id", id);
+  if (delErr) return c.json({ error: `Failed to delete account: ${delErr.message}` }, 500);
 
   return c.json({ success: true });
 });
@@ -212,58 +264,28 @@ calendar.post("/accounts/:id/sync", async (c) => {
 
   if (!account) return c.json({ error: "Account not found" }, 404);
 
-  const accessToken = await getValidAccessToken(account, c.env, supabase);
-
-  const now = new Date();
-  const timeMin = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const timeMax = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
-
-  // Enumerate all calendars this account has access to
-  const calListRes = await fetch(
-    "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50",
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  const calList = (await calListRes.json()) as {
-    items?: Array<{ id: string; summary: string; primary?: boolean }>;
-  };
-
-  const calendarsToSync = calList.items ?? [{ id: "primary", summary: "Primary" }];
-
-  let syncedCount = 0;
-  for (const cal of calendarsToSync) {
-    const response = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events?` +
-        `timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}` +
-        `&singleEvents=true&orderBy=startTime&maxResults=250`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-
-    const gcalData = (await response.json()) as { items?: unknown[] };
-
-    for (const event of gcalData.items ?? []) {
-      const parsed = parseGoogleEvent(event as Record<string, unknown>);
-
-      await supabase.from("calendar_events").upsert(
-        {
-          account_id: id,
-          // Google event IDs are globally unique per user — safe to use directly
-          external_id: (event as Record<string, unknown>).id as string,
-          google_calendar_id: cal.id,
-          ...parsed,
-        },
-        { onConflict: "account_id,external_id" }
-      );
-
-      syncedCount++;
+  // Deletion-aware, paginated, batched sync (CS-1/2). Resumes across runs via
+  // sync_cursor if a large account exceeds the per-run subrequest budget.
+  try {
+    const result = await syncCalendarAccount(account, c.env, supabase);
+    return c.json({
+      message: result.complete ? "Sync complete" : "Sync in progress (continuing next run)",
+      synced: result.synced,
+      deleted: result.deleted,
+      calendars: result.calendars,
+      complete: result.complete,
+    });
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) {
+      return c.json({ error: "needs_reauth", email: err.email }, 409);
     }
+    const msg = err instanceof Error ? err.message : "Sync failed";
+    await supabase
+      .from("calendar_accounts")
+      .update({ sync_status: "error", sync_error: msg })
+      .eq("id", id);
+    return c.json({ error: msg }, 500);
   }
-
-  await supabase
-    .from("calendar_accounts")
-    .update({ last_sync_at: new Date().toISOString() })
-    .eq("id", id);
-
-  return c.json({ message: "Sync complete", synced: syncedCount, calendars: calendarsToSync.length });
 });
 
 // ============================================
@@ -875,35 +897,4 @@ function getValidAccessToken(
   supabase: any
 ): Promise<string> {
   return getGoogleAccessToken(account, env, supabase, "calendar_accounts");
-}
-
-function parseGoogleEvent(event: Record<string, unknown>) {
-  const start = event.start as Record<string, string> | undefined;
-  const end = event.end as Record<string, string> | undefined;
-  const attendees = (event.attendees as Array<Record<string, string>> | undefined) ?? [];
-  const organizer = event.organizer as Record<string, string> | undefined;
-  const conferenceData = event.conferenceData as
-    | { entryPoints?: Array<{ uri: string }> }
-    | undefined;
-
-  return {
-    title: (event.summary as string) || "(No title)",
-    description: (event.description as string) || null,
-    location: (event.location as string) || null,
-    start_at: start?.dateTime || start?.date,
-    end_at: end?.dateTime || end?.date,
-    all_day: !start?.dateTime,
-    timezone: start?.timeZone || "America/Chicago",
-    attendees: attendees.map((a) => ({
-      email: a.email,
-      name: a.displayName || null,
-      status: a.responseStatus,
-    })),
-    organizer_email: organizer?.email || null,
-    meeting_link:
-      (event.hangoutLink as string) || conferenceData?.entryPoints?.[0]?.uri || null,
-    status: (event.status as string) || "confirmed",
-    recurring: !!(event.recurringEventId as string),
-    recurrence_rule: (event.recurrence as string[] | undefined)?.[0] || null,
-  };
 }

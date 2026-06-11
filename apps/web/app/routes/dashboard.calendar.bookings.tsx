@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
 import { useLoaderData, useFetcher, Link } from "react-router";
 import { useState } from "react";
-import { Calendar, Clock, User, Video, X, ChevronDown } from "lucide-react";
+import { Calendar, Clock, User, Video, X, ChevronDown, AlertTriangle } from "lucide-react";
 import { apiFetch } from "~/lib/api";
 
 export const meta: MetaFunction = () => [{ title: "Bookings — Sheetz Labs OS" }];
@@ -16,6 +16,7 @@ type Booking = {
   timezone: string;
   status: string;
   meet_link?: string;
+  calendar_sync_failed?: boolean;
   booking_links?: { title: string; slug: string };
 };
 
@@ -59,9 +60,20 @@ function BookingCard({
       >
         <div className="flex items-start justify-between">
           <div className="flex-1 min-w-0">
-            <h3 className="text-zinc-100 font-medium truncate">
-              {booking.booking_links?.title || "Meeting"}
-            </h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-zinc-100 font-medium truncate">
+                {booking.booking_links?.title || "Meeting"}
+              </h3>
+              {booking.calendar_sync_failed && (
+                <span
+                  className="inline-flex items-center gap-1 shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-400"
+                  title="The Google Calendar event for this booking failed to sync. The booking is valid; the calendar may be out of date."
+                >
+                  <AlertTriangle className="w-3 h-3" />
+                  Calendar sync failed
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-4 mt-2 text-sm text-zinc-400 flex-wrap">
               <span className="flex items-center gap-1">
                 <User className="w-3.5 h-3.5" />

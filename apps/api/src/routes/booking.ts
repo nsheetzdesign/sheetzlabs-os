@@ -78,9 +78,16 @@ function clientIp(c: { req: { header: (n: string) => string | undefined } }): st
 // ── Busy-time fetch (fails closed, BK-3) ──────────────────────────────────────
 
 /**
- * Fetch busy intervals for `date` (host-timezone calendar date) from the host's
- * primary Google Calendar. Returns ok:false on any token/HTTP failure so callers
- * can fail closed rather than offering every slot as free.
+ * Fetch busy intervals for `date` (host-timezone calendar date). Returns ok:false on
+ * any token/HTTP failure so callers fail closed (BK-3) rather than offering every slot
+ * as free. Busy is the UNION of (BK-10/BK-11):
+ *  - Google free/busy across ALL of the account's *visible* sub-calendars, queried via
+ *    the freeBusy API. freeBusy intrinsically reports a calendar's effective busy
+ *    blocks: `transparency:'transparent'` (free) events, all-day events, and events the
+ *    host has declined are NOT counted as busy — matching Google's own availability
+ *    semantics, which is exactly the BK-11 exclusion set (documented here).
+ *  - LOCAL non-cancelled bookings for this account, so a booking whose Google event
+ *    creation failed (BK-12, calendar_sync_failed) still blocks its slot.
  */
 async function fetchBusyForDate(
   account: Record<string, unknown>,
@@ -93,23 +100,58 @@ async function fetchBusyForDate(
   try {
     const accessToken = await getValidAccessToken(account, env, supabase);
     const startOfDay = zonedTimeToUtc(date, "00:00", tz);
-    const endOfDay = new Date(zonedTimeToUtc(date, "00:00", tz).getTime() + 24 * 60 * 60 * 1000);
+    const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+    const accountId = account.id as string;
 
-    const calRes = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
-        `timeMin=${startOfDay.toISOString()}&timeMax=${endOfDay.toISOString()}&singleEvents=true`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
+    // Visible sub-calendars for this account → freeBusy `items`. Fall back to the
+    // primary calendar if none have been synced yet.
+    const { data: subCals } = await supabase
+      .from("calendar_sub_accounts")
+      .select("external_id, is_visible")
+      .eq("account_id", accountId);
+    const calendarIds: string[] = (subCals ?? [])
+      .filter((s: { is_visible?: boolean }) => s.is_visible !== false)
+      .map((s: { external_id: string }) => s.external_id);
+    if (calendarIds.length === 0) calendarIds.push("primary");
 
-    if (!calRes.ok) return { ok: false, busy: [] };
+    const fbRes = await fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        timeMin: startOfDay.toISOString(),
+        timeMax: endOfDay.toISOString(),
+        items: calendarIds.map((id) => ({ id })),
+      }),
+    });
 
-    const calData = (await calRes.json()) as {
-      items?: Array<{ start: { dateTime?: string; date?: string }; end: { dateTime?: string; date?: string } }>;
+    if (!fbRes.ok) return { ok: false, busy: [] };
+
+    const fb = (await fbRes.json()) as {
+      calendars?: Record<string, { busy?: Array<{ start: string; end: string }> }>;
     };
-    const busy: BusyInterval[] = (calData.items ?? []).map((e) => ({
-      start: new Date(e.start.dateTime ?? e.start.date ?? ""),
-      end: new Date(e.end.dateTime ?? e.end.date ?? ""),
-    }));
+    const busy: BusyInterval[] = [];
+    for (const cal of Object.values(fb.calendars ?? {})) {
+      for (const b of cal.busy ?? []) {
+        busy.push({ start: new Date(b.start), end: new Date(b.end) });
+      }
+    }
+
+    // Union local bookings (covers DB-only bookings whose gcal event failed).
+    const { data: localBookings } = await supabase
+      .from("bookings")
+      .select("scheduled_at, duration_minutes")
+      .eq("calendar_account_id", accountId)
+      .neq("status", "cancelled")
+      .gte("scheduled_at", new Date(startOfDay.getTime() - 24 * 60 * 60 * 1000).toISOString())
+      .lte("scheduled_at", endOfDay.toISOString());
+    for (const b of localBookings ?? []) {
+      const start = new Date(b.scheduled_at as string);
+      busy.push({
+        start,
+        end: new Date(start.getTime() + (b.duration_minutes as number) * 60000),
+      });
+    }
+
     return { ok: true, busy };
   } catch {
     return { ok: false, busy: [] };
@@ -145,6 +187,34 @@ function getValidAccessToken(
   supabase: any
 ): Promise<string> {
   return getGoogleAccessToken(account, env, supabase, "calendar_accounts");
+}
+
+/**
+ * Best-effort delete of a booking's Google Calendar event. Returns true on success
+ * (or if the event is already gone — 404/410), false on any token/HTTP failure so the
+ * caller can flag `calendar_sync_failed` without aborting the DB-truth state change
+ * (BK-9). Never throws.
+ */
+async function deleteGoogleEvent(
+  account: Record<string, unknown>,
+  eventId: string,
+  env: Bindings,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any
+): Promise<boolean> {
+  try {
+    const accessToken = await getValidAccessToken(account, env, supabase);
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}?sendUpdates=all`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (res.ok || res.status === 404 || res.status === 410) return true;
+    console.error(`[booking] gcal delete ${eventId} failed: ${res.status}`);
+    return false;
+  } catch (err) {
+    console.error(`[booking] gcal delete ${eventId} errored:`, err);
+    return false;
+  }
 }
 
 // ── Authenticated: Booking Link CRUD ─────────────────────────────────────────
@@ -256,25 +326,23 @@ booking.delete("/bookings/:bookingId", async (c) => {
 
   if (error || !bk) return c.json({ error: "Booking not found" }, 404);
 
-  await supabase
+  // 1. DB cancellation is the source of truth — abort on failure, nothing else fires.
+  const { error: cancelErr } = await supabase
     .from("bookings")
     .update({ status: "cancelled", updated_at: new Date().toISOString() })
     .eq("id", bookingId);
+  if (cancelErr) return c.json({ error: cancelErr.message }, 500);
 
-  // Delete Google Calendar event
+  // 2. Google delete is best-effort; flag (don't abort) if it fails.
   if (bk.calendar_event_id) {
-    try {
-      const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
-      const accessToken = await getValidAccessToken(account, c.env, supabase);
-      await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${bk.calendar_event_id}?sendUpdates=all`,
-        { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
-      );
-    } catch {
-      // Calendar deletion failed — booking still cancelled
+    const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
+    const ok = await deleteGoogleEvent(account, bk.calendar_event_id as string, c.env, supabase);
+    if (!ok) {
+      await supabase.from("bookings").update({ calendar_sync_failed: true }).eq("id", bookingId);
     }
   }
 
+  // 3. Emails — logged, never roll back the cancellation.
   const hostEmail = bk.booking_links.calendar_accounts.email as string;
   const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
 
@@ -291,10 +359,12 @@ booking.delete("/bookings/:bookingId", async (c) => {
   };
 
   const guestCancellation = cancellationEmail(emailData, false, "host");
-  await sendBookingEmail({ to: emailData.guestEmail, subject: guestCancellation.subject, html: guestCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  const gRes = await sendBookingEmail({ to: emailData.guestEmail, subject: guestCancellation.subject, html: guestCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!gRes.ok) console.error(`[booking] guest cancel email failed for ${bookingId}: ${gRes.error}`);
 
   const hostCancellation = cancellationEmail(emailData, true, "host");
-  await sendBookingEmail({ to: hostEmail, subject: hostCancellation.subject, html: hostCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  const hRes = await sendBookingEmail({ to: hostEmail, subject: hostCancellation.subject, html: hostCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!hRes.ok) console.error(`[booking] host cancel email failed for ${bookingId}: ${hRes.error}`);
 
   return c.json({ success: true });
 });
@@ -403,25 +473,23 @@ booking.post("/public/cancel/:bookingId", async (c) => {
   if (error || !bk) return c.json({ error: "Booking not found" }, 404);
   if (bk.status === "cancelled") return c.json({ error: "Booking already cancelled" }, 400);
 
-  await supabase
+  // 1. DB cancellation first — abort on failure.
+  const { error: cancelErr } = await supabase
     .from("bookings")
     .update({ status: "cancelled", updated_at: new Date().toISOString() })
     .eq("id", bookingId);
+  if (cancelErr) return c.json({ error: cancelErr.message }, 500);
 
-  // Delete Google Calendar event
+  // 2. Google delete best-effort; flag on failure.
   if (bk.calendar_event_id) {
-    try {
-      const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
-      const accessToken = await getValidAccessToken(account, c.env, supabase);
-      await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${bk.calendar_event_id}?sendUpdates=all`,
-        { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
-      );
-    } catch {
-      // Calendar deletion failed — booking still cancelled
+    const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
+    const ok = await deleteGoogleEvent(account, bk.calendar_event_id as string, c.env, supabase);
+    if (!ok) {
+      await supabase.from("bookings").update({ calendar_sync_failed: true }).eq("id", bookingId);
     }
   }
 
+  // 3. Emails — logged, never roll back.
   const hostEmail = bk.booking_links.calendar_accounts.email as string;
   const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
 
@@ -438,10 +506,12 @@ booking.post("/public/cancel/:bookingId", async (c) => {
   };
 
   const guestCancellation = cancellationEmail(emailData, false, "guest");
-  await sendBookingEmail({ to: emailData.guestEmail, subject: guestCancellation.subject, html: guestCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  const gRes = await sendBookingEmail({ to: emailData.guestEmail, subject: guestCancellation.subject, html: guestCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!gRes.ok) console.error(`[booking] guest cancel email failed for ${bookingId}: ${gRes.error}`);
 
   const hostCancellation = cancellationEmail(emailData, true, "guest");
-  await sendBookingEmail({ to: hostEmail, subject: hostCancellation.subject, html: hostCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  const hRes = await sendBookingEmail({ to: hostEmail, subject: hostCancellation.subject, html: hostCancellation.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!hRes.ok) console.error(`[booking] host cancel email failed for ${bookingId}: ${hRes.error}`);
 
   return c.json({ success: true });
 });
@@ -523,8 +593,11 @@ booking.post("/public/:slug", async (c) => {
     return c.json({ error: bookingError.message }, 500);
   }
 
-  // Create Google Calendar event with Meet link
+  // Create Google Calendar event with Meet link. If this fails the booking still
+  // stands (DB is truth) but we flag calendar_sync_failed and leave meet_link null,
+  // and the confirmation email drops the "calendar invite" copy (BK-12).
   let meetLink: string | null = null;
+  let calendarEventCreated = false;
   try {
     const account = link.calendar_accounts as Record<string, unknown>;
     const accessToken = await getValidAccessToken(account, c.env, supabase);
@@ -563,14 +636,22 @@ booking.post("/public/:slug", async (c) => {
         (ep) => ep.entryPointType === "video"
       )?.uri ?? null;
       if (gcalData.id) {
+        calendarEventCreated = true;
         await supabase
           .from("bookings")
           .update({ calendar_event_id: gcalData.id, meet_link: meetLink })
           .eq("id", newBooking.id);
       }
+    } else {
+      const text = await gcalRes.text().catch(() => "");
+      console.error(`[booking] gcal event create failed (${gcalRes.status}) for ${newBooking.id}: ${text}`);
     }
-  } catch {
-    // Calendar event creation failed — booking still saved
+  } catch (err) {
+    console.error(`[booking] gcal event create errored for ${newBooking.id}:`, err);
+  }
+
+  if (!calendarEventCreated) {
+    await supabase.from("bookings").update({ calendar_sync_failed: true }).eq("id", newBooking.id);
   }
 
   // Send confirmation emails
@@ -592,13 +673,18 @@ booking.post("/public/:slug", async (c) => {
     cancelUrl: `https://app.sheetzlabs.com/book/cancel/${newBooking.id}`,
     rescheduleUrl: `https://app.sheetzlabs.com/book/reschedule/${newBooking.id}`,
     meetLink: meetLink ?? undefined,
+    // Drives the "a calendar invitation has been sent" copy — only true copy when
+    // the Google event actually got created (BK-12).
+    calendarInviteSent: calendarEventCreated,
   };
 
   const guestEmail = guestConfirmationEmail(emailData);
-  await sendBookingEmail({ to: body.guest_email, subject: guestEmail.subject, html: guestEmail.html, resendApiKey: c.env.RESEND_API_KEY });
+  const gRes = await sendBookingEmail({ to: body.guest_email, subject: guestEmail.subject, html: guestEmail.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!gRes.ok) console.error(`[booking] guest confirmation email failed for ${newBooking.id}: ${gRes.error}`);
 
   const hostEmail = hostNotificationEmail(emailData);
-  await sendBookingEmail({ to: hostEmailAddr, subject: hostEmail.subject, html: hostEmail.html, resendApiKey: c.env.RESEND_API_KEY });
+  const hRes = await sendBookingEmail({ to: hostEmailAddr, subject: hostEmail.subject, html: hostEmail.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!hRes.ok) console.error(`[booking] host notification email failed for ${newBooking.id}: ${hRes.error}`);
 
   return c.json({
     success: true,
@@ -704,14 +790,16 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
     return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
   }
 
+  // 1. DB update first (source of truth). Reset reminder claims so the new time
+  //    re-arms both reminders (timestamp columns from migration 042).
   const { error: updateError } = await supabase
     .from("bookings")
     .update({
       scheduled_at: body.scheduled_at,
       timezone: newTimezone,
       updated_at: new Date().toISOString(),
-      reminder_24h_sent: false,
-      reminder_1h_sent: false,
+      reminder_24h_sent_at: null,
+      reminder_1h_sent_at: null,
     })
     .eq("id", bookingId);
 
@@ -722,14 +810,15 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
     return c.json({ error: updateError.message }, 500);
   }
 
-  // Update Google Calendar event
+  // 2. Update Google Calendar event — best-effort; flag on failure, don't abort.
   if (bk.calendar_event_id) {
+    let patchOk = false;
     try {
       const account = bk.booking_links.calendar_accounts as Record<string, unknown>;
       const accessToken = await getValidAccessToken(account, c.env, supabase);
       const eventEnd = new Date(newDateTime.getTime() + (bk.duration_minutes as number) * 60000);
 
-      await fetch(
+      const patchRes = await fetch(
         `https://www.googleapis.com/calendar/v3/calendars/primary/events/${bk.calendar_event_id}?sendUpdates=all`,
         {
           method: "PATCH",
@@ -740,11 +829,20 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
           }),
         }
       );
-    } catch {
-      // Calendar update failed — booking still rescheduled
+      patchOk = patchRes.ok;
+      if (!patchRes.ok) {
+        const text = await patchRes.text().catch(() => "");
+        console.error(`[booking] gcal reschedule patch failed (${patchRes.status}) for ${bookingId}: ${text}`);
+      }
+    } catch (err) {
+      console.error(`[booking] gcal reschedule patch errored for ${bookingId}:`, err);
+    }
+    if (!patchOk) {
+      await supabase.from("bookings").update({ calendar_sync_failed: true }).eq("id", bookingId);
     }
   }
 
+  // 3. Emails — logged, never roll back.
   const hostEmail = bk.booking_links.calendar_accounts.email as string;
   const hostName = (bk.booking_links.calendar_accounts.display_name as string) || hostEmail.split("@")[0];
 
@@ -762,10 +860,12 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
   };
 
   const guestEmailContent = rescheduleConfirmationEmail(emailData, false, oldDateTime);
-  await sendBookingEmail({ to: emailData.guestEmail, subject: guestEmailContent.subject, html: guestEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
+  const gRes = await sendBookingEmail({ to: emailData.guestEmail, subject: guestEmailContent.subject, html: guestEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!gRes.ok) console.error(`[booking] guest reschedule email failed for ${bookingId}: ${gRes.error}`);
 
   const hostEmailContent = rescheduleConfirmationEmail(emailData, true, oldDateTime);
-  await sendBookingEmail({ to: hostEmail, subject: hostEmailContent.subject, html: hostEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
+  const hRes = await sendBookingEmail({ to: hostEmail, subject: hostEmailContent.subject, html: hostEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
+  if (!hRes.ok) console.error(`[booking] host reschedule email failed for ${bookingId}: ${hRes.error}`);
 
   return c.json({ success: true });
 });

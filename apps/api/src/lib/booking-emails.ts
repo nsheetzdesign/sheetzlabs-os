@@ -14,6 +14,9 @@ export interface BookingEmailData {
   cancelUrl?: string;
   rescheduleUrl?: string;
   meetLink?: string;
+  // BK-12: when the Google Calendar event creation failed, the confirmation must NOT
+  // promise a calendar invite. Defaults to true for back-compat with other senders.
+  calendarInviteSent?: boolean;
 }
 
 export function formatDateTime(date: Date, timezone: string): { date: string; time: string } {
@@ -71,7 +74,9 @@ export function guestConfirmationEmail(data: BookingEmailData): { subject: strin
         <p style="color: #a1a1aa; font-size: 12px; margin: 0 0 4px 0;">Your notes:</p>
         <p style="color: #d4d4d8; font-size: 14px; margin: 0;">${escapeHtml(data.notes)}</p>
       </div>` : ""}
-      <p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">A calendar invitation has been sent to your email.</p>
+      ${data.calendarInviteSent === false
+        ? ""
+        : `<p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">A calendar invitation has been sent to your email.</p>`}
       <div style="text-align: center; margin-top: 24px;">
         ${data.rescheduleUrl ? `<a href="${data.rescheduleUrl}" style="color: #a1a1aa; font-size: 12px; text-decoration: none; margin-right: 16px;">Reschedule</a>` : ""}
         ${data.cancelUrl ? `<a href="${data.cancelUrl}" style="color: #ef4444; font-size: 12px; text-decoration: none;">Cancel</a>` : ""}

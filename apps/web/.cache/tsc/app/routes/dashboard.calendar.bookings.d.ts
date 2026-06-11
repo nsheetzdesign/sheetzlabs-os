@@ -10,6 +10,7 @@ type Booking = {
     timezone: string;
     status: string;
     meet_link?: string;
+    calendar_sync_failed?: boolean;
     booking_links?: {
         title: string;
         slug: string;

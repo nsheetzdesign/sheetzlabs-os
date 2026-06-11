@@ -23,12 +23,12 @@ export declare function loader({ request, context }: LoaderFunctionArgs): Promis
         task_id: string | null;
         google_calendar_id: string | null;
     }[];
-    accounts: {
-        id: string;
-        email: string;
-        color: string | null;
-        sync_enabled: boolean | null;
-        last_sync_at: string | null;
+    accounts: ({
+        error: true;
+    } & "column 'needs_reauth' does not exist on 'calendar_accounts'.")[];
+    reauthAccounts: {
+        id: any;
+        email: any;
     }[];
     tasks: {
         id: string;
