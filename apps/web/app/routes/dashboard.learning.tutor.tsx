@@ -12,22 +12,22 @@ import {
   X,
 } from "lucide-react";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
+import { apiFetch } from "~/lib/api";
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
+  const env = context.cloudflare.env;
   const url = new URL(request.url);
   const conversationId = url.searchParams.get("id");
-  const apiUrl = context.cloudflare.env.API_URL;
 
-  const convsResponse = await fetch(`${apiUrl}/learning/conversations`, {
-    headers: { Cookie: request.headers.get("Cookie") || "" },
-  });
+  const convsResponse = await apiFetch(request, env, `/learning/conversations`);
   const convsData: any = convsResponse.ok ? await convsResponse.json() : {};
 
   let messages: any[] = [];
   if (conversationId) {
-    const msgsResponse = await fetch(
-      `${apiUrl}/learning/conversations/${conversationId}/messages`,
-      { headers: { Cookie: request.headers.get("Cookie") || "" } }
+    const msgsResponse = await apiFetch(
+      request,
+      env,
+      `/learning/conversations/${conversationId}/messages`
     );
     const msgsData: any = msgsResponse.ok ? await msgsResponse.json() : {};
     messages = msgsData.messages || [];
@@ -37,25 +37,21 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     conversations: convsData.conversations || [],
     currentConversationId: conversationId,
     messages,
-    apiUrl,
   };
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  const env = context.cloudflare.env;
   const formData = await request.formData();
   const intent = formData.get("intent");
-  const apiUrl = context.cloudflare.env.API_URL;
 
   if (intent === "send") {
     const message = formData.get("message") as string;
     const conversationId = formData.get("conversationId") as string;
 
-    const response = await fetch(`${apiUrl}/learning/chat`, {
+    const response = await apiFetch(request, env, `/learning/chat`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: request.headers.get("Cookie") || "",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         conversation_id: conversationId || undefined,
         message,
@@ -70,12 +66,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const conversationId = formData.get("conversationId") as string;
     const title = formData.get("title") as string;
 
-    await fetch(`${apiUrl}/learning/conversations/${conversationId}`, {
+    await apiFetch(request, env, `/learning/conversations/${conversationId}`, {
       method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: request.headers.get("Cookie") || "",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
     });
 
@@ -85,9 +78,8 @@ export async function action({ request, context }: ActionFunctionArgs) {
   if (intent === "delete") {
     const conversationId = formData.get("conversationId") as string;
 
-    await fetch(`${apiUrl}/learning/conversations/${conversationId}`, {
+    await apiFetch(request, env, `/learning/conversations/${conversationId}`, {
       method: "DELETE",
-      headers: { Cookie: request.headers.get("Cookie") || "" },
     });
 
     return { success: true, deleted: conversationId };

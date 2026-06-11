@@ -2,11 +2,10 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useState } from "react";
 import { useLoaderData, Link, useFetcher } from "react-router";
 import { ChevronLeft, CheckCircle, Clock, Sparkles, RefreshCw } from "lucide-react";
+import { apiFetch } from "~/lib/api";
 
-export async function loader({ params, context }: LoaderFunctionArgs) {
-  const response = await fetch(
-    `${context.cloudflare.env.API_URL}/learning/lessons/${params.id}`
-  );
+export async function loader({ request, params, context }: LoaderFunctionArgs) {
+  const response = await apiFetch(request, context.cloudflare.env, `/learning/lessons/${params.id}`);
   const data: any = await response.json();
 
   if (!data.lesson) {
@@ -21,14 +20,13 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   const intent = formData.get("intent");
 
   if (intent === "complete") {
-    await fetch(
-      `${context.cloudflare.env.API_URL}/learning/lessons/${params.id}/complete`,
+    await apiFetch(
+      request,
+      context.cloudflare.env,
+      `/learning/lessons/${params.id}/complete`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Cookie: request.headers.get("Cookie") || "",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           time_spent_seconds:
             parseInt(formData.get("time_spent") as string) || 0,
@@ -38,14 +36,13 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   }
 
   if (intent === "generate") {
-    const response = await fetch(
-      `${context.cloudflare.env.API_URL}/learning/lessons/${params.id}/generate`,
+    const response = await apiFetch(
+      request,
+      context.cloudflare.env,
+      `/learning/lessons/${params.id}/generate`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Cookie: request.headers.get("Cookie") || "",
-        },
+        headers: { "Content-Type": "application/json" },
       }
     );
 

@@ -2,6 +2,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react
 import { useLoaderData, useFetcher, Link } from "react-router";
 import { useState } from "react";
 import { Calendar, Clock, User, Video, X, ChevronDown } from "lucide-react";
+import { apiFetch } from "~/lib/api";
 
 export const meta: MetaFunction = () => [{ title: "Bookings — Sheetz Labs OS" }];
 
@@ -18,23 +19,21 @@ type Booking = {
   booking_links?: { title: string; slug: string };
 };
 
-export async function loader({ context }: LoaderFunctionArgs) {
+export async function loader({ request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
-  const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
-  const res = await fetch(`${apiUrl}/booking/bookings`);
+  const res = await apiFetch(request, env, `/booking/bookings`);
   const data = (await res.json()) as { bookings: Booking[] };
   return { bookings: data.bookings ?? [] };
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
-  const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
   const bookingId = fd.get("bookingId") as string;
 
   if (intent === "cancel" && bookingId) {
-    await fetch(`${apiUrl}/booking/bookings/${bookingId}`, { method: "DELETE" });
+    await apiFetch(request, env, `/booking/bookings/${bookingId}`, { method: "DELETE" });
   }
 
   return null;

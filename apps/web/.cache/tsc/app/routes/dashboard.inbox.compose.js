@@ -57,7 +57,8 @@ export default function ComposeEmail() {
         if (opt)
             setDraft((d) => ({ ...d, account_id: opt.account_id, from_email: opt.from_email }));
     };
-    const apiUrl = "https://api.sheetzlabs.com";
+    // Same-origin proxy (routes/api.$.tsx) — forwards the founder's JWT server-side.
+    const apiUrl = "/api";
     const handleSend = async () => {
         if (!draft.to_emails.length || !draft.subject)
             return;

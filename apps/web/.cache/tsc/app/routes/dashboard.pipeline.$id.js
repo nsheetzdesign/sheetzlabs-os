@@ -3,6 +3,7 @@ import { useLoaderData, useActionData, useFetcher, Form, Link, redirect, data, }
 import { Sparkles } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 import { FormField } from "~/components/ui/FormField";
 import { Input } from "~/components/ui/Input";
 import { Select } from "~/components/ui/Select";
@@ -172,8 +173,8 @@ export async function action({ request, params, context }) {
     const intent = fd.get("intent");
     // Trigger AI evaluation
     if (intent === "evaluate") {
-        await fetch(`https://api.sheetzlabs.com/pipeline/${params.id}/evaluate`, { method: "POST" });
-        return redirect(`/dashboard/pipeline/${params.id}/evaluation`);
+        await apiFetch(request, context.cloudflare.env, `/pipeline/${params.id}/evaluate`, { method: "POST" });
+        return redirect(`/dashboard/ventures/pipeline/${params.id}/evaluation`);
     }
     // Advance stage
     if (intent === "advance") {
@@ -182,7 +183,7 @@ export async function action({ request, params, context }) {
         if (next) {
             await supabase.from("pipeline").update({ stage: next }).eq("id", params.id);
         }
-        return redirect(`/dashboard/pipeline/${params.id}`);
+        return redirect(`/dashboard/ventures/pipeline/${params.id}`);
     }
     // Park
     if (intent === "park") {
@@ -190,7 +191,7 @@ export async function action({ request, params, context }) {
             .from("pipeline")
             .update({ stage: "parked" })
             .eq("id", params.id);
-        return redirect("/dashboard/pipeline");
+        return redirect("/dashboard/ventures/pipeline");
     }
     // Promote to venture
     if (intent === "promote") {
@@ -250,7 +251,7 @@ export async function action({ request, params, context }) {
         .eq("id", params.id);
     if (error)
         return data({ errors: { _form: error.message } }, { status: 500 });
-    return redirect(`/dashboard/pipeline/${params.id}`);
+    return redirect(`/dashboard/ventures/pipeline/${params.id}`);
 }
 function ScoreBadge({ score }) {
     const s = score ?? 0;
@@ -298,7 +299,7 @@ export default function EditPipeline() {
                                     }, children: [_jsx("input", { type: "hidden", name: "intent", value: "park" }), _jsx(Button, { type: "submit", variant: "danger", children: "\uD83D\uDCE6 Park" })] }))] }), _jsxs(Form, { method: "post", className: "space-y-5 rounded-xl border border-surface-2/50 bg-surface-1/40 p-6 backdrop-blur-sm", children: [_jsxs("div", { className: "grid gap-5 sm:grid-cols-2", children: [_jsx(FormField, { label: "Idea Name", required: true, error: errors.name, children: _jsx(Input, { name: "name", defaultValue: item.name, error: !!errors.name }) }), _jsx(FormField, { label: "Stage", children: _jsx(Select, { name: "stage", defaultValue: currentStage, children: STAGES.map((s) => (_jsx("option", { value: s, children: s }, s))) }) })] }), _jsx(FormField, { label: "Problem Statement", children: _jsx("textarea", { name: "problem_statement", rows: 3, defaultValue: item.problem_statement ?? "", className: "w-full rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-brand" }) }), _jsx(FormField, { label: "Target Market", children: _jsx(Input, { name: "target_market", defaultValue: item.target_market ?? "" }) }), _jsxs("div", { className: "space-y-4 rounded-lg border border-surface-2/30 bg-surface-1/30 p-4", children: [_jsx("p", { className: "text-xs font-semibold uppercase tracking-wide text-zinc-500", children: "Scoring Criteria" }), SCORES.map((s) => {
                                             const val = item[s.field] ?? 0;
                                             return (_jsxs("div", { className: "space-y-1", children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("label", { className: "text-xs font-medium text-zinc-400", children: [s.label, " ", _jsxs("span", { className: "text-zinc-600", children: ["(0\u2013", s.max, ")"] }), _jsxs("span", { className: "ml-1 text-zinc-600", children: ["\u2014 ", s.hint] })] }), _jsx("input", { type: "number", name: s.field, defaultValue: val, min: 0, max: s.max, className: "w-14 rounded border border-surface-2/50 bg-surface-1 px-2 py-0.5 text-right font-mono text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-brand" })] }), _jsx(ScoreBar, { value: val, max: s.max })] }, s.field));
-                                        })] }), _jsx(FormField, { label: "Notes", children: _jsx("textarea", { name: "notes", rows: 3, defaultValue: item.notes ?? "", className: "w-full rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-brand" }) }), _jsxs("div", { className: "flex items-center gap-3 pt-2", children: [_jsx(Button, { type: "submit", children: "Save Changes" }), _jsx(Link, { to: "/dashboard/pipeline", children: _jsx(Button, { type: "button", variant: "secondary", children: "Back" }) })] })] }), scaffoldPrompt && (_jsx(ScaffoldSection, { prompt: scaffoldPrompt, projectName: item.name }))] }) })] }));
+                                        })] }), _jsx(FormField, { label: "Notes", children: _jsx("textarea", { name: "notes", rows: 3, defaultValue: item.notes ?? "", className: "w-full rounded-lg border border-surface-2/50 bg-surface-1 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-brand" }) }), _jsxs("div", { className: "flex items-center gap-3 pt-2", children: [_jsx(Button, { type: "submit", children: "Save Changes" }), _jsx(Link, { to: "/dashboard/ventures/pipeline", children: _jsx(Button, { type: "button", variant: "secondary", children: "Back" }) })] })] }), scaffoldPrompt && (_jsx(ScaffoldSection, { prompt: scaffoldPrompt, projectName: item.name }))] }) })] }));
 }
 function ScaffoldSection({ prompt, projectName }) {
     return (_jsxs("div", { className: "rounded-xl border border-brand/20 bg-brand/5 p-5", children: [_jsxs("div", { className: "mb-4 flex items-center justify-between", children: [_jsxs("div", { children: [_jsx("h2", { className: "text-sm font-semibold text-brand", children: "\uD83D\uDE80 Claude Code Scaffold" }), _jsxs("p", { className: "text-xs text-zinc-500 mt-0.5", children: ["Copy this prompt into Claude Code to scaffold ", projectName, "."] })] }), _jsx("button", { type: "button", onClick: () => navigator.clipboard.writeText(prompt), className: "rounded-lg border border-brand/30 bg-brand/10 px-3 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/20", children: "Copy Prompt" })] }), _jsx("pre", { className: "max-h-96 overflow-y-auto rounded-lg bg-surface-0 p-4 font-mono text-xs text-zinc-400 whitespace-pre-wrap", children: prompt })] }));

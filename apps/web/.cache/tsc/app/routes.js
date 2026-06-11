@@ -3,6 +3,10 @@ export default [
     layout("routes/_marketing.tsx", [
         index("routes/_marketing._index.tsx"),
     ]),
+    route("api/*", "routes/api.$.tsx"),
+    route("book/:slug", "routes/book.$slug.tsx"),
+    route("book/cancel/:bookingId", "routes/book.cancel.$bookingId.tsx"),
+    route("book/reschedule/:bookingId", "routes/book.reschedule.$bookingId.tsx"),
     route("auth/login", "routes/auth.login.tsx"),
     route("auth/logout", "routes/auth.logout.tsx"),
     route("dashboard", "routes/dashboard.tsx", [
@@ -10,6 +14,13 @@ export default [
         route("ventures", "routes/dashboard.ventures.tsx", [
             index("routes/dashboard.ventures._index.tsx"),
             route("new", "routes/dashboard.ventures.new.tsx"),
+            route("pipeline", "routes/dashboard.pipeline.tsx", [
+                index("routes/dashboard.pipeline._index.tsx"),
+                route("new", "routes/dashboard.pipeline.new.tsx"),
+                route(":id", "routes/dashboard.pipeline.$id.tsx", [
+                    route("evaluation", "routes/dashboard.pipeline.$id.evaluation.tsx"),
+                ]),
+            ]),
             route(":slug", "routes/dashboard.ventures.$slug.tsx", [
                 index("routes/dashboard.ventures.$slug._index.tsx"),
                 route("stack", "routes/dashboard.ventures.$slug.stack.tsx"),
@@ -19,11 +30,6 @@ export default [
                 route("tasks", "routes/dashboard.ventures.$slug.tasks.tsx"),
                 route("docs", "routes/dashboard.ventures.$slug.docs.tsx"),
             ]),
-        ]),
-        route("pipeline", "routes/dashboard.pipeline.tsx", [
-            index("routes/dashboard.pipeline._index.tsx"),
-            route("new", "routes/dashboard.pipeline.new.tsx"),
-            route(":id", "routes/dashboard.pipeline.$id.tsx"),
         ]),
         route("revenue", "routes/dashboard.revenue.tsx", [
             index("routes/dashboard.revenue._index.tsx"),
@@ -50,6 +56,13 @@ export default [
         route("knowledge", "routes/dashboard.knowledge.tsx", [
             index("routes/dashboard.knowledge._index.tsx"),
             route("new", "routes/dashboard.knowledge.new.tsx"),
+            route("captures", "routes/dashboard.knowledge.captures.tsx"),
+            route("feeds", "routes/dashboard.knowledge.feeds.tsx"),
+            route("content", "routes/dashboard.content.tsx", [
+                index("routes/dashboard.content._index.tsx"),
+                route("new", "routes/dashboard.content.new.tsx"),
+                route(":id", "routes/dashboard.content.$id.tsx"),
+            ]),
             route(":slug", "routes/dashboard.knowledge.$slug.tsx"),
         ]),
         route("agents", "routes/dashboard.agents.tsx", [
@@ -59,20 +72,39 @@ export default [
                 route(":id", "routes/dashboard.agents.runs.$id.tsx"),
             ]),
             route("content", "routes/dashboard.agents.content.tsx"),
+            route("performance", "routes/dashboard.agents.performance.tsx"),
             route(":slug", "routes/dashboard.agents.$slug.tsx"),
         ]),
         route("calendar", "routes/dashboard.calendar.tsx", [
             index("routes/dashboard.calendar._index.tsx"),
+            route("booking-links", "routes/dashboard.calendar.booking-links.tsx"),
+            route("bookings", "routes/dashboard.calendar.bookings.tsx"),
             route(":id", "routes/dashboard.calendar.$id.tsx"),
         ]),
         route("inbox", "routes/dashboard.inbox.tsx", [
             index("routes/dashboard.inbox._index.tsx"),
+            route("sync", "routes/dashboard.inbox.sync.tsx"),
             route("compose", "routes/dashboard.inbox.compose.tsx"),
             route("draft-ai", "routes/dashboard.inbox.draft-ai.tsx"),
+            route("send", "routes/dashboard.inbox.send.tsx"),
+            route("bulk", "routes/dashboard.inbox.bulk.tsx"),
+            route("snippets", "routes/dashboard.inbox.snippets.tsx"),
+            route("templates", "routes/dashboard.inbox.templates.tsx"),
             route(":id", "routes/dashboard.inbox.$id.tsx", [
                 route("star", "routes/dashboard.inbox.$id.star.tsx"),
+                route("snooze", "routes/dashboard.inbox.$id.snooze.tsx"),
             ]),
         ]),
+        route("learning", "routes/dashboard.learning.tsx", [
+            index("routes/dashboard.learning._index.tsx"),
+            route("progress", "routes/dashboard.learning.progress.tsx"),
+            route("tutor", "routes/dashboard.learning.tutor.tsx"),
+            route("generate", "routes/dashboard.learning.generate.tsx"),
+            route("path/:slug", "routes/dashboard.learning.path.$slug.tsx"),
+            route("lesson/:id", "routes/dashboard.learning.lesson.$id.tsx"),
+        ]),
+        route("chat", "routes/dashboard.chat.tsx"),
+        route("analytics", "routes/dashboard.analytics.tsx"),
         route("settings", "routes/dashboard.settings.tsx", [
             route("stripe", "routes/dashboard.settings.stripe.tsx"),
             route("expenses", "routes/dashboard.settings.expenses.tsx"),

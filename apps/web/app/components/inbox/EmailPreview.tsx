@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useFetcher } from 'react-router';
+import { EmailHtmlFrame } from './EmailHtmlFrame';
 import {
   Star, Archive, Trash2, Clock, Reply, ReplyAll, Forward,
   ChevronDown, ChevronUp, MoreHorizontal, X,
@@ -178,7 +179,7 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward, o
           {/* Body */}
           <div className="prose prose-invert prose-sm max-w-none">
             {email.body_html ? (
-              <div dangerouslySetInnerHTML={{ __html: email.body_html }} />
+              <EmailHtmlFrame html={email.body_html} />
             ) : email.body_text ? (
               <pre className="whitespace-pre-wrap font-sans text-sm text-zinc-300">{email.body_text}</pre>
             ) : email.snippet ? (

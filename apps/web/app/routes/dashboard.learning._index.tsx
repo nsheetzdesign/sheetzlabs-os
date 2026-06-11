@@ -2,10 +2,10 @@ import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, Link } from "react-router";
 import { BookOpen, Clock, BarChart, Sparkles } from "lucide-react";
 import * as Icons from "lucide-react";
+import { apiFetch } from "~/lib/api";
 
-export async function loader({ context }: LoaderFunctionArgs) {
-  const apiUrl = context.cloudflare.env.API_URL;
-  const response = await fetch(`${apiUrl}/learning/paths`);
+export async function loader({ request, context }: LoaderFunctionArgs) {
+  const response = await apiFetch(request, context.cloudflare.env, `/learning/paths`);
 
   if (!response.ok) {
     return { paths: [], error: "Failed to load paths" };

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ArrowLeft, Play, Clock, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 import { Button } from "~/components/ui/Button";
 
 const STATUS_META: Record<string, { color: string; label: string; Icon: React.ComponentType<{ className?: string }> }> = {
@@ -104,8 +105,7 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
 
   if (intent === "run") {
     // Fire via API — web can't hold long-running execution
-    const apiUrl = context.cloudflare.env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
-    await fetch(`${apiUrl}/agents/${params.slug}/run`, { method: "POST" });
+    await apiFetch(request, context.cloudflare.env, `/agents/${params.slug}/run`, { method: "POST" });
   }
 
   return null;

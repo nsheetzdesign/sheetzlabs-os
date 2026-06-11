@@ -1,7 +1,20 @@
 import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
+import { z } from "zod";
 import { guestConfirmationEmail, hostNotificationEmail, cancellationEmail, rescheduleConfirmationEmail } from "../lib/booking-emails";
 import { sendBookingEmail } from "../lib/send-booking-email";
+import { escapeHtml } from "../lib/escape";
+import {
+  computeSlotsForDate,
+  zonedTimeToUtc,
+  utcToZonedDateStr,
+  type AvailabilityRules,
+  type BusyInterval,
+} from "../lib/slots";
+
+interface RateLimit {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
 
 type Bindings = {
   SUPABASE_URL: string;
@@ -9,11 +22,98 @@ type Bindings = {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   RESEND_API_KEY: string;
+  BOOKING_RATE_LIMITER?: RateLimit;
+  BOOKING_SLOTS_RATE_LIMITER?: RateLimit;
 };
 
 type HonoEnv = { Bindings: Bindings };
 
 const booking = new Hono<HonoEnv>();
+
+// ── Input validation (BK-4) ──────────────────────────────────────────────────
+
+const bookingCreateSchema = z.object({
+  guest_name: z.string().trim().min(1).max(120),
+  guest_email: z.string().trim().email().max(254),
+  guest_notes: z.string().max(2000).optional(),
+  scheduled_at: z.string().datetime({ offset: true }),
+  timezone: z.string().max(64).optional(),
+});
+
+const rescheduleSchema = z.object({
+  scheduled_at: z.string().datetime({ offset: true }),
+  timezone: z.string().max(64).optional(),
+});
+
+function zodErrors(error: z.ZodError): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const issue of error.issues) {
+    const key = issue.path.join(".") || "_";
+    if (!out[key]) out[key] = issue.message;
+  }
+  return out;
+}
+
+// ── Rate limiting (BK-5) ──────────────────────────────────────────────────────
+
+/**
+ * Returns true if the request is allowed. If no rate-limit binding is configured
+ * (e.g. plan without the unsafe binding), fails open with a warning — see summary.
+ */
+async function checkRateLimit(limiter: RateLimit | undefined, key: string): Promise<boolean> {
+  if (!limiter) return true;
+  try {
+    const { success } = await limiter.limit({ key });
+    return success;
+  } catch {
+    return true;
+  }
+}
+
+function clientIp(c: { req: { header: (n: string) => string | undefined } }): string {
+  return c.req.header("CF-Connecting-IP") || c.req.header("x-forwarded-for") || "unknown";
+}
+
+// ── Busy-time fetch (fails closed, BK-3) ──────────────────────────────────────
+
+/**
+ * Fetch busy intervals for `date` (host-timezone calendar date) from the host's
+ * primary Google Calendar. Returns ok:false on any token/HTTP failure so callers
+ * can fail closed rather than offering every slot as free.
+ */
+async function fetchBusyForDate(
+  account: Record<string, unknown>,
+  env: Bindings,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  date: string,
+  tz: string
+): Promise<{ ok: boolean; busy: BusyInterval[] }> {
+  try {
+    const accessToken = await getValidAccessToken(account, env, supabase);
+    const startOfDay = zonedTimeToUtc(date, "00:00", tz);
+    const endOfDay = new Date(zonedTimeToUtc(date, "00:00", tz).getTime() + 24 * 60 * 60 * 1000);
+
+    const calRes = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
+        `timeMin=${startOfDay.toISOString()}&timeMax=${endOfDay.toISOString()}&singleEvents=true`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    if (!calRes.ok) return { ok: false, busy: [] };
+
+    const calData = (await calRes.json()) as {
+      items?: Array<{ start: { dateTime?: string; date?: string }; end: { dateTime?: string; date?: string } }>;
+    };
+    const busy: BusyInterval[] = (calData.items ?? []).map((e) => ({
+      start: new Date(e.start.dateTime ?? e.start.date ?? ""),
+      end: new Date(e.end.dateTime ?? e.end.date ?? ""),
+    }));
+    return { ok: true, busy };
+  } catch {
+    return { ok: false, busy: [] };
+  }
+}
 
 // ── Default availability ────────────────────────────────────────────────────
 
@@ -35,13 +135,6 @@ const DEFAULT_AVAILABILITY = {
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-function parseTime(date: string, time: string): Date {
-  const [hours, minutes] = time.split(":").map(Number);
-  const d = new Date(date + "T00:00:00");
-  d.setHours(hours, minutes, 0, 0);
-  return d;
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getValidAccessToken(
@@ -127,11 +220,25 @@ booking.post("/links", async (c) => {
 booking.patch("/links/:id", async (c) => {
   const { id } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  const body = await c.req.json();
+  const body = await c.req.json<{
+    title?: string;
+    description?: string;
+    duration_minutes?: number;
+    availability_rules?: object;
+    is_active?: boolean;
+  }>();
+
+  // Explicit column allowlist — never trust the raw body (XC-1 mass assignment).
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (body.title !== undefined) updates.title = body.title;
+  if (body.description !== undefined) updates.description = body.description;
+  if (body.duration_minutes !== undefined) updates.duration_minutes = body.duration_minutes;
+  if (body.availability_rules !== undefined) updates.availability_rules = body.availability_rules;
+  if (body.is_active !== undefined) updates.is_active = body.is_active;
 
   const { data, error } = await supabase
     .from("booking_links")
-    .update({ ...body, updated_at: new Date().toISOString() })
+    .update(updates)
     .eq("id", id)
     .select()
     .single();
@@ -215,6 +322,25 @@ booking.delete("/bookings/:bookingId", async (c) => {
   return c.json({ success: true });
 });
 
+// ── Public: rate limiting ─────────────────────────────────────────────────────
+// Mutations (create / cancel / reschedule) are tightly limited per IP; slot
+// display gets a looser limit. Keyed by CF-Connecting-IP.
+booking.use("/public/*", async (c, next) => {
+  const method = c.req.method;
+  const path = c.req.path;
+  const ip = clientIp(c);
+
+  if (method === "POST") {
+    const allowed = await checkRateLimit(c.env.BOOKING_RATE_LIMITER, `book:${ip}`);
+    if (!allowed) return c.json({ error: "Too many requests. Please try again shortly." }, 429);
+  } else if (path.endsWith("/slots")) {
+    const allowed = await checkRateLimit(c.env.BOOKING_SLOTS_RATE_LIMITER, `slots:${ip}`);
+    if (!allowed) return c.json({ error: "Too many requests. Please try again shortly." }, 429);
+  }
+
+  return next();
+});
+
 // ── Public: Booking Flow ──────────────────────────────────────────────────────
 
 // Get link info by slug (no auth)
@@ -224,7 +350,7 @@ booking.get("/public/:slug", async (c) => {
 
   const { data: link, error } = await supabase
     .from("booking_links")
-    .select("id, slug, title, description, duration_minutes, availability_rules, is_active, calendar_account_id")
+    .select("id, slug, title, description, duration_minutes, availability_rules, is_active")
     .eq("slug", slug)
     .eq("is_active", true)
     .single();
@@ -250,62 +376,23 @@ booking.get("/public/:slug/slots", async (c) => {
 
   if (!link) return c.json({ error: "Booking link not found" }, 404);
 
-  const rules = link.availability_rules as typeof DEFAULT_AVAILABILITY;
-  const dayName = new Date(date + "T12:00:00").toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
-  const dayRules = rules.days?.[dayName as keyof typeof rules.days];
-
-  if (!dayRules?.enabled) return c.json({ slots: [] });
-
-  // Fetch existing Google Calendar events for busy periods
-  let busySlots: Array<{ start: Date; end: Date }> = [];
-  try {
-    const account = link.calendar_accounts as Record<string, unknown>;
-    const accessToken = await getValidAccessToken(account, c.env, supabase);
-
-    const startOfDay = new Date(date + "T00:00:00");
-    const endOfDay = new Date(date + "T23:59:59");
-
-    const calRes = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
-        `timeMin=${startOfDay.toISOString()}&timeMax=${endOfDay.toISOString()}&singleEvents=true`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-
-    const calData = (await calRes.json()) as { items?: Array<{ start: { dateTime?: string; date?: string }; end: { dateTime?: string; date?: string } }> };
-    busySlots = (calData.items ?? []).map((e) => ({
-      start: new Date(e.start.dateTime ?? e.start.date ?? ""),
-      end: new Date(e.end.dateTime ?? e.end.date ?? ""),
-    }));
-  } catch {
-    // If we can't fetch calendar, still return slots (no conflicts)
-  }
-
-  // Generate available time slots
-  const slots: string[] = [];
+  const rules = link.availability_rules as AvailabilityRules;
+  const tz = rules.timezone || "America/Chicago";
   const duration = link.duration_minutes as number;
-  const bufferAfter = rules.buffer_after_minutes ?? 15;
-  const minNoticeMs = (rules.minimum_notice_hours ?? 24) * 60 * 60 * 1000;
-  const now = new Date();
 
-  for (const slot of dayRules.slots) {
-    let current = parseTime(date, slot.start);
-    const slotEnd = parseTime(date, slot.end);
-
-    while (current.getTime() + duration * 60000 <= slotEnd.getTime()) {
-      const end = new Date(current.getTime() + duration * 60000);
-
-      const hasConflict = busySlots.some(
-        (busy) => current < busy.end && end > busy.start
-      );
-      const hasNotice = current.getTime() - now.getTime() >= minNoticeMs;
-
-      if (!hasConflict && hasNotice) {
-        slots.push(current.toISOString());
-      }
-
-      current = new Date(current.getTime() + (duration + bufferAfter) * 60000);
-    }
+  // Fail closed: if we can't read the host's calendar, do NOT offer slots.
+  const { ok, busy } = await fetchBusyForDate(
+    link.calendar_accounts as Record<string, unknown>,
+    c.env,
+    supabase,
+    date,
+    tz
+  );
+  if (!ok) {
+    return c.json({ error: "AVAILABILITY_UNAVAILABLE" }, 503);
   }
+
+  const slots = computeSlotsForDate({ rules, date, durationMinutes: duration, busy });
 
   return c.json({ slots, date, duration: link.duration_minutes });
 });
@@ -386,16 +473,17 @@ booking.post("/public/cancel/:bookingId", async (c) => {
 booking.post("/public/:slug", async (c) => {
   const { slug } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  const body = await c.req.json<{
-    guest_name: string;
-    guest_email: string;
-    guest_notes?: string;
-    scheduled_at: string;
-    timezone?: string;
-  }>();
 
-  if (!body.guest_name || !body.guest_email || !body.scheduled_at) {
-    return c.json({ error: "Missing required fields" }, 400);
+  const parsed = bookingCreateSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
+  }
+  const body = parsed.data;
+
+  // Strict instant parse (zod already enforced ISO; double-check it's a real date).
+  const scheduledAt = new Date(body.scheduled_at);
+  if (Number.isNaN(scheduledAt.getTime())) {
+    return c.json({ error: "Invalid input", fields: { scheduled_at: "Invalid date" } }, 422);
   }
 
   const { data: link } = await supabase
@@ -407,9 +495,34 @@ booking.post("/public/:slug", async (c) => {
 
   if (!link) return c.json({ error: "Booking link not found" }, 404);
 
-  const timezone = body.timezone ?? "America/Chicago";
+  const guestTimezone = body.timezone ?? "America/Chicago";
+  const rules = link.availability_rules as AvailabilityRules;
+  const hostTz = rules.timezone || "America/Chicago";
 
-  // Create booking record
+  // Re-validate the requested time against live availability in the HOST tz (BK-1/2/3).
+  const slotDate = utcToZonedDateStr(scheduledAt, hostTz);
+  const { ok, busy } = await fetchBusyForDate(
+    link.calendar_accounts as Record<string, unknown>,
+    c.env,
+    supabase,
+    slotDate,
+    hostTz
+  );
+  if (!ok) return c.json({ error: "AVAILABILITY_UNAVAILABLE" }, 503);
+
+  const validSlots = computeSlotsForDate({
+    rules,
+    date: slotDate,
+    durationMinutes: link.duration_minutes as number,
+    busy,
+  });
+  const requestedMs = scheduledAt.getTime();
+  if (!validSlots.some((s) => new Date(s).getTime() === requestedMs)) {
+    return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
+  }
+
+  // Create booking record. The partial unique index on (booking_link_id,
+  // scheduled_at) WHERE status != 'cancelled' guards against the race.
   const { data: newBooking, error: bookingError } = await supabase
     .from("bookings")
     .insert({
@@ -420,13 +533,18 @@ booking.post("/public/:slug", async (c) => {
       guest_notes: body.guest_notes ?? null,
       scheduled_at: body.scheduled_at,
       duration_minutes: link.duration_minutes,
-      timezone,
+      timezone: guestTimezone,
       status: link.requires_confirmation ? "pending" : "confirmed",
     })
     .select()
     .single();
 
-  if (bookingError) return c.json({ error: bookingError.message }, 500);
+  if (bookingError) {
+    if (bookingError.code === "23505") {
+      return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
+    }
+    return c.json({ error: bookingError.message }, 500);
+  }
 
   // Create Google Calendar event with Meet link
   let meetLink: string | null = null;
@@ -444,10 +562,10 @@ booking.post("/public/:slug", async (c) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          summary: `${link.title} with ${body.guest_name}`,
-          description: body.guest_notes ?? "",
-          start: { dateTime: body.scheduled_at, timeZone: timezone },
-          end: { dateTime: eventEnd.toISOString(), timeZone: timezone },
+          summary: `${escapeHtml(link.title)} with ${escapeHtml(body.guest_name)}`,
+          description: escapeHtml(body.guest_notes ?? ""),
+          start: { dateTime: body.scheduled_at, timeZone: guestTimezone },
+          end: { dateTime: eventEnd.toISOString(), timeZone: guestTimezone },
           attendees: [{ email: body.guest_email, displayName: body.guest_name }],
           conferenceData: {
             createRequest: {
@@ -491,7 +609,7 @@ booking.post("/public/:slug", async (c) => {
     title: link.title as string,
     dateTime: new Date(body.scheduled_at),
     duration: link.duration_minutes as number,
-    timezone,
+    timezone: guestTimezone,
     bookingId: newBooking.id,
     notes: body.guest_notes,
     cancelUrl: `https://app.sheetzlabs.com/book/cancel/${newBooking.id}`,
@@ -525,35 +643,89 @@ booking.get("/public/reschedule/:bookingId", async (c) => {
 
   const { data: bk, error } = await supabase
     .from("bookings")
-    .select("id, guest_name, guest_email, guest_notes, scheduled_at, duration_minutes, timezone, status, booking_links(id, slug, title, duration_minutes, availability_rules)")
+    .select("id, guest_name, scheduled_at, duration_minutes, timezone, status, booking_links(id, slug, title, duration_minutes, availability_rules)")
     .eq("id", bookingId)
     .single();
 
   if (error || !bk) return c.json({ error: "Booking not found" }, 404);
   if (bk.status === "cancelled") return c.json({ error: "Booking is cancelled" }, 400);
 
-  return c.json({ booking: bk });
+  // BK-17: don't over-expose. The reschedule page only needs date_range_days from
+  // the rules and never reads guest_notes/guest_email — strip the rest.
+  const link = bk.booking_links as unknown as {
+    id: string;
+    slug: string;
+    title: string;
+    duration_minutes: number;
+    availability_rules: (AvailabilityRules & { date_range_days?: number }) | null;
+  };
+  const fullRules = (link?.availability_rules ?? {}) as AvailabilityRules & {
+    date_range_days?: number;
+  };
+  const trimmed = {
+    ...bk,
+    booking_links: {
+      ...link,
+      availability_rules: {
+        date_range_days: fullRules.date_range_days ?? 14,
+        timezone: fullRules.timezone ?? "America/Chicago",
+      },
+    },
+  };
+
+  return c.json({ booking: trimmed });
 });
 
 // Reschedule a booking
 booking.post("/public/reschedule/:bookingId", async (c) => {
   const { bookingId } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  const body = await c.req.json<{ scheduled_at: string; timezone?: string }>();
 
-  if (!body.scheduled_at) return c.json({ error: "New time required" }, 400);
+  const parsed = rescheduleSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
+  }
+  const body = parsed.data;
+
+  const newDateTime = new Date(body.scheduled_at);
+  if (Number.isNaN(newDateTime.getTime())) {
+    return c.json({ error: "Invalid input", fields: { scheduled_at: "Invalid date" } }, 422);
+  }
 
   const { data: bk } = await supabase
     .from("bookings")
-    .select("*, booking_links(title, calendar_accounts(email, display_name, access_token, refresh_token, token_expires_at, id))")
+    .select("*, booking_links(id, title, availability_rules, calendar_accounts(email, display_name, access_token, refresh_token, token_expires_at, id))")
     .eq("id", bookingId)
     .single();
 
   if (!bk || bk.status === "cancelled") return c.json({ error: "Booking not found or cancelled" }, 404);
 
   const oldDateTime = new Date(bk.scheduled_at as string);
-  const newDateTime = new Date(body.scheduled_at);
   const newTimezone = body.timezone ?? (bk.timezone as string);
+
+  // Re-validate the new time against live availability in the host tz (BK-1/2/3).
+  const rules = bk.booking_links.availability_rules as AvailabilityRules;
+  const hostTz = rules.timezone || "America/Chicago";
+  const slotDate = utcToZonedDateStr(newDateTime, hostTz);
+  const { ok, busy } = await fetchBusyForDate(
+    bk.booking_links.calendar_accounts as Record<string, unknown>,
+    c.env,
+    supabase,
+    slotDate,
+    hostTz
+  );
+  if (!ok) return c.json({ error: "AVAILABILITY_UNAVAILABLE" }, 503);
+
+  const validSlots = computeSlotsForDate({
+    rules,
+    date: slotDate,
+    durationMinutes: bk.duration_minutes as number,
+    busy,
+  });
+  const requestedMs = newDateTime.getTime();
+  if (!validSlots.some((s) => new Date(s).getTime() === requestedMs)) {
+    return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
+  }
 
   const { error: updateError } = await supabase
     .from("bookings")
@@ -566,7 +738,12 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
     })
     .eq("id", bookingId);
 
-  if (updateError) return c.json({ error: updateError.message }, 500);
+  if (updateError) {
+    if (updateError.code === "23505") {
+      return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
+    }
+    return c.json({ error: updateError.message }, 500);
+  }
 
   // Update Google Calendar event
   if (bk.calendar_event_id) {

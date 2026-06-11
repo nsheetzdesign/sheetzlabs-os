@@ -2,18 +2,30 @@ import { createClient } from "@supabase/supabase-js";
 import { executeAgent, postToLinkedIn } from "./lib/agent-engine";
 import { reminderEmail } from "./lib/booking-emails";
 import { sendBookingEmail } from "./lib/send-booking-email";
+import { runEmailSync } from "./routes/email";
 
 type Env = {
+  ENVIRONMENT: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   ANTHROPIC_API_KEY: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
   LINKEDIN_ACCESS_TOKEN: string;
   LINKEDIN_PERSON_ID: string;
   CLOUDFLARE_BILLING_TOKEN: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   API_URL: string;
+  APP_URL: string;
+  CRON_SECRET: string;
   RESEND_API_KEY: string;
 };
+
+// Header that lets the cron reach still-HTTP internal endpoints past the API's
+// auth middleware (which now rejects unauthenticated requests).
+function internalHeaders(env: Env): Record<string, string> {
+  return env.CRON_SECRET ? { "X-Internal-Secret": env.CRON_SECRET } : {};
+}
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
@@ -67,16 +79,18 @@ export default {
     // Generate daily analytics snapshot at midnight UTC
     if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
       const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
-      ctx.waitUntil(fetch(`${apiUrl}/analytics/snapshot`, { method: "POST" }));
+      ctx.waitUntil(
+        fetch(`${apiUrl}/analytics/snapshot`, { method: "POST", headers: internalHeaders(env) })
+      );
     }
 
     // Unsnooze emails every minute
     ctx.waitUntil(Promise.resolve(supabase.rpc("unsnooze_emails")));
 
-    // Auto-sync all email accounts every 5 minutes
+    // Auto-sync all email accounts every 5 minutes — call the sync logic directly
+    // instead of HTTP-fetching our own (now-authenticated) endpoint.
     if (now.getUTCMinutes() % 5 === 0) {
-      const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
-      ctx.waitUntil(fetch(`${apiUrl}/email/sync`, { method: "POST" }));
+      ctx.waitUntil(runEmailSync(env, supabase).then(() => undefined));
     }
 
     // Process booking reminders every 5 minutes
@@ -126,7 +140,10 @@ async function fetchAllFeeds(
   const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
   for (const feed of feeds ?? []) {
     try {
-      await fetch(`${apiUrl}/knowledge/feeds/${feed.id}/fetch`, { method: "POST" });
+      await fetch(`${apiUrl}/knowledge/feeds/${feed.id}/fetch`, {
+        method: "POST",
+        headers: internalHeaders(env),
+      });
     } catch {
       // continue with remaining feeds
     }

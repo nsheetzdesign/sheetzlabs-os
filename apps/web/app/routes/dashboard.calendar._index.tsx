@@ -6,6 +6,7 @@ import {
   Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar,
 } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 
 export const meta: MetaFunction = () => [{ title: "Calendar — Sheetz Labs OS" }];
 
@@ -132,10 +133,8 @@ function eventPosition(e: CalendarEvent) {
 // ── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
-  const supabase = getSupabaseClient(context.cloudflare.env);
-  const apiUrl =
-    (context.cloudflare.env as Record<string, string>).INTERNAL_API_URL ??
-    "https://api.sheetzlabs.com";
+  const env = context.cloudflare.env;
+  const supabase = getSupabaseClient(env);
 
   const url = new URL(request.url);
   const view = url.searchParams.get("view") || "week";
@@ -173,7 +172,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   const subCalendars: SubCalendarEntry[] = await Promise.all(
     (accountsRes.data ?? []).map(async (account) => {
       try {
-        const res = await fetch(`${apiUrl}/calendar/accounts/${account.id}/calendars`);
+        const res = await apiFetch(request, env, `/calendar/accounts/${account.id}/calendars`);
         const json = (await res.json()) as { calendars?: SubCalendar[] };
         return { accountId: account.id, calendars: json.calendars ?? [] };
       } catch {
@@ -190,25 +189,24 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     view,
     weekOffset,
     weekStart: start.toISOString(),
+    apiBase: (env as Record<string, string>).API_URL ?? "https://api.sheetzlabs.com",
   };
 }
 
 // ── Action ───────────────────────────────────────────────────────────────────
 
 export async function action({ request, context }: ActionFunctionArgs) {
-  const apiUrl =
-    (context.cloudflare.env as Record<string, string>).INTERNAL_API_URL ??
-    "https://api.sheetzlabs.com";
+  const env = context.cloudflare.env;
 
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
 
   if (intent === "sync") {
-    await fetch(`${apiUrl}/calendar/accounts/${fd.get("account_id")}/sync`, { method: "POST" });
+    await apiFetch(request, env, `/calendar/accounts/${fd.get("account_id")}/sync`, { method: "POST" });
   }
 
   if (intent === "create_time_block") {
-    await fetch(`${apiUrl}/calendar/time-blocks`, {
+    await apiFetch(request, env, `/calendar/time-blocks`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         task_id: fd.get("task_id"), account_id: fd.get("account_id"),
@@ -220,7 +218,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
   if (intent === "create_event") {
     const attendees = ((fd.get("attendees") as string) || "")
       .split(",").map((e) => e.trim()).filter(Boolean).map((email) => ({ email }));
-    await fetch(`${apiUrl}/calendar/events`, {
+    await apiFetch(request, env, `/calendar/events`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         account_id: fd.get("account_id"),
@@ -239,7 +237,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
   // Delete time block called from the event modal on the index page
   if (intent === "delete_time_block") {
     const eventId = fd.get("event_id") as string;
-    await fetch(`${apiUrl}/calendar/time-blocks/${eventId}`, { method: "DELETE" });
+    await apiFetch(request, env, `/calendar/time-blocks/${eventId}`, { method: "DELETE" });
   }
 
   if (intent === "update_sub_cal") {
@@ -249,7 +247,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const isVisible = fd.get("is_visible");
     if (color) updates.color = color;
     if (isVisible !== null) updates.is_visible = isVisible === "true";
-    await fetch(`${apiUrl}/calendar/sub-accounts/${subCalId}`, {
+    await apiFetch(request, env, `/calendar/sub-accounts/${subCalId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updates),
     });
@@ -262,7 +260,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const displayName = fd.get("display_name");
     if (color) updates.color = color;
     if (displayName !== null) updates.display_name = displayName || null;
-    await fetch(`${apiUrl}/calendar/accounts/${accountId}`, {
+    await apiFetch(request, env, `/calendar/accounts/${accountId}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updates),
     });
@@ -699,7 +697,7 @@ function CalendarSettingsModal({
 // ── Main Calendar Component ───────────────────────────────────────────────────
 
 export default function CalendarPage() {
-  const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart } =
+  const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart, apiBase } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher();
 
@@ -852,7 +850,7 @@ export default function CalendarPage() {
         <div className="p-3 border-t border-zinc-800 shrink-0">
           <div className="text-xs text-zinc-500 uppercase tracking-wide mb-2">Calendars</div>
           {accounts.length === 0 ? (
-            <a href="https://api.sheetzlabs.com/calendar/auth/google"
+            <a href={`${apiBase}/calendar/auth/google`}
               className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300">
               <Plus className="h-3 w-3" />Connect Google Calendar
             </a>
@@ -963,7 +961,7 @@ export default function CalendarPage() {
                 );
               })}
 
-              <a href="https://api.sheetzlabs.com/calendar/auth/google"
+              <a href={`${apiBase}/calendar/auth/google`}
                 className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1">
                 <Plus className="h-3 w-3" />Add account
               </a>

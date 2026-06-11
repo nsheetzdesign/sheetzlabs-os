@@ -1,11 +1,10 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, Link } from "react-router";
 import { BookOpen } from "lucide-react";
+import { apiFetch } from "~/lib/api";
 
-export async function loader({ context }: LoaderFunctionArgs) {
-  const pathsRes = await fetch(
-    `${context.cloudflare.env.API_URL}/learning/paths`
-  );
+export async function loader({ request, context }: LoaderFunctionArgs) {
+  const pathsRes = await apiFetch(request, context.cloudflare.env, `/learning/paths`);
   const pathsData: any = await pathsRes.json();
 
   return { paths: pathsData.paths || [] };

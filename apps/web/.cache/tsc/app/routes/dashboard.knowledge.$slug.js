@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useLoaderData, useActionData, Form, Link, redirect, data, useFetcher, } from "react-router";
 import { useState } from "react";
 import { Pin, ExternalLink, Sparkles, Clock, ArrowLeft } from "lucide-react";
+import { apiFetch } from "~/lib/api";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { FormField } from "~/components/ui/FormField";
@@ -77,9 +78,7 @@ export async function action({ request, params, context }) {
             .eq("slug", params.slug)
             .single();
         if (item) {
-            const apiUrl = context.cloudflare.env.INTERNAL_API_URL ??
-                "https://api.sheetzlabs.com";
-            const res = await fetch(`${apiUrl}/knowledge/${item.id}/summarize`, { method: "POST" });
+            const res = await apiFetch(request, context.cloudflare.env, `/knowledge/${item.id}/summarize`, { method: "POST" });
             if (res.ok) {
                 const { summary } = (await res.json());
                 return { summary };

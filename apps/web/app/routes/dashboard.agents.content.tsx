@@ -3,6 +3,7 @@ import { useLoaderData, Form, Link, useNavigation } from "react-router";
 import { ArrowLeft, Linkedin, Clock, CheckCircle, XCircle, FileText } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 import { Button } from "~/components/ui/Button";
 
 const STATUS_META: Record<string, { color: string; label: string; Icon: React.ComponentType<{ className?: string }> }> = {
@@ -62,8 +63,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
   if (intent === "post") {
     // Trigger via API
-    const apiUrl = "https://api.sheetzlabs.com";
-    await fetch(`${apiUrl}/agents/content/queue/${id}/post`, { method: "POST" });
+    await apiFetch(request, context.cloudflare.env, `/agents/content/queue/${id}/post`, { method: "POST" });
   }
 
   if (intent === "delete") {

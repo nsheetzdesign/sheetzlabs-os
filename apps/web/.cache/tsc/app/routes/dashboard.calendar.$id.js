@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ArrowLeft, Clock, MapPin, Video, Users, ExternalLink, Zap, CheckSquare, Edit2, X, } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 export const meta = ({ data }) => [
     { title: `${data?.event?.title ?? "Event"} — Calendar — Sheetz Labs OS` },
 ];
@@ -24,17 +25,16 @@ export async function loader({ params, context }) {
     return { event };
 }
 export async function action({ params, request, context }) {
-    const apiUrl = context.cloudflare.env.INTERNAL_API_URL ??
-        "https://api.sheetzlabs.com";
+    const env = context.cloudflare.env;
     const fd = await request.formData();
     const intent = fd.get("intent");
     if (intent === "prep") {
-        await fetch(`${apiUrl}/calendar/events/${params.id}/prep`, { method: "POST" });
+        await apiFetch(request, env, `/calendar/events/${params.id}/prep`, { method: "POST" });
     }
     if (intent === "edit") {
         const startRaw = fd.get("start_at");
         const endRaw = fd.get("end_at");
-        await fetch(`${apiUrl}/calendar/events/${params.id}`, {
+        await apiFetch(request, env, `/calendar/events/${params.id}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -49,7 +49,7 @@ export async function action({ params, request, context }) {
         });
     }
     if (intent === "delete_time_block") {
-        await fetch(`${apiUrl}/calendar/time-blocks/${params.id}`, { method: "DELETE" });
+        await apiFetch(request, env, `/calendar/time-blocks/${params.id}`, { method: "DELETE" });
         return new Response(null, {
             status: 302,
             headers: { Location: "/dashboard/calendar" },

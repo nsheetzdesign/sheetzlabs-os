@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { authMiddleware } from "./middleware/auth";
 import agents from "./routes/agents";
 import pipelineRouter from "./routes/pipeline";
 import stripeRouter from "./routes/stripe";
@@ -20,6 +21,9 @@ type Bindings = {
   ENVIRONMENT: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  SUPABASE_ANON_KEY: string;
+  ALLOWED_ORIGINS: string;
+  CRON_SECRET: string;
   STRIPE_PERSONAL_KEY: string;
   STRIPE_PERSONAL_WEBHOOK_SECRET: string;
   STRIPE_COLAB_KEY: string;
@@ -39,9 +43,35 @@ type Bindings = {
   API_URL: string;
 };
 
-const app = new Hono<{ Bindings: Bindings }>();
+const app = new Hono<{ Bindings: Bindings; Variables: { userId: string } }>();
 
-app.use("*", cors());
+// ── CORS ────────────────────────────────────────────────────────────────────
+// Locked to the app origin plus localhost for dev. Foreign origins are rejected.
+// All authenticated browser traffic flows through the web app's same-origin
+// `/api/*` proxy, so the only cross-origin needs here are dev tooling.
+app.use("*", (c, next) => {
+  const configured = (c.env.ALLOWED_ORIGINS ?? "https://app.sheetzlabs.com")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  return cors({
+    origin: (origin) => {
+      if (!origin) return configured[0] ?? "https://app.sheetzlabs.com";
+      if (configured.includes(origin)) return origin;
+      // Allow any localhost / 127.0.0.1 port for local development.
+      if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return origin;
+      return null;
+    },
+    allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowHeaders: ["Authorization", "Content-Type"],
+    credentials: true,
+  })(c, next);
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+// Verifies Supabase JWTs on every route except the public allowlist.
+app.use("*", authMiddleware);
 
 app.get("/", (c) => {
   return c.json({ name: "sheetzlabs-api", status: "ok" });

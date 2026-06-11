@@ -1,0 +1,64 @@
+import { useEffect, useRef, useCallback } from 'react';
+import { useRevalidator } from 'react-router';
+// Same-origin proxy (routes/api.$.tsx) — forwards to the API worker with the
+// founder's JWT server-side, so no token is exposed to client JS and no CORS.
+const API_URL = '/api';
+export function useEmailPolling({ enabled = true, interval = 60_000, newestEmailAt, } = {}) {
+    const revalidator = useRevalidator();
+    const sinceRef = useRef(newestEmailAt ?? new Date().toISOString());
+    const isPollingRef = useRef(false);
+    const lastPollRef = useRef(Date.now());
+    // Keep sinceRef up to date as new emails load
+    useEffect(() => {
+        if (newestEmailAt && newestEmailAt > sinceRef.current) {
+            sinceRef.current = newestEmailAt;
+        }
+    }, [newestEmailAt]);
+    const poll = useCallback(async () => {
+        if (isPollingRef.current)
+            return;
+        if (revalidator.state !== 'idle')
+            return;
+        isPollingRef.current = true;
+        lastPollRef.current = Date.now();
+        try {
+            const res = await fetch(`${API_URL}/email/check-updates?since=${encodeURIComponent(sinceRef.current)}`);
+            if (!res.ok)
+                return;
+            const data = (await res.json());
+            if (data.hasUpdates) {
+                if (data.newestAt)
+                    sinceRef.current = data.newestAt;
+                revalidator.revalidate();
+            }
+        }
+        catch {
+            // network errors are expected when offline — ignore
+        }
+        finally {
+            isPollingRef.current = false;
+        }
+    }, [revalidator]);
+    // Set up interval polling
+    useEffect(() => {
+        if (!enabled)
+            return;
+        const id = setInterval(poll, interval);
+        return () => clearInterval(id);
+    }, [enabled, interval, poll]);
+    // Poll immediately when the tab regains visibility after a long absence
+    useEffect(() => {
+        if (!enabled)
+            return;
+        const handleVisibility = () => {
+            if (document.visibilityState !== 'visible')
+                return;
+            const elapsed = Date.now() - lastPollRef.current;
+            if (elapsed >= interval)
+                poll();
+        };
+        document.addEventListener('visibilitychange', handleVisibility);
+        return () => document.removeEventListener('visibilitychange', handleVisibility);
+    }, [enabled, interval, poll]);
+    return { poll };
+}

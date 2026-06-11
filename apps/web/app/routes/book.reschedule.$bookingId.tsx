@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Calendar, Clock, Check, ArrowRight } from "lucide-react";
 
 export const meta: MetaFunction = () => [{ title: "Reschedule Meeting" }];
@@ -47,7 +47,8 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
     const slug = fd.get("slug") as string;
     const date = fd.get("date") as string;
     const res = await fetch(`${apiUrl}/booking/public/${slug}/slots?date=${date}`);
-    return res.json();
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ...data, status: res.status };
   }
 
   if (intent === "reschedule") {
@@ -59,7 +60,8 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scheduled_at, timezone }),
     });
-    return res.json();
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ...data, status: res.status };
   }
 
   return null;
@@ -67,12 +69,35 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
 
 export default function ReschedulePage() {
   const { booking } = useLoaderData<typeof loader>();
-  const slotFetcher = useFetcher<{ slots: string[] }>();
-  const rescheduleFetcher = useFetcher<{ success?: boolean }>();
+  const slotFetcher = useFetcher<{ slots?: string[]; status?: number }>();
+  const rescheduleFetcher = useFetcher<{ success?: boolean; status?: number; error?: string }>();
 
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
   const [step, setStep] = useState<"date" | "time">("date");
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null);
+
+  // Surface 409/422/503 instead of silently reverting the button (BK-8)
+  useEffect(() => {
+    const d = rescheduleFetcher.data;
+    if (!d || d.success) return;
+    if (d.status === 409) {
+      setRescheduleError("That time was just taken — please pick another slot.");
+      if (selectedDate) {
+        slotFetcher.submit(
+          { intent: "get_slots", slug: booking.booking_links.slug, date: selectedDate },
+          { method: "post" }
+        );
+      }
+      setSelectedTime(null);
+    } else if (d.status === 422) {
+      setRescheduleError("That time is no longer valid. Please pick another slot.");
+    } else if (d.status === 503) {
+      setRescheduleError("Availability is temporarily unavailable. Please try again in a moment.");
+    } else if (d.status && d.status >= 400) {
+      setRescheduleError("Something went wrong rescheduling. Please try again.");
+    }
+  }, [rescheduleFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const bookingLink = booking.booking_links;
   const currentDate = new Date(booking.scheduled_at);
@@ -224,8 +249,13 @@ export default function ReschedulePage() {
                   </button>
                 </div>
 
+                {rescheduleError && (
+                  <p className="text-sm text-amber-400 mb-3">{rescheduleError}</p>
+                )}
                 {slotFetcher.state === "submitting" ? (
                   <p className="text-zinc-400 text-sm">Loading available times…</p>
+                ) : slotFetcher.data?.status === 503 ? (
+                  <p className="text-amber-400 text-sm">Availability is temporarily unavailable. Please try again shortly.</p>
                 ) : !slotFetcher.data?.slots?.length ? (
                   <p className="text-zinc-400 text-sm">No available times on this date.</p>
                 ) : (

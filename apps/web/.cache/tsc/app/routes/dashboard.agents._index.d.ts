@@ -1,10 +1,10 @@
 import type { LoaderFunctionArgs } from "react-router";
 export declare function loader({ context }: LoaderFunctionArgs): Promise<{
     deptSummary: {
-        dept: "executive" | "marketing" | "product" | "finance" | "research" | "operations";
+        dept: "marketing" | "product" | "finance" | "research" | "operations" | "executive";
         agents: {
             id: string;
-            department: "executive" | "marketing" | "product" | "finance" | "research" | "operations";
+            department: "marketing" | "product" | "finance" | "research" | "operations" | "executive" | "education";
             name: string;
             slug: string;
             enabled: boolean | null;

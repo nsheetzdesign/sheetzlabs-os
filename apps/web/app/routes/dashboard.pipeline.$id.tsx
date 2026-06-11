@@ -11,6 +11,7 @@ import {
 import { Sparkles } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 import { FormField } from "~/components/ui/FormField";
 import { Input } from "~/components/ui/Input";
 import { Select } from "~/components/ui/Select";
@@ -197,7 +198,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
   // Trigger AI evaluation
   if (intent === "evaluate") {
-    await fetch(`https://api.sheetzlabs.com/pipeline/${params.id}/evaluate`, { method: "POST" });
+    await apiFetch(request, context.cloudflare.env, `/pipeline/${params.id}/evaluate`, { method: "POST" });
     return redirect(`/dashboard/ventures/pipeline/${params.id}/evaluation`);
   }
 

@@ -2,6 +2,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react
 import { useLoaderData, useFetcher, Link } from "react-router";
 import { useState } from "react";
 import { Plus, Copy, ExternalLink, Pencil, Trash2, Check, Clock, X } from "lucide-react";
+import { apiFetch } from "~/lib/api";
 
 export const meta: MetaFunction = () => [{ title: "Booking Links — Sheetz Labs OS" }];
 
@@ -34,29 +35,31 @@ type BookingLink = {
 
 type Account = { id: string; email: string; color?: string; display_name?: string };
 
-export async function loader({ context }: LoaderFunctionArgs) {
+export async function loader({ request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
-  const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
 
   const [linksRes, accountsRes] = await Promise.all([
-    fetch(`${apiUrl}/booking/links`),
-    fetch(`${apiUrl}/calendar/accounts`),
+    apiFetch(request, env, `/booking/links`),
+    apiFetch(request, env, `/calendar/accounts`),
   ]);
 
   const linksData = (await linksRes.json()) as { links: BookingLink[] };
   const accountsData = (await accountsRes.json()) as { accounts: Account[] };
 
-  return { links: linksData.links ?? [], accounts: accountsData.accounts ?? [] };
+  return {
+    links: linksData.links ?? [],
+    accounts: accountsData.accounts ?? [],
+    appUrl: env.APP_URL ?? "https://app.sheetzlabs.com",
+  };
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
-  const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
 
   if (intent === "create") {
-    await fetch(`${apiUrl}/booking/links`, {
+    await apiFetch(request, env, `/booking/links`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -71,7 +74,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
   }
 
   if (intent === "toggle") {
-    await fetch(`${apiUrl}/booking/links/${fd.get("id")}`, {
+    await apiFetch(request, env, `/booking/links/${fd.get("id")}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ is_active: fd.get("is_active") === "true" }),
@@ -79,7 +82,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
   }
 
   if (intent === "delete") {
-    await fetch(`${apiUrl}/booking/links/${fd.get("id")}`, { method: "DELETE" });
+    await apiFetch(request, env, `/booking/links/${fd.get("id")}`, { method: "DELETE" });
   }
 
   return null;
@@ -161,13 +164,14 @@ function CreateModal({ accounts, onClose }: { accounts: Account[]; onClose: () =
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function BookingLinksPage() {
-  const { links, accounts } = useLoaderData<typeof loader>();
+  const { links, accounts, appUrl } = useLoaderData<typeof loader>();
+  const bookHost = appUrl.replace(/^https?:\/\//, "");
   const fetcher = useFetcher();
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
   function copyLink(slug: string, id: string) {
-    navigator.clipboard.writeText(`https://sheetzlabs.com/book/${slug}`);
+    navigator.clipboard.writeText(`${appUrl}/book/${slug}`);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   }
@@ -225,7 +229,7 @@ export default function BookingLinksPage() {
                   </div>
                   <p className="text-xs text-zinc-500">
                     <span className="text-zinc-400">{link.duration_minutes} min</span>
-                    {" · "}sheetzlabs.com/book/{link.slug}
+                    {" · "}{bookHost}/book/{link.slug}
                   </p>
                   {link.description && (
                     <p className="text-xs text-zinc-600 mt-1 truncate">{link.description}</p>

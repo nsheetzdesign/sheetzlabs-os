@@ -1,3 +1,5 @@
+import { escapeHtml } from "./escape";
+
 export interface BookingEmailData {
   guestName: string;
   guestEmail: string;
@@ -67,7 +69,7 @@ export function guestConfirmationEmail(data: BookingEmailData): { subject: strin
       ${data.meetLink ? `<a href="${data.meetLink}" style="display: block; background-color: #10b981; color: white; text-align: center; padding: 12px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 16px;">Join Meeting</a>` : ""}
       ${data.notes ? `<div style="background-color: #27272a; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
         <p style="color: #a1a1aa; font-size: 12px; margin: 0 0 4px 0;">Your notes:</p>
-        <p style="color: #d4d4d8; font-size: 14px; margin: 0;">${data.notes}</p>
+        <p style="color: #d4d4d8; font-size: 14px; margin: 0;">${escapeHtml(data.notes)}</p>
       </div>` : ""}
       <p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">A calendar invitation has been sent to your email.</p>
       <div style="text-align: center; margin-top: 24px;">
@@ -100,8 +102,8 @@ export function hostNotificationEmail(data: BookingEmailData): { subject: string
       <div style="background-color: #27272a; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
         <h2 style="color: #fafafa; font-size: 16px; font-weight: 600; margin: 0 0 16px 0;">${data.title}</h2>
         <div style="color: #a1a1aa; font-size: 14px;">
-          <p style="margin: 0 0 8px 0;">👤 ${data.guestName}</p>
-          <p style="margin: 0 0 8px 0;">✉️ ${data.guestEmail}</p>
+          <p style="margin: 0 0 8px 0;">👤 ${escapeHtml(data.guestName)}</p>
+          <p style="margin: 0 0 8px 0;">✉️ ${escapeHtml(data.guestEmail)}</p>
           <p style="margin: 0 0 8px 0;">📅 ${date}</p>
           <p style="margin: 0 0 8px 0;">🕐 ${time} · ${data.duration} minutes</p>
           ${data.meetLink ? `<p style="margin: 0;">📹 <a href="${data.meetLink}" style="color: #10b981; text-decoration: none;">Join Google Meet</a></p>` : ""}
@@ -109,7 +111,7 @@ export function hostNotificationEmail(data: BookingEmailData): { subject: string
       </div>
       ${data.notes ? `<div style="background-color: #27272a; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
         <p style="color: #a1a1aa; font-size: 12px; margin: 0 0 4px 0;">Guest notes:</p>
-        <p style="color: #d4d4d8; font-size: 14px; margin: 0;">${data.notes}</p>
+        <p style="color: #d4d4d8; font-size: 14px; margin: 0;">${escapeHtml(data.notes)}</p>
       </div>` : ""}
       <a href="https://app.sheetzlabs.com/dashboard/calendar/bookings" style="display: block; background-color: #10b981; color: white; text-align: center; padding: 12px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500;">View Bookings</a>
     </div>
@@ -141,11 +143,11 @@ export function reminderEmail(
   <div style="max-width: 480px; margin: 0 auto;">
     <div style="background-color: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 32px;">
       <h1 style="color: #fafafa; font-size: 20px; font-weight: 600; margin: 0 0 8px 0;">⏰ Meeting ${timeLabel}</h1>
-      <p style="color: #a1a1aa; margin: 0 0 24px 0;">Hi ${recipientName.split(" ")[0]}, just a reminder about your upcoming meeting.</p>
+      <p style="color: #a1a1aa; margin: 0 0 24px 0;">Hi ${escapeHtml(recipientName.split(" ")[0])}, just a reminder about your upcoming meeting.</p>
       <div style="background-color: #27272a; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
         <h2 style="color: #fafafa; font-size: 16px; font-weight: 600; margin: 0 0 16px 0;">${data.title}</h2>
         <div style="color: #a1a1aa; font-size: 14px;">
-          <p style="margin: 0 0 8px 0;">👤 with ${otherParty}</p>
+          <p style="margin: 0 0 8px 0;">👤 with ${escapeHtml(otherParty)}</p>
           <p style="margin: 0 0 8px 0;">📅 ${date}</p>
           <p style="margin: 0 0 8px 0;">🕐 ${time} · ${data.duration} minutes</p>
           ${data.meetLink ? `<p style="margin: 0;">📹 <a href="${data.meetLink}" style="color: #10b981; text-decoration: none;">Join Google Meet</a></p>` : ""}
@@ -224,7 +226,7 @@ export function rescheduleConfirmationEmail(
         </div>
       </div>
       <h1 style="color: #fafafa; font-size: 20px; font-weight: 600; text-align: center; margin: 0 0 8px 0;">Meeting Rescheduled</h1>
-      <p style="color: #a1a1aa; text-align: center; margin: 0 0 24px 0;">Your meeting with ${otherParty} has been rescheduled.</p>
+      <p style="color: #a1a1aa; text-align: center; margin: 0 0 24px 0;">Your meeting with ${escapeHtml(otherParty)} has been rescheduled.</p>
       <div style="background-color: #27272a; border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.6;">
         <p style="color: #a1a1aa; font-size: 12px; margin: 0 0 8px 0;">Previous time:</p>
         <p style="color: #71717a; font-size: 14px; margin: 0; text-decoration: line-through;">${oldDate} at ${oldTime}</p>

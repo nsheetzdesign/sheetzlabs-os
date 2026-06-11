@@ -5,20 +5,31 @@ export declare function loader({ params, context }: LoaderFunctionArgs): Promise
         content: string | null;
         created_at: string | null;
         id: string;
+        is_pinned: boolean | null;
+        parent_id: string | null;
+        reading_time: number | null;
         slug: string;
+        source_type: string | null;
+        source_url: string | null;
+        summary: string | null;
         tags: string[] | null;
         title: string;
         type: string;
         updated_at: string | null;
         venture_id: string | null;
+        venture_id_new: string | null;
+        word_count: number | null;
         ventures: {
-            id: string;
-            name: string;
-            slug: string;
-        } | null;
-        knowledge_tags: {
             error: true;
-        } & "could not find the relation between knowledge and knowledge_tags";
+        } & "Could not embed because more than one relationship was found for 'ventures' and 'knowledge' you need to hint the column with ventures!<columnName> ?";
+        knowledge_tags: {
+            tag_id: string;
+            tags: {
+                id: string;
+                name: string;
+                color: string | null;
+            };
+        }[];
     };
     ventures: {
         id: string;

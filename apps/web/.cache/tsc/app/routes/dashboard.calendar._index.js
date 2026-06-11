@@ -1,8 +1,9 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useLoaderData, Link, useFetcher } from "react-router";
 import { useState, useEffect, useRef } from "react";
-import { RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin, Users, ExternalLink, Zap, CheckSquare, Edit2, } from "lucide-react";
+import { RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin, Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar, } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 export const meta = () => [{ title: "Calendar — Sheetz Labs OS" }];
 // ── Constants ────────────────────────────────────────────────────────────────
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -69,9 +70,8 @@ function eventPosition(e) {
 }
 // ── Loader ───────────────────────────────────────────────────────────────────
 export async function loader({ request, context }) {
-    const supabase = getSupabaseClient(context.cloudflare.env);
-    const apiUrl = context.cloudflare.env.INTERNAL_API_URL ??
-        "https://api.sheetzlabs.com";
+    const env = context.cloudflare.env;
+    const supabase = getSupabaseClient(env);
     const url = new URL(request.url);
     const view = url.searchParams.get("view") || "week";
     const weekOffset = parseInt(url.searchParams.get("offset") || "0", 10);
@@ -107,7 +107,7 @@ export async function loader({ request, context }) {
     // Fetch sub-calendars for each account (DB-backed, synced from Google)
     const subCalendars = await Promise.all((accountsRes.data ?? []).map(async (account) => {
         try {
-            const res = await fetch(`${apiUrl}/calendar/accounts/${account.id}/calendars`);
+            const res = await apiFetch(request, env, `/calendar/accounts/${account.id}/calendars`);
             const json = (await res.json());
             return { accountId: account.id, calendars: json.calendars ?? [] };
         }
@@ -123,19 +123,19 @@ export async function loader({ request, context }) {
         view,
         weekOffset,
         weekStart: start.toISOString(),
+        apiBase: env.API_URL ?? "https://api.sheetzlabs.com",
     };
 }
 // ── Action ───────────────────────────────────────────────────────────────────
 export async function action({ request, context }) {
-    const apiUrl = context.cloudflare.env.INTERNAL_API_URL ??
-        "https://api.sheetzlabs.com";
+    const env = context.cloudflare.env;
     const fd = await request.formData();
     const intent = fd.get("intent");
     if (intent === "sync") {
-        await fetch(`${apiUrl}/calendar/accounts/${fd.get("account_id")}/sync`, { method: "POST" });
+        await apiFetch(request, env, `/calendar/accounts/${fd.get("account_id")}/sync`, { method: "POST" });
     }
     if (intent === "create_time_block") {
-        await fetch(`${apiUrl}/calendar/time-blocks`, {
+        await apiFetch(request, env, `/calendar/time-blocks`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 task_id: fd.get("task_id"), account_id: fd.get("account_id"),
@@ -146,7 +146,7 @@ export async function action({ request, context }) {
     if (intent === "create_event") {
         const attendees = (fd.get("attendees") || "")
             .split(",").map((e) => e.trim()).filter(Boolean).map((email) => ({ email }));
-        await fetch(`${apiUrl}/calendar/events`, {
+        await apiFetch(request, env, `/calendar/events`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 account_id: fd.get("account_id"),
@@ -164,7 +164,35 @@ export async function action({ request, context }) {
     // Delete time block called from the event modal on the index page
     if (intent === "delete_time_block") {
         const eventId = fd.get("event_id");
-        await fetch(`${apiUrl}/calendar/time-blocks/${eventId}`, { method: "DELETE" });
+        await apiFetch(request, env, `/calendar/time-blocks/${eventId}`, { method: "DELETE" });
+    }
+    if (intent === "update_sub_cal") {
+        const subCalId = fd.get("sub_cal_id");
+        const updates = {};
+        const color = fd.get("color");
+        const isVisible = fd.get("is_visible");
+        if (color)
+            updates.color = color;
+        if (isVisible !== null)
+            updates.is_visible = isVisible === "true";
+        await apiFetch(request, env, `/calendar/sub-accounts/${subCalId}`, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updates),
+        });
+    }
+    if (intent === "update_account") {
+        const accountId = fd.get("account_id");
+        const updates = {};
+        const color = fd.get("color");
+        const displayName = fd.get("display_name");
+        if (color)
+            updates.color = color;
+        if (displayName !== null)
+            updates.display_name = displayName || null;
+        await apiFetch(request, env, `/calendar/accounts/${accountId}`, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updates),
+        });
     }
     return null;
 }
@@ -216,13 +244,30 @@ function EventDetailModal({ event, onClose }) {
     const actionUrl = `/dashboard/calendar/${event.id}`;
     return (_jsx("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm", onClick: onClose, children: _jsxs("div", { className: "w-full max-w-lg max-h-[85vh] flex flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-xl overflow-hidden", onClick: (e) => e.stopPropagation(), children: [_jsx("div", { className: "px-6 pt-5 pb-4 border-b border-zinc-800 shrink-0", children: _jsxs("div", { className: "flex items-start justify-between gap-4", children: [_jsxs("div", { className: "min-w-0", children: [_jsx("h2", { className: "text-base font-semibold text-zinc-100 break-words", children: event.title }), _jsxs("div", { className: "flex items-center gap-2 mt-1 text-xs text-zinc-400", children: [_jsx(Clock, { className: "h-3 w-3 shrink-0" }), _jsxs("span", { children: [formatDateTime(event.start_at), " \u2014 ", formatTime(event.end_at)] })] })] }), _jsxs("div", { className: "flex items-center gap-1.5 shrink-0", children: [event.is_time_block && (_jsx("span", { className: "px-2 py-0.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs rounded-md", children: "Time Block" })), !isEditing && full && (_jsx("button", { onClick: () => setIsEditing(true), className: "p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors", title: "Edit", children: _jsx(Edit2, { className: "h-3.5 w-3.5" }) })), _jsx("button", { onClick: onClose, className: "p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors", children: _jsx(X, { className: "h-4 w-4" }) })] })] }) }), _jsx("div", { className: "flex-1 overflow-y-auto", children: isLoading && !full ? (_jsx("div", { className: "flex items-center justify-center py-10 text-xs text-zinc-500", children: "Loading\u2026" })) : full ? (_jsxs("div", { className: "px-6 py-5 space-y-4", children: [isEditing && (_jsxs(editFetcher.Form, { method: "post", action: actionUrl, className: "space-y-3", children: [_jsx("input", { type: "hidden", name: "intent", value: "edit" }), videoType === "meet" && _jsx("input", { type: "hidden", name: "add_google_meet", value: "true" }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs text-zinc-500 mb-1", children: "Title" }), _jsx("input", { name: "title", defaultValue: full.title, className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500" })] }), _jsxs("div", { className: "grid grid-cols-2 gap-3", children: [_jsxs("div", { children: [_jsx("label", { className: "block text-xs text-zinc-500 mb-1", children: "Start" }), _jsx("input", { name: "start_at", type: "datetime-local", defaultValue: toLocalDateTimeInput(full.start_at), className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500" })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs text-zinc-500 mb-1", children: "End" }), _jsx("input", { name: "end_at", type: "datetime-local", defaultValue: toLocalDateTimeInput(full.end_at), className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500" })] })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs text-zinc-500 mb-1", children: "Location" }), _jsx("input", { name: "location", defaultValue: full.location ?? "", placeholder: "Location", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500" })] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs text-zinc-500 mb-1.5", children: "Video" }), _jsx("div", { className: "flex gap-2 mb-1.5", children: ["none", "meet", "teams"].map((t) => (_jsx("button", { type: "button", onClick: () => setVideoType(t), className: `px-2 py-1 text-xs rounded border transition-colors ${videoType === t ? "bg-emerald-600 border-emerald-500 text-white" : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500"}`, children: t === "none" ? "Keep" : t === "meet" ? "Google Meet" : "Teams/Zoom" }, t))) }), videoType === "teams" && (_jsx("input", { name: "meeting_link", defaultValue: full.meeting_link ?? "", placeholder: "Paste meeting URL", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500" }))] }), _jsxs("div", { children: [_jsx("label", { className: "block text-xs text-zinc-500 mb-1", children: "Description" }), _jsx("textarea", { name: "description", defaultValue: full.description ?? "", rows: 2, className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500 resize-none" })] }), _jsxs("div", { className: "flex gap-3", children: [_jsx("button", { type: "button", onClick: () => setIsEditing(false), className: "flex-1 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg transition-colors", children: "Cancel" }), _jsx("button", { type: "submit", disabled: editFetcher.state !== "idle", className: "flex-1 py-2 text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50 transition-colors", children: editFetcher.state !== "idle" ? "Saving…" : "Save Changes" })] })] })), !isEditing && (_jsxs(_Fragment, { children: [full.location && (_jsxs("div", { className: "flex items-start gap-3", children: [_jsx(MapPin, { className: "h-4 w-4 text-zinc-500 shrink-0 mt-0.5" }), _jsx("span", { className: "text-sm text-zinc-300", children: full.location })] })), full.meeting_link && (_jsxs("div", { className: "flex items-start gap-3", children: [_jsx(Video, { className: "h-4 w-4 text-zinc-500 shrink-0 mt-0.5" }), _jsxs("a", { href: full.meeting_link, target: "_blank", rel: "noopener noreferrer", className: "text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-1", children: ["Join Meeting ", _jsx(ExternalLink, { className: "h-3 w-3" })] })] })), full.description && (_jsxs("div", { children: [_jsx("div", { className: "text-xs text-zinc-500 uppercase tracking-wide mb-1.5", children: "Description" }), _jsx("div", { className: "text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed", children: full.description })] })), hasAttendees && (_jsxs("div", { children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Users, { className: "h-3.5 w-3.5 text-zinc-500" }), _jsxs("span", { className: "text-xs text-zinc-500 uppercase tracking-wide", children: ["Attendees (", full.attendees.length, ")"] })] }), _jsx("div", { className: "space-y-1.5", children: full.attendees.map((a, i) => (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: `w-2 h-2 rounded-full shrink-0 ${STATUS_COLORS[a.status ?? "needsAction"] ?? "bg-zinc-500"}` }), _jsx("span", { className: "text-sm text-zinc-300", children: a.name || a.email }), a.name && _jsx("span", { className: "text-xs text-zinc-600", children: a.email })] }, i))) })] })), hasAttendees && (_jsx("div", { className: "border border-zinc-800 rounded-lg px-4 py-3", children: _jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("div", { children: [_jsxs("div", { className: "text-sm font-medium text-zinc-200 flex items-center gap-2", children: [_jsx(Zap, { className: "h-3.5 w-3.5 text-emerald-400" }), "AI Meeting Prep"] }), _jsx("div", { className: "text-xs text-zinc-500 mt-0.5", children: "Research attendees & generate briefing" })] }), full.knowledge ? (_jsxs(Link, { to: `/dashboard/knowledge/${full.knowledge.id}`, onClick: onClose, className: "text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-1", children: ["View ", _jsx(ExternalLink, { className: "h-3 w-3" })] })) : (_jsxs(actionFetcher.Form, { method: "post", action: actionUrl, children: [_jsx("input", { type: "hidden", name: "intent", value: "prep" }), _jsx("button", { type: "submit", disabled: actionFetcher.state !== "idle" || full.ai_prep_generated, className: "px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded-md disabled:opacity-50 transition-colors", children: full.ai_prep_generated ? "Generating…" : "Generate Brief" })] }))] }) })), full.tasks && (_jsxs("div", { children: [_jsx("div", { className: "text-xs text-zinc-500 uppercase tracking-wide mb-1.5", children: "Linked Task" }), _jsxs(Link, { to: `/dashboard/tasks/${full.tasks.id}`, onClick: onClose, className: "flex items-center gap-2 text-sm text-zinc-300 hover:text-emerald-400 transition-colors", children: [_jsx(CheckSquare, { className: "h-3.5 w-3.5 text-zinc-500" }), full.tasks.title] })] })), full.is_time_block && (_jsxs(actionFetcher.Form, { method: "post", onSubmit: onClose, children: [_jsx("input", { type: "hidden", name: "intent", value: "delete_time_block" }), _jsx("input", { type: "hidden", name: "event_id", value: event.id }), _jsx("button", { type: "submit", className: "text-xs text-red-500 hover:text-red-400 transition-colors", children: "Remove time block" })] }))] }))] })) : null })] }) }));
 }
+// ── Calendar Account Settings Modal ──────────────────────────────────────────
+function CalendarSettingsModal({ account, onClose, }) {
+    const fetcher = useFetcher();
+    const [color, setColor] = useState(account.color ?? "#2FE8B6");
+    const [displayName, setDisplayName] = useState(account.display_name ?? "");
+    function handleSave() {
+        const fd = new FormData();
+        fd.set("intent", "update_account");
+        fd.set("account_id", account.id);
+        fd.set("color", color);
+        fd.set("display_name", displayName);
+        fetcher.submit(fd, { method: "post" });
+        onClose();
+    }
+    return (_jsx("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm", onClick: onClose, children: _jsxs("div", { className: "w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-xl p-6 shadow-xl", onClick: (e) => e.stopPropagation(), children: [_jsxs("div", { className: "flex items-center justify-between mb-4", children: [_jsx("h2", { className: "text-sm font-semibold text-zinc-100", children: "Calendar Settings" }), _jsx("button", { onClick: onClose, className: "text-zinc-500 hover:text-zinc-200", children: _jsx(X, { className: "h-4 w-4" }) })] }), _jsx("p", { className: "text-xs text-zinc-500 mb-4", children: account.email }), _jsxs("div", { className: "mb-4", children: [_jsx("label", { className: "block text-xs text-zinc-400 mb-1.5", children: "Display Name (optional)" }), _jsx("input", { type: "text", value: displayName, onChange: (e) => setDisplayName(e.target.value), placeholder: account.email.split("@")[0], className: "w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-200 text-sm placeholder-zinc-500 focus:outline-none focus:border-emerald-500" })] }), _jsxs("div", { className: "mb-6", children: [_jsx("label", { className: "block text-xs text-zinc-400 mb-2", children: "Account Color" }), _jsx("div", { className: "grid grid-cols-5 gap-3", children: COLOR_SWATCHES.map((c) => (_jsx("button", { type: "button", onClick: () => setColor(c), className: `w-10 h-10 rounded-lg flex items-center justify-center transition-all hover:scale-110 hover:ring-2 hover:ring-white/50 ${color === c ? "ring-2 ring-white ring-offset-2 ring-offset-zinc-900 scale-110" : ""}`, style: { backgroundColor: c }, title: c, children: color === c && _jsx(Check, { className: "h-5 w-5 text-white drop-shadow" }) }, c))) })] }), _jsxs("div", { className: "flex gap-3", children: [_jsx("button", { onClick: onClose, className: "flex-1 py-2 text-xs text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg", children: "Cancel" }), _jsx("button", { onClick: handleSave, className: "flex-1 py-2 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg", children: "Save" })] })] }) }));
+}
 // ── Main Calendar Component ───────────────────────────────────────────────────
-export default function Calendar() {
-    const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart } = useLoaderData();
+export default function CalendarPage() {
+    const { events, accounts, tasks, subCalendars, view, weekOffset, weekStart, apiBase } = useLoaderData();
     const fetcher = useFetcher();
     const [draggedTask, setDraggedTask] = useState(null);
     const [newEventModal, setNewEventModal] = useState(null);
     const [selectedEvent, setSelectedEvent] = useState(null);
+    const [settingsAccount, setSettingsAccount] = useState(null);
     // Sub-calendar visibility + color overrides (local state)
     const [hiddenSubCals, setHiddenSubCals] = useState(new Set());
     const [subCalColors, setSubCalColors] = useState({});
@@ -235,13 +280,20 @@ export default function Calendar() {
         const entry = subCalendars.find((s) => s.accountId === accountId);
         return entry?.calendars.find((c) => c.external_id === googleCalId);
     }
-    // Build sub-cal color (user override first, then DB color, then account color)
+    // Build event color: local session override → account color → sub-cal DB color → default
     function getSubCalColor(googleCalId, accountId) {
         const sub = findSubCal(googleCalId, accountId);
-        if (sub)
-            return subCalColors[sub.id] ?? sub.color;
+        // Local override (sidebar color picker) always wins
+        if (sub && subCalColors[sub.id])
+            return subCalColors[sub.id];
+        // Account color is the primary setting (CalendarSettingsModal)
         const account = accounts.find((a) => a.id === accountId);
-        return account?.color ?? "#2FE8B6";
+        if (account?.color)
+            return account.color;
+        // Sub-cal DB color as fallback
+        if (sub?.color)
+            return sub.color;
+        return "#2FE8B6";
     }
     // Filter events by hidden sub-cals (hiddenSubCals stores DB UUIDs)
     const visibleEvents = events.filter((e) => {
@@ -312,20 +364,29 @@ export default function Calendar() {
     }
     const prevOffset = weekOffset - 1;
     const nextOffset = weekOffset + 1;
-    return (_jsxs("div", { className: "flex h-full overflow-hidden", onClick: () => setColorPickerFor(null), children: [newEventModal && accounts.length > 0 && (_jsx(NewEventModal, { accounts: accounts, defaultStart: newEventModal.start, defaultEnd: newEventModal.end, onClose: () => setNewEventModal(null) })), selectedEvent && (_jsx(EventDetailModal, { event: selectedEvent, onClose: () => setSelectedEvent(null) })), _jsxs("aside", { className: "w-56 shrink-0 border-r border-zinc-800 flex flex-col overflow-hidden", children: [_jsxs("div", { className: "p-4 border-b border-zinc-800 shrink-0", children: [_jsx("h2", { className: "text-xs font-semibold text-zinc-300 mb-0.5", children: "Unscheduled Tasks" }), _jsx("p", { className: "text-xs text-zinc-500", children: "Drag onto calendar to block time" })] }), _jsxs("div", { className: "flex-1 overflow-y-auto p-3 space-y-1.5 min-h-0", children: [tasks.length === 0 && _jsx("p", { className: "text-xs text-zinc-500 italic", children: "All tasks scheduled" }), tasks.map((task) => (_jsxs("div", { draggable: true, onDragStart: () => setDraggedTask({ id: task.id, title: task.title }), onDragEnd: () => setDraggedTask(null), className: "p-2 bg-zinc-900 border border-zinc-800 rounded cursor-grab hover:border-zinc-600 transition-colors select-none", children: [_jsx("div", { className: "text-xs font-medium truncate text-zinc-200", children: task.title }), task.due_date && (_jsxs("div", { className: "text-xs text-zinc-500 mt-0.5", children: ["Due ", new Date(task.due_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })] }))] }, task.id)))] }), _jsxs("div", { className: "p-3 border-t border-zinc-800 shrink-0", children: [_jsx("div", { className: "text-xs text-zinc-500 uppercase tracking-wide mb-2", children: "Calendars" }), accounts.length === 0 ? (_jsxs("a", { href: "https://api.sheetzlabs.com/calendar/auth/google", className: "flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300", children: [_jsx(Plus, { className: "h-3 w-3" }), "Connect Google Calendar"] })) : (_jsxs("div", { className: "space-y-3", children: [accounts.map((account) => {
+    return (_jsxs("div", { className: "flex h-full overflow-hidden", onClick: () => setColorPickerFor(null), children: [newEventModal && accounts.length > 0 && (_jsx(NewEventModal, { accounts: accounts, defaultStart: newEventModal.start, defaultEnd: newEventModal.end, onClose: () => setNewEventModal(null) })), selectedEvent && (_jsx(EventDetailModal, { event: selectedEvent, onClose: () => setSelectedEvent(null) })), settingsAccount && (_jsx(CalendarSettingsModal, { account: settingsAccount, onClose: () => setSettingsAccount(null) })), _jsxs("aside", { className: "w-56 shrink-0 border-r border-zinc-800 flex flex-col overflow-hidden", children: [_jsxs("div", { className: "p-4 border-b border-zinc-800 shrink-0", children: [_jsx("h2", { className: "text-xs font-semibold text-zinc-300 mb-0.5", children: "Unscheduled Tasks" }), _jsx("p", { className: "text-xs text-zinc-500", children: "Drag onto calendar to block time" })] }), _jsxs("div", { className: "flex-1 overflow-y-auto p-3 space-y-1.5 min-h-0", children: [tasks.length === 0 && _jsx("p", { className: "text-xs text-zinc-500 italic", children: "All tasks scheduled" }), tasks.map((task) => (_jsxs("div", { draggable: true, onDragStart: () => setDraggedTask({ id: task.id, title: task.title }), onDragEnd: () => setDraggedTask(null), className: "p-2 bg-zinc-900 border border-zinc-800 rounded cursor-grab hover:border-zinc-600 transition-colors select-none", children: [_jsx("div", { className: "text-xs font-medium truncate text-zinc-200", children: task.title }), task.due_date && (_jsxs("div", { className: "text-xs text-zinc-500 mt-0.5", children: ["Due ", new Date(task.due_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })] }))] }, task.id)))] }), _jsxs("div", { className: "p-3 border-t border-zinc-800 shrink-0", children: [_jsx("div", { className: "text-xs text-zinc-500 uppercase tracking-wide mb-2", children: "Calendars" }), accounts.length === 0 ? (_jsxs("a", { href: `${apiBase}/calendar/auth/google`, className: "flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300", children: [_jsx(Plus, { className: "h-3 w-3" }), "Connect Google Calendar"] })) : (_jsxs("div", { className: "space-y-3", children: [accounts.map((account) => {
                                         const entry = subCalendars.find((s) => s.accountId === account.id);
                                         const cals = entry?.calendars ?? [];
-                                        return (_jsxs("div", { children: [_jsxs("div", { className: "flex items-center gap-1.5 mb-1", children: [_jsx("span", { className: "text-xs font-medium text-zinc-400 truncate flex-1", children: account.email.split("@")[0] }), _jsxs(fetcher.Form, { method: "post", children: [_jsx("input", { type: "hidden", name: "intent", value: "sync" }), _jsx("input", { type: "hidden", name: "account_id", value: account.id }), _jsx("button", { type: "submit", title: "Sync", className: "text-zinc-600 hover:text-zinc-300 transition-colors", children: _jsx(RefreshCw, { className: "h-3 w-3" }) })] })] }), cals.length > 0 ? (_jsx("div", { className: "space-y-1 pl-1", children: cals.map((cal) => {
+                                        return (_jsxs("div", { children: [_jsxs("div", { className: "flex items-center gap-1.5 mb-1 group/acct", children: [_jsx("span", { className: "text-xs font-medium text-zinc-400 truncate flex-1", children: account.display_name || account.email.split("@")[0] }), _jsx("button", { type: "button", onClick: (e) => { e.stopPropagation(); setSettingsAccount(account); }, title: "Settings", className: "text-zinc-600 hover:text-zinc-300 transition-colors opacity-0 group-hover/acct:opacity-100", children: _jsx(Settings, { className: "h-3 w-3" }) }), _jsxs(fetcher.Form, { method: "post", children: [_jsx("input", { type: "hidden", name: "intent", value: "sync" }), _jsx("input", { type: "hidden", name: "account_id", value: account.id }), _jsx("button", { type: "submit", title: "Sync", className: "text-zinc-600 hover:text-zinc-300 transition-colors", children: _jsx(RefreshCw, { className: "h-3 w-3" }) })] })] }), cals.length > 0 ? (_jsx("div", { className: "space-y-1 pl-1", children: cals.map((cal) => {
                                                         const color = subCalColors[cal.id] ?? cal.color ?? account.color ?? "#2FE8B6";
                                                         const isHidden = hiddenSubCals.has(cal.id);
                                                         return (_jsxs("div", { className: "flex items-center gap-1.5 group/cal", children: [_jsxs("div", { className: "relative", children: [_jsx("button", { type: "button", onClick: (e) => {
                                                                                 e.stopPropagation();
                                                                                 setColorPickerFor(colorPickerFor === cal.id ? null : cal.id);
-                                                                            }, className: "w-3 h-3 rounded-sm shrink-0 border border-black/20 hover:scale-110 transition-transform", style: { backgroundColor: isHidden ? "transparent" : color, borderColor: color, opacity: isHidden ? 0.4 : 1 }, title: "Change color" }), colorPickerFor === cal.id && (_jsxs("div", { className: "absolute left-0 top-full mt-1 z-30 bg-zinc-800 border border-zinc-700 rounded-lg p-2 shadow-xl", onClick: (e) => e.stopPropagation(), children: [_jsx("div", { className: "grid grid-cols-5 gap-1", children: COLOR_SWATCHES.map((c) => (_jsx("button", { type: "button", onClick: () => { setSubCalColors((prev) => ({ ...prev, [cal.id]: c })); setColorPickerFor(null); }, className: "w-4 h-4 rounded-sm hover:scale-110 transition-transform border border-black/20", style: { backgroundColor: c } }, c))) }), subCalColors[cal.id] && (_jsx("button", { type: "button", onClick: () => { setSubCalColors((prev) => { const n = { ...prev }; delete n[cal.id]; return n; }); setColorPickerFor(null); }, className: "w-full mt-1.5 text-[10px] text-zinc-500 hover:text-zinc-300 text-center", children: "Reset" }))] }))] }), _jsx("span", { className: `text-xs truncate flex-1 ${isHidden ? "text-zinc-600" : "text-zinc-400"}`, children: cal.name }), _jsx("button", { type: "button", onClick: () => toggleSubCal(cal.id), className: "shrink-0 text-zinc-600 opacity-0 group-hover/cal:opacity-100 hover:text-zinc-300 transition-all", title: isHidden ? "Show" : "Hide", children: isHidden ? _jsx(EyeOff, { className: "h-3 w-3" }) : _jsx(Eye, { className: "h-3 w-3" }) })] }, cal.id));
+                                                                            }, className: "w-3 h-3 rounded-sm shrink-0 border border-black/20 hover:scale-110 transition-transform", style: { backgroundColor: isHidden ? "transparent" : color, borderColor: color, opacity: isHidden ? 0.4 : 1 }, title: "Change color" }), colorPickerFor === cal.id && (_jsxs("div", { className: "absolute left-0 top-full mt-1 z-30 bg-zinc-800 border border-zinc-700 rounded-lg p-2 shadow-xl", onClick: (e) => e.stopPropagation(), children: [_jsx("div", { className: "grid grid-cols-5 gap-1", children: COLOR_SWATCHES.map((c) => (_jsx("button", { type: "button", onClick: () => {
+                                                                                            setSubCalColors((prev) => ({ ...prev, [cal.id]: c }));
+                                                                                            setColorPickerFor(null);
+                                                                                            // Persist to API
+                                                                                            const fd = new FormData();
+                                                                                            fd.set("intent", "update_sub_cal");
+                                                                                            fd.set("sub_cal_id", cal.id);
+                                                                                            fd.set("color", c);
+                                                                                            fetcher.submit(fd, { method: "post" });
+                                                                                        }, className: "w-4 h-4 rounded-sm hover:scale-110 transition-transform border border-black/20", style: { backgroundColor: c } }, c))) }), subCalColors[cal.id] && (_jsx("button", { type: "button", onClick: () => { setSubCalColors((prev) => { const n = { ...prev }; delete n[cal.id]; return n; }); setColorPickerFor(null); }, className: "w-full mt-1.5 text-[10px] text-zinc-500 hover:text-zinc-300 text-center", children: "Reset" }))] }))] }), _jsx("span", { className: `text-xs truncate flex-1 ${isHidden ? "text-zinc-600" : "text-zinc-400"}`, children: cal.name }), _jsx("button", { type: "button", onClick: () => toggleSubCal(cal.id), className: "shrink-0 text-zinc-600 opacity-0 group-hover/cal:opacity-100 hover:text-zinc-300 transition-all", title: isHidden ? "Show" : "Hide", children: isHidden ? _jsx(EyeOff, { className: "h-3 w-3" }) : _jsx(Eye, { className: "h-3 w-3" }) })] }, cal.id));
                                                     }) })) : (
                                                 /* Fallback: account-level toggle when no sub-cals loaded */
                                                 _jsx("div", { className: "pl-1 text-xs text-zinc-600 italic", children: "No calendars loaded" }))] }, account.id));
-                                    }), _jsxs("a", { href: "https://api.sheetzlabs.com/calendar/auth/google", className: "flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1", children: [_jsx(Plus, { className: "h-3 w-3" }), "Add account"] })] }))] })] }), _jsxs("div", { className: "flex-1 flex flex-col overflow-hidden", children: [_jsxs("div", { className: "flex items-center justify-between px-4 py-3 border-b border-zinc-800 shrink-0", children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-1", children: [_jsx(Link, { to: `/dashboard/calendar?view=${view}&offset=${prevOffset}`, className: "px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded", children: "\u2039" }), _jsx(Link, { to: `/dashboard/calendar?view=${view}&offset=0`, className: "px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded", children: "Today" }), _jsx(Link, { to: `/dashboard/calendar?view=${view}&offset=${nextOffset}`, className: "px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded", children: "\u203A" })] }), _jsx("h1", { className: "text-sm font-semibold text-zinc-200", children: weekStartDate.toLocaleDateString(undefined, { month: "long", year: "numeric" }) })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Link, { to: `/dashboard/calendar?view=day&offset=${weekOffset}`, className: `px-3 py-1.5 text-xs rounded transition-colors ${view === "day" ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/50"}`, children: "Day" }), _jsx(Link, { to: `/dashboard/calendar?view=week&offset=${weekOffset}`, className: `px-3 py-1.5 text-xs rounded transition-colors ${view === "week" ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/50"}`, children: "Week" }), _jsxs("button", { onClick: openNewEventDefault, disabled: accounts.length === 0, className: "flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed", children: [_jsx(Plus, { className: "h-3 w-3" }), "New Event"] })] })] }), _jsxs("div", { className: "flex-1 overflow-auto", children: [_jsxs("div", { className: "grid border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10", style: { gridTemplateColumns: "44px repeat(7, 1fr)" }, children: [_jsx("div", { className: "border-r border-zinc-800" }), DAYS.map((day, i) => {
+                                    }), _jsxs("a", { href: `${apiBase}/calendar/auth/google`, className: "flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1", children: [_jsx(Plus, { className: "h-3 w-3" }), "Add account"] }), _jsxs(Link, { to: "/dashboard/calendar/booking-links", className: "flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1", children: [_jsx(Link2, { className: "h-3 w-3" }), "Booking Links"] }), _jsxs(Link, { to: "/dashboard/calendar/bookings", className: "flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 mt-1", children: [_jsx(Calendar, { className: "h-3 w-3" }), "Bookings"] })] }))] })] }), _jsxs("div", { className: "flex-1 flex flex-col overflow-hidden", children: [_jsxs("div", { className: "flex items-center justify-between px-4 py-3 border-b border-zinc-800 shrink-0", children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-1", children: [_jsx(Link, { to: `/dashboard/calendar?view=${view}&offset=${prevOffset}`, className: "px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded", children: "\u2039" }), _jsx(Link, { to: `/dashboard/calendar?view=${view}&offset=0`, className: "px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded", children: "Today" }), _jsx(Link, { to: `/dashboard/calendar?view=${view}&offset=${nextOffset}`, className: "px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded", children: "\u203A" })] }), _jsx("h1", { className: "text-sm font-semibold text-zinc-200", children: weekStartDate.toLocaleDateString(undefined, { month: "long", year: "numeric" }) })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Link, { to: `/dashboard/calendar?view=day&offset=${weekOffset}`, className: `px-3 py-1.5 text-xs rounded transition-colors ${view === "day" ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/50"}`, children: "Day" }), _jsx(Link, { to: `/dashboard/calendar?view=week&offset=${weekOffset}`, className: `px-3 py-1.5 text-xs rounded transition-colors ${view === "week" ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/50"}`, children: "Week" }), _jsxs("button", { onClick: openNewEventDefault, disabled: accounts.length === 0, className: "flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed", children: [_jsx(Plus, { className: "h-3 w-3" }), "New Event"] })] })] }), _jsxs("div", { className: "flex-1 overflow-auto", children: [_jsxs("div", { className: "grid border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10", style: { gridTemplateColumns: "44px repeat(7, 1fr)" }, children: [_jsx("div", { className: "border-r border-zinc-800" }), DAYS.map((day, i) => {
                                         const d = new Date(weekStartDate);
                                         d.setDate(weekStartDate.getDate() + i);
                                         const isToday = d.toDateString() === new Date().toDateString();

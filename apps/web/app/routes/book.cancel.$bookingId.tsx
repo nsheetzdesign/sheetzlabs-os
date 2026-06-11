@@ -29,7 +29,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 }
 
 export default function CancelBookingPage() {
-  const { booking } = useLoaderData<typeof loader>();
+  const { booking, apiUrl } = useLoaderData<typeof loader>();
   const [cancelled, setCancelled] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,18 +38,22 @@ export default function CancelBookingPage() {
     setCancelling(true);
     setError(null);
 
-    const response = await fetch(`https://api.sheetzlabs.com/booking/public/cancel/${booking.id}`, {
-      method: "POST",
-    });
+    try {
+      const response = await fetch(`${apiUrl}/booking/public/cancel/${booking.id}`, {
+        method: "POST",
+      });
 
-    if (response.ok) {
-      setCancelled(true);
-    } else {
-      const data = (await response.json()) as { error?: string };
-      setError(data.error || "Failed to cancel booking");
+      if (response.ok) {
+        setCancelled(true);
+      } else {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        setError(data.error || "Failed to cancel booking");
+      }
+    } catch {
+      setError("Network error — please try again.");
+    } finally {
+      setCancelling(false);
     }
-
-    setCancelling(false);
   };
 
   if (booking.status === "cancelled") {

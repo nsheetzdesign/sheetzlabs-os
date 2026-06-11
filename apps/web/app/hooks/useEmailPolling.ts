@@ -1,7 +1,9 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useRevalidator } from 'react-router';
 
-const API_URL = 'https://api.sheetzlabs.com';
+// Same-origin proxy (routes/api.$.tsx) — forwards to the API worker with the
+// founder's JWT server-side, so no token is exposed to client JS and no CORS.
+const API_URL = '/api';
 
 interface UseEmailPollingOptions {
   enabled?: boolean;

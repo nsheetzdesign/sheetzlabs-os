@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { Crown, Megaphone, Package, DollarSign, Search, Settings, MessageSquare, Plus, Send } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 
 export const meta: MetaFunction = () => [{ title: "Chat — Sheetz Labs OS" }];
 
@@ -70,11 +71,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
-  const apiUrl = env.API_URL ?? "https://api.sheetzlabs.com";
 
   if (intent === "create_conversation") {
     const department = formData.get("department") as string | null;
-    const res = await fetch(`${apiUrl}/chat/conversations`, {
+    const res = await apiFetch(request, env, `/chat/conversations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ department: department || null }),
@@ -85,8 +85,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
   if (intent === "send_message") {
     const conversationId = formData.get("conversationId") as string;
     const content = formData.get("content") as string;
-    const res = await fetch(
-      `${apiUrl}/chat/conversations/${conversationId}/messages`,
+    const res = await apiFetch(
+      request,
+      env,
+      `/chat/conversations/${conversationId}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

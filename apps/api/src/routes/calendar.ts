@@ -2,6 +2,14 @@ import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
 import { executeAgentWithTools } from "../lib/agent-engine";
+import { sanitizeAccount } from "../lib/sanitize";
+import {
+  generateStateNonce,
+  setStateCookie,
+  verifyAndClearState,
+} from "../lib/oauth-state";
+
+const CAL_STATE_COOKIE = "cal_oauth_state";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -11,6 +19,7 @@ type Bindings = {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   API_URL: string;
+  APP_URL: string;
 };
 
 type HonoEnv = { Bindings: Bindings };
@@ -39,6 +48,9 @@ calendar.get("/auth/google", async (c) => {
   ].join(" ");
 
   const apiUrl = c.env.API_URL || "https://api.sheetzlabs.com";
+  const state = generateStateNonce();
+  setStateCookie(c, CAL_STATE_COOKIE, state);
+
   const authUrl =
     `https://accounts.google.com/o/oauth2/v2/auth?` +
     `client_id=${c.env.GOOGLE_CLIENT_ID}` +
@@ -46,7 +58,8 @@ calendar.get("/auth/google", async (c) => {
     `&response_type=code` +
     `&scope=${encodeURIComponent(scopes)}` +
     `&access_type=offline` +
-    `&prompt=consent`;
+    `&prompt=consent` +
+    `&state=${state}`;
 
   return c.redirect(authUrl);
 });
@@ -55,6 +68,11 @@ calendar.get("/auth/google", async (c) => {
 calendar.get("/auth/google/callback", async (c) => {
   const code = c.req.query("code");
   if (!code) return c.json({ error: "No code provided" }, 400);
+
+  // Verify CSRF state nonce before trusting the code.
+  if (!verifyAndClearState(c, CAL_STATE_COOKIE, c.req.query("state"))) {
+    return c.json({ error: "Invalid OAuth state" }, 403);
+  }
 
   const apiUrl = c.env.API_URL || "https://api.sheetzlabs.com";
 
@@ -85,8 +103,9 @@ calendar.get("/auth/google/callback", async (c) => {
   });
   const user = (await userResponse.json()) as { email: string };
 
+  const appUrl = c.env.APP_URL || "https://app.sheetzlabs.com";
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  await supabase.from("calendar_accounts").upsert(
+  const { error: upsertError } = await supabase.from("calendar_accounts").upsert(
     {
       email: user.email,
       provider: "google",
@@ -97,23 +116,39 @@ calendar.get("/auth/google/callback", async (c) => {
     { onConflict: "email" }
   );
 
-  return c.redirect("https://sheetzlabs.com/dashboard/calendar?connected=true");
+  if (upsertError) {
+    return c.redirect(
+      `${appUrl}/dashboard/calendar?connected=false&error=${encodeURIComponent(upsertError.message)}`
+    );
+  }
+
+  return c.redirect(`${appUrl}/dashboard/calendar?connected=true`);
 });
 
-// Update account
+// Update account (explicit column allowlist — never trust the raw body, which
+// would let a caller overwrite access_token/refresh_token, XC-1 mass assignment)
 calendar.patch("/accounts/:id", async (c) => {
   const { id } = c.req.param();
-  const body = await c.req.json();
+  const body = await c.req.json<{
+    display_name?: string;
+    color?: string;
+    is_visible?: boolean;
+  }>();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const updates: Record<string, unknown> = {};
+  if (body.display_name !== undefined) updates.display_name = body.display_name;
+  if (body.color !== undefined) updates.color = body.color;
+  if (body.is_visible !== undefined) updates.is_visible = body.is_visible;
 
   const { data } = await supabase
     .from("calendar_accounts")
-    .update(body)
+    .update(updates)
     .eq("id", id)
     .select()
     .single();
 
-  return c.json({ account: data });
+  return c.json({ account: sanitizeAccount(data) });
 });
 
 // Disconnect account

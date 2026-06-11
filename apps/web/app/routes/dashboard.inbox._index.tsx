@@ -216,6 +216,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     accountId: account_id,
     labelId: label_id,
     search,
+    apiBase: env.API_URL ?? 'https://api.sheetzlabs.com',
   };
 }
 
@@ -228,7 +229,7 @@ const TRIAGE_TABS = [
 ] as const;
 
 export default function Inbox() {
-  const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
+  const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search, apiBase } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const fetcher = useFetcher();
@@ -516,6 +517,7 @@ export default function Inbox() {
         onSelectLabel={handleLabelSelect}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
+        apiBase={apiBase}
       />
 
       <div className="flex-1 flex overflow-hidden">

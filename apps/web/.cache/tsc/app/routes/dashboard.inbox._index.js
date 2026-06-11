@@ -1,89 +1,487 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useLoaderData, Link } from "react-router";
-import { useState } from "react";
-import { Inbox, PenSquare, RefreshCw, Star, Plus, X } from "lucide-react";
-import { Header } from "~/components/dashboard/Header";
-import { getSupabaseClient } from "~/lib/supabase.server";
-import { EmptyState } from "~/components/ui/EmptyState";
-export const meta = () => [{ title: "Inbox — Sheetz Labs OS" }];
-const CATEGORIES = [
-    { id: "all", label: "All" },
-    { id: "action_required", label: "Action Required", color: "text-red-400" },
-    { id: "fyi", label: "FYI", color: "text-blue-400" },
-    { id: "newsletter", label: "Newsletters", color: "text-amber-400" },
-    { id: "automated", label: "Automated", color: "text-zinc-400" },
-];
-function formatDate(dateStr) {
-    if (!dateStr)
-        return "";
-    const d = new Date(dateStr);
-    const now = new Date();
-    const isToday = d.toDateString() === now.toDateString();
-    if (isToday) {
-        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    }
-    return d.toLocaleDateString([], { month: "short", day: "numeric" });
-}
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator } from 'react-router';
+import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell } from 'lucide-react';
+import { getSupabaseClient } from '~/lib/supabase.server';
+import { InboxSidebar } from '~/components/inbox/InboxSidebar';
+import { EmailList } from '~/components/inbox/EmailList';
+import { EmailPreview } from '~/components/inbox/EmailPreview';
+import { ComposeModal } from '~/components/inbox/ComposeModal';
+import { ThreadView } from '~/components/inbox/ThreadView';
+import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
+import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
+import { useEmailPolling } from '~/hooks/useEmailPolling';
+export const meta = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 export async function loader({ request, context }) {
     const env = context.cloudflare.env;
     const supabase = getSupabaseClient(env);
     const url = new URL(request.url);
-    const category = url.searchParams.get("category") ?? "all";
-    const unreadOnly = url.searchParams.get("unread") === "true";
+    const folder = url.searchParams.get('folder') || 'inbox';
+    const account_id = url.searchParams.get('account') || null;
+    const label_id = url.searchParams.get('label');
+    const search = url.searchParams.get('q');
+    // Build emails query — all fields needed for list + preview
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let query = supabase
-        .from("emails")
-        .select("id, subject, snippet, from_email, from_name, is_read, is_starred, ai_category, ai_priority, received_at, email_accounts(email)")
-        .order("received_at", { ascending: false })
-        .limit(50);
-    if (category !== "all")
-        query = query.eq("ai_category", category);
-    if (unreadOnly)
-        query = query.eq("is_read", false);
-    const { data: emails } = await query;
-    const { data: accounts } = await supabase
-        .from("email_accounts")
-        .select("id, email, provider, sync_enabled, last_sync_at")
-        .order("email");
-    const { data: aliases } = await supabase
-        .from("email_aliases")
-        .select("id, account_id, email, name, source")
-        .order("email");
-    const unreadCount = (emails ?? []).filter((e) => !e.is_read).length;
-    return { emails: emails ?? [], accounts: accounts ?? [], aliases: aliases ?? [], category, unreadOnly, unreadCount };
-}
-const API = "https://api.sheetzlabs.com";
-export default function InboxIndex() {
-    const { emails, accounts, aliases, category, unreadOnly, unreadCount } = useLoaderData();
-    const [addingAliasFor, setAddingAliasFor] = useState(null);
-    const [aliasEmail, setAliasEmail] = useState("");
-    const [aliasName, setAliasName] = useState("");
-    const [syncing, setSyncing] = useState(null);
-    const callApi = async (url, method = "POST") => {
-        setSyncing(url);
-        await fetch(url, { method });
-        setSyncing(null);
-        window.location.reload();
+        .from('emails')
+        .select(`
+      id, account_id, external_id, thread_id,
+      subject, snippet,
+      from_name, from_email, to_emails, cc_emails,
+      body_text, body_html,
+      received_at, folder,
+      is_read, is_starred, is_archived, is_trashed, is_spam,
+      snoozed_until, has_attachments, attachment_count,
+      ai_summary, ai_category,
+      triage_category,
+      email_label_assignments(label_id, email_labels(id, name, color))
+    `)
+        .eq('is_deleted', false)
+        .order('received_at', { ascending: false })
+        .limit(100);
+    if (search) {
+        query = query.or(`subject.ilike.%${search}%,from_email.ilike.%${search}%,snippet.ilike.%${search}%`);
+    }
+    else {
+        if (folder === 'inbox') {
+            query = query.eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_spam', false);
+        }
+        else if (folder === 'starred') {
+            query = query.eq('is_starred', true).eq('is_trashed', false);
+        }
+        else if (folder === 'sent') {
+            query = query.eq('folder', 'SENT');
+        }
+        else if (folder === 'spam') {
+            query = query.eq('is_spam', true);
+        }
+        else if (folder === 'trash') {
+            query = query.eq('is_trashed', true);
+        }
+        else if (folder === 'snoozed') {
+            query = query.not('snoozed_until', 'is', null);
+        }
+        else if (folder === 'drafts') {
+            query = query.eq('folder', 'DRAFTS');
+        }
+        else if (folder === 'all mail') {
+            query = query.eq('is_trashed', false);
+        }
+    }
+    // Only filter by account if a specific one is selected (null = All Inboxes)
+    if (account_id) {
+        query = query.eq('account_id', account_id);
+    }
+    const [{ data: emails, error: emailsError }, { data: accounts }] = await Promise.all([
+        query,
+        supabase.from('email_accounts').select('id, email').order('email'),
+    ]);
+    console.log('[Inbox] Query result:', {
+        count: emails?.length,
+        error: emailsError,
+        folder,
+        accountId: account_id,
+        firstEmail: emails?.[0] ? {
+            id: emails[0].id,
+            subject: emails[0].subject,
+            folder: emails[0].folder,
+            hasBody: !!emails[0].body_text || !!emails[0].body_html,
+        } : null,
+    });
+    const accountIds = (accounts ?? []).map(a => a.id);
+    // Fetch labels for all accounts from DB
+    const { data: labelsData } = accountIds.length
+        ? await supabase
+            .from('email_labels')
+            .select('*')
+            .in('account_id', accountIds)
+            .order('sort_order')
+        : { data: [] };
+    // Group labels by account
+    const labelsByAccount = (labelsData ?? []).reduce((acc, label) => {
+        if (!acc[label.account_id])
+            acc[label.account_id] = [];
+        acc[label.account_id].push(label);
+        return acc;
+    }, {});
+    // For any account with no labels, seed system labels one by one
+    for (const account of accounts ?? []) {
+        if (!labelsByAccount[account.id]?.length) {
+            console.log(`[Inbox] Seeding labels for account ${account.email} (${account.id})...`);
+            const systemLabels = [
+                { name: 'Inbox', icon: 'Inbox', sort_order: 1, external_id: 'INBOX' },
+                { name: 'Starred', icon: 'Star', sort_order: 2, external_id: 'STARRED' },
+                { name: 'Snoozed', icon: 'Clock', sort_order: 3, external_id: 'SNOOZED' },
+                { name: 'Sent', icon: 'Send', sort_order: 4, external_id: 'SENT' },
+                { name: 'Drafts', icon: 'File', sort_order: 5, external_id: 'DRAFT' },
+                { name: 'Spam', icon: 'AlertTriangle', sort_order: 90, external_id: 'SPAM' },
+                { name: 'Trash', icon: 'Trash2', sort_order: 91, external_id: 'TRASH' },
+                { name: 'All Mail', icon: 'Mail', sort_order: 92, external_id: 'ALL_MAIL' },
+            ];
+            const seededLabels = [];
+            for (const label of systemLabels) {
+                const { data: inserted, error: upsertError } = await supabase
+                    .from('email_labels')
+                    .upsert({
+                    account_id: account.id,
+                    name: label.name,
+                    type: 'system',
+                    icon: label.icon,
+                    sort_order: label.sort_order,
+                    external_id: label.external_id,
+                }, { onConflict: 'account_id,external_id', ignoreDuplicates: false })
+                    .select('*')
+                    .single();
+                if (upsertError) {
+                    console.error(`[Inbox] Failed to upsert label ${label.name} for ${account.email}:`, upsertError.message);
+                }
+                else if (inserted) {
+                    seededLabels.push(inserted);
+                }
+            }
+            labelsByAccount[account.id] = seededLabels.length > 0
+                ? seededLabels
+                : systemLabels.map(l => ({ ...l, account_id: account.id, type: 'system' }));
+            console.log(`[Inbox] Seeded ${seededLabels.length} labels for ${account.email}`);
+        }
+    }
+    // Build accounts with their real labels
+    const accountsWithLabels = (accounts ?? []).map(account => ({
+        id: account.id,
+        email: account.email,
+        labels: labelsByAccount[account.id] ?? [],
+    }));
+    // Global counts (across all accounts)
+    const [{ count: gInbox }, { count: gStarred }, { count: gSnoozed }, { count: gSpam }, { count: gTrash }, { count: gDrafts },] = await Promise.all([
+        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_read', false),
+        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_starred', true).eq('is_trashed', false),
+        supabase.from('emails').select('id', { count: 'exact', head: true }).not('snoozed_until', 'is', null),
+        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_spam', true).eq('is_trashed', false),
+        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_trashed', true),
+        supabase.from('email_drafts').select('id', { count: 'exact', head: true }).eq('status', 'draft'),
+    ]);
+    const globalCounts = {
+        inbox: gInbox ?? 0,
+        starred: gStarred ?? 0,
+        snoozed: gSnoozed ?? 0,
+        spam: gSpam ?? 0,
+        trash: gTrash ?? 0,
+        drafts: gDrafts ?? 0,
     };
-    return (_jsxs("div", { className: "flex h-full flex-col", children: [_jsx(Header, { title: "Inbox" }), _jsxs("div", { className: "flex flex-1 overflow-hidden", children: [_jsxs("aside", { className: "flex w-64 flex-col border-r border-surface-2/50 p-4", children: [_jsxs(Link, { to: "/dashboard/inbox/compose", className: "mb-4 flex items-center justify-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-dark", children: [_jsx(PenSquare, { className: "h-4 w-4" }), "Compose"] }), _jsx("nav", { className: "space-y-0.5", children: CATEGORIES.map((cat) => (_jsxs(Link, { to: `/dashboard/inbox?category=${cat.id}${unreadOnly ? "&unread=true" : ""}`, className: `flex items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors ${category === cat.id
-                                        ? "bg-surface-2 text-zinc-100"
-                                        : "text-zinc-500 hover:bg-surface-1/50 hover:text-zinc-300"}`, children: [_jsx("span", { className: cat.color ?? "", children: cat.label }), cat.id === "all" && unreadCount > 0 && (_jsx("span", { className: "rounded-full bg-brand px-1.5 py-0.5 text-xs font-medium text-white", children: unreadCount }))] }, cat.id))) }), _jsx("div", { className: "mt-3 border-t border-surface-2/50 pt-3", children: _jsx(Link, { to: `/dashboard/inbox?category=${category}&unread=${!unreadOnly}`, className: "block rounded-lg px-3 py-2 text-sm text-zinc-500 transition-colors hover:bg-surface-1/50 hover:text-zinc-300", children: unreadOnly ? "Show all" : "Unread only" }) }), _jsxs("div", { className: "mt-4 border-t border-surface-2/50 pt-4", children: [_jsx("h3", { className: "mb-2 px-3 text-xs font-medium uppercase tracking-wide text-zinc-600", children: "Accounts" }), accounts.length === 0 ? (_jsx("a", { href: "https://api.sheetzlabs.com/email/auth/gmail", className: "flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-brand transition-colors hover:text-brand-light", children: "+ Connect Gmail" })) : (_jsxs("div", { className: "space-y-2", children: [accounts.map((account) => {
-                                                const accountAliases = aliases.filter((a) => a.account_id === account.id);
-                                                return (_jsxs("div", { children: [_jsxs("div", { className: "flex items-center justify-between px-3 py-1", children: [_jsx("span", { className: "truncate text-xs text-zinc-400", children: account.email }), _jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("button", { onClick: () => callApi(`${API}/email/accounts/${account.id}/sync-aliases`), title: "Sync aliases from Gmail", className: "text-zinc-600 hover:text-zinc-300", children: _jsx(RefreshCw, { className: `h-3 w-3 ${syncing?.includes("sync-aliases") ? "animate-spin" : ""}` }) }), _jsx("button", { onClick: () => callApi(`${API}/email/accounts/${account.id}/sync`), title: "Sync emails", className: "text-zinc-600 hover:text-zinc-300", children: _jsx(RefreshCw, { className: `h-3 w-3 ${syncing?.includes("/sync") && !syncing.includes("aliases") ? "animate-spin" : ""}` }) })] })] }), accountAliases.map((alias) => (_jsxs("div", { className: "flex items-center justify-between py-0.5 pl-6 pr-3", children: [_jsx("span", { className: "truncate text-xs text-zinc-600", children: alias.email }), _jsx("button", { onClick: () => callApi(`${API}/email/aliases/${alias.id}`, "DELETE"), className: "text-zinc-700 hover:text-red-400", children: _jsx(X, { className: "h-3 w-3" }) })] }, alias.id))), addingAliasFor === account.id ? (_jsxs("div", { className: "mt-1 space-y-1 px-3", children: [_jsx("input", { type: "text", placeholder: "Email address", value: aliasEmail, onChange: (e) => setAliasEmail(e.target.value), className: "w-full rounded border border-surface-2/50 bg-surface-1 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none" }), _jsx("input", { type: "text", placeholder: "Name (optional)", value: aliasName, onChange: (e) => setAliasName(e.target.value), className: "w-full rounded border border-surface-2/50 bg-surface-1 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none" }), _jsxs("div", { className: "flex gap-2", children: [_jsx("button", { onClick: async () => {
-                                                                                if (!aliasEmail)
-                                                                                    return;
-                                                                                await fetch("https://api.sheetzlabs.com/email/aliases", {
-                                                                                    method: "POST",
-                                                                                    headers: { "Content-Type": "application/json" },
-                                                                                    body: JSON.stringify({ account_id: account.id, email: aliasEmail, name: aliasName || undefined }),
-                                                                                });
-                                                                                setAliasEmail("");
-                                                                                setAliasName("");
-                                                                                setAddingAliasFor(null);
-                                                                                window.location.reload();
-                                                                            }, className: "text-xs text-brand hover:text-brand-light", children: "Save" }), _jsx("button", { onClick: () => { setAddingAliasFor(null); setAliasEmail(""); setAliasName(""); }, className: "text-xs text-zinc-600 hover:text-zinc-400", children: "Cancel" })] })] })) : (_jsxs("button", { onClick: () => setAddingAliasFor(account.id), className: "flex items-center gap-1 py-0.5 pl-6 text-xs text-zinc-700 hover:text-zinc-400", children: [_jsx(Plus, { className: "h-3 w-3" }), "Add alias"] }))] }, account.id));
-                                            }), _jsxs("a", { href: "https://api.sheetzlabs.com/email/auth/gmail", className: "flex items-center gap-1 px-3 py-1 text-xs text-zinc-600 hover:text-brand", children: [_jsx(Plus, { className: "h-3 w-3" }), "Connect another account"] })] }))] })] }), _jsx("main", { className: "flex-1 overflow-auto", children: emails.length === 0 ? (_jsx(EmptyState, { icon: Inbox, title: "No emails", description: accounts.length === 0
-                                ? "Connect your Gmail account to sync emails."
-                                : category !== "all"
-                                    ? `No ${category.replace("_", " ")} emails.`
-                                    : "Your inbox is empty.", action: accounts.length === 0 ? (_jsx("a", { href: "https://api.sheetzlabs.com/email/auth/gmail", className: "inline-flex items-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-dark", children: "Connect Gmail" })) : undefined })) : (_jsx("div", { className: "divide-y divide-surface-2/30", children: emails.map((email) => (_jsxs(Link, { to: `/dashboard/inbox/${email.id}`, className: `flex items-start gap-3 px-6 py-4 transition-colors hover:bg-surface-1/30 ${!email.is_read ? "bg-surface-1/20" : ""}`, children: [_jsx("div", { className: "mt-1.5 flex w-2 shrink-0 justify-center", children: !email.is_read && (_jsx("span", { className: "h-2 w-2 rounded-full bg-brand" })) }), _jsxs("div", { className: "min-w-0 flex-1", children: [_jsxs("div", { className: "flex items-center justify-between gap-2", children: [_jsx("span", { className: `text-sm font-medium ${!email.is_read ? "text-zinc-100" : "text-zinc-400"}`, children: email.from_name || email.from_email }), _jsxs("div", { className: "flex shrink-0 items-center gap-2", children: [email.ai_priority === "high" && (_jsx("span", { className: "rounded border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-xs text-red-400", children: "High" })), email.is_starred && (_jsx(Star, { className: "h-3.5 w-3.5 fill-amber-400 text-amber-400" })), _jsx("span", { className: "text-xs text-zinc-600", children: formatDate(email.received_at) })] })] }), _jsx("div", { className: `mt-0.5 text-sm ${!email.is_read ? "text-zinc-300" : "text-zinc-500"}`, children: email.subject ?? "(no subject)" }), _jsx("div", { className: "mt-0.5 truncate text-xs text-zinc-600", children: email.snippet })] })] }, email.id))) })) })] })] }));
+    // Per-account counts (simple: just unread inbox for each)
+    const counts = {};
+    for (const account of accounts ?? []) {
+        const accountEmails = (emails ?? []).filter(e => e.account_id === account.id);
+        counts[account.id] = {
+            inbox: accountEmails.filter(e => !e.is_read).length,
+            starred: 0,
+            snoozed: 0,
+            drafts: 0,
+            spam: 0,
+            trash: 0,
+        };
+    }
+    return {
+        emails: (emails ?? []).map(e => ({
+            ...e,
+            has_attachments: e.has_attachments ?? false,
+            triage_category: e.triage_category ?? 'other',
+            // Flatten label assignments to array of label objects
+            labels: (e.email_label_assignments ?? []).map((a) => a.email_labels).filter(Boolean),
+        })),
+        accounts: accountsWithLabels,
+        counts,
+        globalCounts,
+        folder,
+        accountId: account_id,
+        labelId: label_id,
+        search,
+        apiBase: env.API_URL ?? 'https://api.sheetzlabs.com',
+    };
+}
+const TRIAGE_TABS = [
+    { id: 'all', label: 'All', Icon: InboxIcon },
+    { id: 'important', label: 'Important', Icon: Star },
+    { id: 'other', label: 'Other', Icon: Mail },
+    { id: 'newsletter', label: 'Newsletters', Icon: Mail },
+    { id: 'notification', label: 'Notifications', Icon: Bell },
+];
+export default function Inbox() {
+    const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search, apiBase } = useLoaderData();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const navigate = useNavigate();
+    const fetcher = useFetcher();
+    const revalidator = useRevalidator();
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [activeEmail, setActiveEmail] = useState(null);
+    const [focusIndex, setFocusIndex] = useState(0);
+    const [draggedEmailIds, setDraggedEmailIds] = useState([]);
+    const [showCompose, setShowCompose] = useState(false);
+    const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+    const [triageFilter, setTriageFilter] = useState('all');
+    const [composeProps, setComposeProps] = useState(null);
+    const [threadEmails, setThreadEmails] = useState(null);
+    // Triage filtering
+    const filteredEmails = useMemo(() => {
+        if (triageFilter === 'all')
+            return emails;
+        return emails.filter((e) => (e.triage_category ?? 'other') === triageFilter);
+    }, [emails, triageFilter]);
+    const triageCounts = useMemo(() => {
+        const c = { all: emails.length };
+        for (const e of emails) {
+            const cat = e.triage_category ?? 'other';
+            c[cat] = (c[cat] || 0) + 1;
+        }
+        return c;
+    }, [emails]);
+    // Reset focus when filter changes
+    useEffect(() => {
+        setFocusIndex(0);
+    }, [triageFilter, folder]);
+    // Handle URL params for compose (reply/forward links)
+    useEffect(() => {
+        const replyId = searchParams.get('reply');
+        const forwardId = searchParams.get('forward');
+        const replyAll = searchParams.get('all') === 'true';
+        if (replyId || forwardId) {
+            const email = emails.find((e) => e.id === (replyId || forwardId));
+            if (email) {
+                setComposeProps({
+                    replyTo: email,
+                    replyAll,
+                    forward: !!forwardId,
+                });
+                setShowCompose(true);
+            }
+        }
+    }, [searchParams, emails]);
+    const handleRefresh = async () => {
+        setIsRefreshing(true);
+        try {
+            await fetch('/dashboard/inbox/sync', { method: 'POST' });
+            revalidator.revalidate();
+        }
+        catch (error) {
+            console.error('[Inbox] Sync failed:', error);
+        }
+        finally {
+            setIsRefreshing(false);
+        }
+    };
+    // Auto-sync on window focus
+    useEffect(() => {
+        const onFocus = async () => {
+            try {
+                await fetch('/dashboard/inbox/sync', { method: 'POST' });
+                revalidator.revalidate();
+            }
+            catch {
+                // ignore focus sync errors
+            }
+        };
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+    }, []);
+    // Lightweight polling every 60s — only revalidates when new inbox emails actually exist
+    const newestEmailAt = emails.length > 0
+        ? emails[0].received_at
+        : undefined;
+    useEmailPolling({ enabled: true, interval: 60_000, newestEmailAt });
+    const handleOpenEmail = async (email) => {
+        setActiveEmail(email);
+        markAsRead(email.id);
+        if (email.thread_id) {
+            try {
+                const res = await fetch(`/api/email/thread/${email.thread_id}`);
+                if (res.ok) {
+                    const { thread } = await res.json();
+                    if (thread && thread.length > 1) {
+                        setThreadEmails(thread);
+                        return;
+                    }
+                }
+            }
+            catch {
+                // Thread load failed — fall back to single email view
+            }
+        }
+        setThreadEmails(null);
+    };
+    const toggleSelect = (id) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id))
+                next.delete(id);
+            else
+                next.add(id);
+            return next;
+        });
+    };
+    const handleBulkAction = useCallback((action, overrideEmailId) => {
+        const ids = overrideEmailId
+            ? [overrideEmailId]
+            : selectedIds.size > 0
+                ? Array.from(selectedIds)
+                : filteredEmails[focusIndex] ? [filteredEmails[focusIndex].id] : [];
+        if (ids.length === 0)
+            return;
+        fetcher.submit({ action, email_ids: JSON.stringify(ids) }, { method: 'post', action: '/dashboard/inbox/bulk' });
+        setSelectedIds(new Set());
+        // If the active email is being removed from the current view, advance or close
+        const removesFromView = ['trash', 'archive', 'spam', 'delete'].includes(action);
+        if (removesFromView && activeEmail && ids.includes(activeEmail.id)) {
+            const currentIndex = filteredEmails.findIndex((e) => e.id === activeEmail.id);
+            const nextEmail = filteredEmails[currentIndex + 1] ?? filteredEmails[currentIndex - 1] ?? null;
+            setActiveEmail(nextEmail);
+            setThreadEmails(null);
+            if (nextEmail) {
+                setFocusIndex(currentIndex + 1 < filteredEmails.length - 1 ? currentIndex + 1 : Math.max(0, currentIndex - 1));
+            }
+        }
+    }, [selectedIds, filteredEmails, focusIndex, fetcher, activeEmail]);
+    const markAsRead = (id) => {
+        fetcher.submit({ action: 'read', email_ids: JSON.stringify([id]) }, { method: 'post', action: '/dashboard/inbox/bulk' });
+    };
+    const handleFolderSelect = (newFolder, newAccountId) => {
+        const params = new URLSearchParams();
+        params.set('folder', newFolder);
+        if (newAccountId)
+            params.set('account', newAccountId);
+        setSearchParams(params);
+        setActiveEmail(null);
+        setThreadEmails(null);
+        setSelectedIds(new Set());
+    };
+    const handleLabelSelect = (lid, aid) => {
+        const params = new URLSearchParams();
+        params.set('label', lid);
+        params.set('account', aid);
+        setSearchParams(params);
+        setActiveEmail(null);
+        setThreadEmails(null);
+    };
+    const handleDragStart = (_e, emailIds) => {
+        setDraggedEmailIds(emailIds);
+    };
+    const handleDragOver = (e, _target) => {
+        e.preventDefault();
+    };
+    const handleDrop = (e, target) => {
+        e.preventDefault();
+        if (draggedEmailIds.length === 0)
+            return;
+        if (target.type === 'folder') {
+            const actionMap = {
+                Trash: 'trash',
+                Spam: 'spam',
+                Inbox: 'unarchive',
+                'All Mail': 'archive',
+            };
+            const action = actionMap[target.id];
+            if (action) {
+                fetcher.submit({ action, email_ids: JSON.stringify(draggedEmailIds) }, { method: 'post', action: '/dashboard/inbox/bulk' });
+            }
+        }
+        else if (target.type === 'label') {
+            fetcher.submit({ action: 'add_label', email_ids: JSON.stringify(draggedEmailIds), label_id: target.id }, { method: 'post', action: '/dashboard/inbox/bulk' });
+        }
+        setDraggedEmailIds([]);
+    };
+    const handleSearch = (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.currentTarget);
+        const q = formData.get('q');
+        setSearchParams(q ? { q } : { folder: 'inbox' });
+    };
+    const closeCompose = () => {
+        setShowCompose(false);
+        setComposeProps(null);
+        const params = new URLSearchParams(searchParams);
+        params.delete('reply');
+        params.delete('forward');
+        params.delete('all');
+        setSearchParams(params);
+    };
+    const handleClose = useCallback(() => {
+        setActiveEmail(null);
+        setThreadEmails(null);
+        setSelectedIds(new Set());
+    }, []);
+    const handleReply = useCallback(() => {
+        if (activeEmail) {
+            setComposeProps({ replyTo: activeEmail });
+            setShowCompose(true);
+        }
+    }, [activeEmail]);
+    const handleReplyAll = useCallback(() => {
+        if (activeEmail) {
+            setComposeProps({ replyTo: activeEmail, replyAll: true });
+            setShowCompose(true);
+        }
+    }, [activeEmail]);
+    const handleForward = useCallback(() => {
+        if (activeEmail) {
+            setComposeProps({ replyTo: activeEmail, forward: true });
+            setShowCompose(true);
+        }
+    }, [activeEmail]);
+    // Wire up keyboard shortcuts
+    useEmailKeyboardShortcuts({
+        emails: filteredEmails,
+        focusIndex,
+        setFocusIndex,
+        activeEmail,
+        onOpenFocused: () => {
+            if (filteredEmails[focusIndex]) {
+                handleOpenEmail(filteredEmails[focusIndex]);
+            }
+        },
+        onClose: handleClose,
+        onBulkAction: handleBulkAction,
+        onToggleSelect: () => {
+            if (filteredEmails[focusIndex])
+                toggleSelect(filteredEmails[focusIndex].id);
+        },
+        onCompose: () => { setShowCompose(true); setComposeProps(null); },
+        onReply: handleReply,
+        onReplyAll: handleReplyAll,
+        onForward: handleForward,
+        onSearch: () => document.getElementById('inbox-search')?.focus(),
+        onShowHelp: () => setShowShortcutsHelp(true),
+    });
+    return (_jsxs("div", { className: "flex h-full", children: [_jsx(InboxSidebar, { accounts: accounts, counts: counts, globalCounts: globalCounts, activeFolder: folder, activeAccountId: accountId, activeLabel: labelId, onSelectFolder: handleFolderSelect, onSelectLabel: handleLabelSelect, onDragOver: handleDragOver, onDrop: handleDrop, apiBase: apiBase }), _jsxs("div", { className: "flex-1 flex overflow-hidden", children: [_jsxs("div", { className: `${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`, children: [_jsxs("div", { className: "p-3 border-b border-zinc-800 flex gap-2", children: [_jsx("form", { onSubmit: handleSearch, className: "flex-1", children: _jsx("input", { id: "inbox-search", type: "text", name: "q", defaultValue: search || '', placeholder: "Search emails...", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500" }) }), _jsx("button", { onClick: handleRefresh, disabled: isRefreshing || revalidator.state === 'loading', title: "Sync emails", className: "flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors", children: _jsx(RefreshCw, { size: 14, className: isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : '' }) })] }), _jsx("div", { className: "flex border-b border-zinc-800 overflow-x-auto scrollbar-none", children: TRIAGE_TABS.map(({ id, label }) => {
+                                    const count = triageCounts[id] ?? 0;
+                                    const isActive = triageFilter === id;
+                                    if (id !== 'all' && count === 0)
+                                        return null;
+                                    return (_jsxs("button", { onClick: () => setTriageFilter(id), className: `flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap border-b-2 transition-colors ${isActive
+                                            ? 'border-emerald-500 text-emerald-400'
+                                            : 'border-transparent text-zinc-500 hover:text-zinc-300'}`, children: [_jsx("span", { children: label }), count > 0 && id !== 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count })), id === 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count }))] }, id));
+                                }) }), _jsx(EmailList, { emails: filteredEmails, selectedIds: selectedIds, activeEmailId: activeEmail?.id ?? null, focusedIndex: focusIndex, onSelect: toggleSelect, onSelectAll: () => setSelectedIds(new Set(filteredEmails.map(e => e.id))), onClearSelection: () => setSelectedIds(new Set()), onOpen: (email) => handleOpenEmail(email), onDragStart: handleDragStart })] }), _jsx("div", { className: `${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`, children: threadEmails && threadEmails.length > 1 ? (_jsx(ThreadView, { emails: threadEmails, onReply: (email) => {
+                                setComposeProps({ replyTo: email });
+                                setShowCompose(true);
+                            }, onReplyAll: (email) => {
+                                setComposeProps({ replyTo: email, replyAll: true });
+                                setShowCompose(true);
+                            }, onForward: (email) => {
+                                setComposeProps({ replyTo: email, forward: true });
+                                setShowCompose(true);
+                            }, onClose: () => {
+                                setActiveEmail(null);
+                                setThreadEmails(null);
+                            } })) : (_jsx(EmailPreview, { email: activeEmail, onClose: () => {
+                                setActiveEmail(null);
+                                setThreadEmails(null);
+                            }, onReply: () => {
+                                setComposeProps({ replyTo: activeEmail });
+                                setShowCompose(true);
+                            }, onReplyAll: () => {
+                                setComposeProps({ replyTo: activeEmail, replyAll: true });
+                                setShowCompose(true);
+                            }, onForward: () => {
+                                setComposeProps({ replyTo: activeEmail, forward: true });
+                                setShowCompose(true);
+                            }, onBulkAction: (action) => handleBulkAction(action, activeEmail?.id) })) })] }), _jsx(ComposeModal, { isOpen: showCompose, onClose: closeCompose, replyTo: composeProps?.replyTo, replyAll: composeProps?.replyAll, forward: composeProps?.forward, accountId: accounts[0]?.id || '', accountEmail: accounts[0]?.email || '' }), _jsx(KeyboardShortcutsHelp, { isOpen: showShortcutsHelp, onClose: () => setShowShortcutsHelp(false) })] }));
 }

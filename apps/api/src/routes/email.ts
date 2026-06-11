@@ -2,6 +2,13 @@ import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
 import { executeAgent } from "../lib/agent-engine";
+import {
+  generateStateNonce,
+  setStateCookie,
+  verifyAndClearState,
+} from "../lib/oauth-state";
+
+const GMAIL_STATE_COOKIE = "gmail_oauth_state";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -11,6 +18,7 @@ type Bindings = {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   API_URL: string;
+  APP_URL: string;
 };
 
 type HonoEnv = { Bindings: Bindings };
@@ -39,6 +47,9 @@ email.get("/auth/gmail", async (c) => {
   ].join(" ");
 
   const apiUrl = c.env.API_URL ?? "https://api.sheetzlabs.com";
+  const state = generateStateNonce();
+  setStateCookie(c, GMAIL_STATE_COOKIE, state);
+
   const authUrl =
     `https://accounts.google.com/o/oauth2/v2/auth?` +
     `client_id=${c.env.GOOGLE_CLIENT_ID}` +
@@ -46,7 +57,8 @@ email.get("/auth/gmail", async (c) => {
     `&response_type=code` +
     `&scope=${encodeURIComponent(scopes)}` +
     `&access_type=offline` +
-    `&prompt=consent`;
+    `&prompt=consent` +
+    `&state=${state}`;
 
   return c.redirect(authUrl);
 });
@@ -56,7 +68,13 @@ email.get("/auth/gmail/callback", async (c) => {
   const code = c.req.query("code");
   if (!code) return c.json({ error: "No code provided" }, 400);
 
+  // Verify CSRF state nonce before trusting the code.
+  if (!verifyAndClearState(c, GMAIL_STATE_COOKIE, c.req.query("state"))) {
+    return c.json({ error: "Invalid OAuth state" }, 403);
+  }
+
   const apiUrl = c.env.API_URL ?? "https://api.sheetzlabs.com";
+  const appUrl = c.env.APP_URL ?? "https://app.sheetzlabs.com";
 
   const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -82,7 +100,7 @@ email.get("/auth/gmail/callback", async (c) => {
   const user = (await userResponse.json()) as { email: string };
 
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  const { data: newAccount } = await supabase
+  const { data: newAccount, error: upsertError } = await supabase
     .from("email_accounts")
     .upsert(
       {
@@ -99,12 +117,18 @@ email.get("/auth/gmail/callback", async (c) => {
     .select("id")
     .single();
 
-  if (newAccount?.id) {
-    const accessToken = tokens.access_token as string;
-    await syncLabelsForAccount(newAccount.id, accessToken, supabase);
+  if (upsertError || !newAccount?.id) {
+    return c.redirect(
+      `${appUrl}/dashboard/inbox?connected=false&error=${encodeURIComponent(
+        upsertError?.message ?? "Failed to link account"
+      )}`
+    );
   }
 
-  return c.redirect("https://sheetzlabs.com/dashboard/inbox?connected=true");
+  const accessToken = tokens.access_token as string;
+  await syncLabelsForAccount(newAccount.id, accessToken, supabase);
+
+  return c.redirect(`${appUrl}/dashboard/inbox?connected=true`);
 });
 
 // Disconnect account
@@ -549,51 +573,6 @@ email.get("/accounts/:id/sync-labels", async (c) => {
 });
 
 // ============================================
-// DEBUG: Test Gmail labels API directly
-// ============================================
-email.get("/test-labels/:accountId", async (c) => {
-  const accountId = c.req.param("accountId");
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-
-  const { data: account, error: accountError } = await supabase
-    .from("email_accounts")
-    .select("id, email, access_token, refresh_token, token_expires_at")
-    .eq("id", accountId)
-    .single();
-
-  if (accountError || !account) {
-    return c.json({ error: "Account not found", details: accountError }, 404);
-  }
-
-  let accessToken: string;
-  try {
-    accessToken = await getValidAccessToken(account, c.env, supabase);
-  } catch (e) {
-    return c.json({ error: "Token refresh failed", details: String(e) }, 500);
-  }
-
-  const response = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-
-  const status = response.status;
-  const body = await response.json() as Record<string, unknown>;
-  const labels = (body.labels as Array<{ id: string; name: string; type?: string }>) ?? [];
-
-  return c.json({
-    account: account.email,
-    token_expires_at: account.token_expires_at,
-    gmail_api_status: status,
-    labels_count: labels.length,
-    system_labels: labels.filter(l => l.type === "system").length,
-    user_labels: labels.filter(l => l.type === "user").length,
-    user_label_names: labels.filter(l => l.type === "user").map(l => l.name),
-    raw_response: body,
-  });
-});
-
-// ============================================
 // LABELS CRUD
 // ============================================
 email.get("/labels", async (c) => {
@@ -842,16 +821,28 @@ email.get("/search", async (c) => {
 // ============================================
 // SYNC (Background + Manual)
 // ============================================
-email.post("/sync", async (c) => {
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-  const account_id = c.req.query("account_id");
-
+/**
+ * Core email-sync orchestration. Exported so both the `/sync` route handler and
+ * the scheduled (cron) worker can call it directly — the cron no longer makes an
+ * HTTP request to its own public endpoint (which is now authenticated anyway).
+ *
+ * Lives here rather than in a separate `lib/email-sync.ts` because it depends on
+ * a cluster of module-private helpers (getValidAccessToken, syncLabelsForAccount,
+ * fullSync, syncViaHistory); moving those out would be a large refactor beyond the
+ * scope of this security pass.
+ */
+export async function runEmailSync(
+  env: Bindings,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  accountId?: string
+): Promise<Array<Record<string, unknown>>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let query: any = supabase.from("email_accounts").select("*").eq("sync_enabled", true);
-  if (account_id) query = query.eq("id", account_id);
+  if (accountId) query = query.eq("id", accountId);
 
   const { data: accounts } = await query;
-  const results = [];
+  const results: Array<Record<string, unknown>> = [];
 
   for (const account of accounts ?? []) {
     try {
@@ -860,7 +851,7 @@ email.post("/sync", async (c) => {
         .update({ sync_status: "syncing", sync_error: null })
         .eq("id", account.id);
 
-      const accessToken = await getValidAccessToken(account, c.env, supabase);
+      const accessToken = await getValidAccessToken(account, env, supabase);
 
       // Sync labels first so email-label assignments can be created
       await syncLabelsForAccount(account.id, accessToken, supabase);
@@ -888,6 +879,13 @@ email.post("/sync", async (c) => {
     }
   }
 
+  return results;
+}
+
+email.post("/sync", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const account_id = c.req.query("account_id") || undefined;
+  const results = await runEmailSync(c.env, supabase, account_id);
   return c.json({ synced: results });
 });
 

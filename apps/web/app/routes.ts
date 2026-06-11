@@ -4,6 +4,7 @@ export default [
   layout("routes/_marketing.tsx", [
     index("routes/_marketing._index.tsx"),
   ]),
+  route("api/*", "routes/api.$.tsx"),
   route("book/:slug", "routes/book.$slug.tsx"),
   route("book/cancel/:bookingId", "routes/book.cancel.$bookingId.tsx"),
   route("book/reschedule/:bookingId", "routes/book.reschedule.$bookingId.tsx"),

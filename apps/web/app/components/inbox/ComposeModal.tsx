@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFetcher } from 'react-router';
 import { X, Minus, Maximize2, Minimize2, Paperclip, Trash2, Send, Clock, ChevronDown, Sparkles, Loader2, FileText } from 'lucide-react';
 
-const API_URL = 'https://api.sheetzlabs.com';
+// Same-origin proxy (routes/api.$.tsx) — adds the founder's JWT server-side.
+const API_URL = '/api';
 
 interface Snippet {
   trigger: string;

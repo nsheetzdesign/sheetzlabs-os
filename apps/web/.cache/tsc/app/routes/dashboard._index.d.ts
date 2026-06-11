@@ -20,7 +20,9 @@ export declare function loader({ context }: LoaderFunctionArgs): Promise<{
     }[];
     pipeline: {
         created_at: string | null;
+        evaluation_requested_at: string | null;
         id: string;
+        last_evaluation_id: string | null;
         name: string;
         notes: string | null;
         problem_statement: string | null;

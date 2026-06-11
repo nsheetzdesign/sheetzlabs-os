@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Rss, Plus, Trash2, RefreshCw, BookmarkPlus, Check, ExternalLink } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
 import { EmptyState } from "~/components/ui/EmptyState";
 import { Button } from "~/components/ui/Button";
 export const meta = () => [{ title: "RSS Feeds — Sheetz Labs OS" }];
@@ -24,18 +25,17 @@ export async function loader({ context }) {
     };
 }
 export async function action({ request, context }) {
-    const supabase = getSupabaseClient(context.cloudflare.env);
+    const env = context.cloudflare.env;
+    const supabase = getSupabaseClient(env);
     const fd = await request.formData();
     const intent = fd.get("intent");
-    const apiUrl = context.cloudflare.env.INTERNAL_API_URL ??
-        "https://api.sheetzlabs.com";
     if (intent === "add_feed") {
         const url = fd.get("url")?.trim();
         const name = fd.get("name")?.trim() || new URL(url).hostname;
         const category = fd.get("category")?.trim() || null;
         if (!url)
             return data({ error: "URL required" }, { status: 400 });
-        const res = await fetch(`${apiUrl}/knowledge/feeds`, {
+        const res = await apiFetch(request, env, `/knowledge/feeds`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url, name, category }),
@@ -45,12 +45,12 @@ export async function action({ request, context }) {
     }
     if (intent === "delete_feed") {
         const id = fd.get("id");
-        await fetch(`${apiUrl}/knowledge/feeds/${id}`, { method: "DELETE" });
+        await apiFetch(request, env, `/knowledge/feeds/${id}`, { method: "DELETE" });
         return { ok: true };
     }
     if (intent === "fetch_feed") {
         const id = fd.get("id");
-        const res = await fetch(`${apiUrl}/knowledge/feeds/${id}/fetch`, { method: "POST" });
+        const res = await apiFetch(request, env, `/knowledge/feeds/${id}/fetch`, { method: "POST" });
         const result = (await res.json());
         return { added: result.added };
     }
@@ -61,7 +61,7 @@ export async function action({ request, context }) {
     }
     if (intent === "save_item") {
         const id = fd.get("id");
-        const res = await fetch(`${apiUrl}/knowledge/feeds/items/${id}/save`, {
+        const res = await apiFetch(request, env, `/knowledge/feeds/items/${id}/save`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ type: "clip" }),

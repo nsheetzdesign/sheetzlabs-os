@@ -39,6 +39,8 @@ interface Props {
   onSelectLabel: (labelId: string, accountId: string) => void;
   onDragOver: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
   onDrop: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
+  /** Public API origin for the Gmail OAuth start link (browser navigation). */
+  apiBase?: string;
 }
 
 const systemIcons: Record<string, React.ComponentType<{ size?: number }>> = {
@@ -64,6 +66,7 @@ export function InboxSidebar({
   onSelectLabel,
   onDragOver,
   onDrop,
+  apiBase = 'https://api.sheetzlabs.com',
 }: Props) {
   // All accounts start collapsed, but auto-expand active account
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
@@ -278,7 +281,7 @@ export function InboxSidebar({
 
         {accounts.length === 0 && (
           <a
-            href="https://api.sheetzlabs.com/email/auth/gmail"
+            href={`${apiBase}/email/auth/gmail`}
             className="flex items-center gap-2 px-3 py-2 text-sm text-emerald-400 hover:text-emerald-300"
           >
             <Plus size={16} />

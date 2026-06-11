@@ -1,11 +1,10 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, Link } from "react-router";
 import { ChevronRight, CheckCircle, Circle, Clock, Sparkles } from "lucide-react";
+import { apiFetch } from "~/lib/api";
 
-export async function loader({ params, context }: LoaderFunctionArgs) {
-  const response = await fetch(
-    `${context.cloudflare.env.API_URL}/learning/paths/${params.slug}`
-  );
+export async function loader({ request, params, context }: LoaderFunctionArgs) {
+  const response = await apiFetch(request, context.cloudflare.env, `/learning/paths/${params.slug}`);
   const data: any = await response.json();
 
   if (!data.path) {
@@ -14,9 +13,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 
   let progress: any[] = [];
   try {
-    const progressRes = await fetch(
-      `${context.cloudflare.env.API_URL}/learning/progress/${data.path.id}`
-    );
+    const progressRes = await apiFetch(request, context.cloudflare.env, `/learning/progress/${data.path.id}`);
     const progressData: any = await progressRes.json();
     progress = progressData.progress || [];
   } catch (e) {

@@ -12,108 +12,37 @@ type SubCalendarEntry = {
     calendars: SubCalendar[];
 };
 export declare function loader({ request, context }: LoaderFunctionArgs): Promise<{
-    events: (({
-        error: true;
-    } & "column 'title' does not exist on 'ventures'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'tickets'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'tasks'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'pipeline'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'revenue'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'expenses'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'relationships'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'knowledge'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'agents'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'agent_actions'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'agent_runs'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'content_queue'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'expense_connections'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'interactions'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'milestones'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'stripe_connections'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'stack_templates'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'stripe_product_mappings'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'venture_connections'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'venture_docs'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'venture_links'.") | ({
-        error: true;
-    } & "column 'title' does not exist on 'venture_stack'."))[];
-    accounts: (({
-        error: true;
-    } & "column 'email' does not exist on 'ventures'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'tickets'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'tasks'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'pipeline'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'revenue'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'expenses'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'relationships'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'knowledge'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'agents'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'agent_actions'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'agent_runs'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'content_queue'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'expense_connections'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'interactions'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'milestones'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'stripe_connections'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'stack_templates'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'stripe_product_mappings'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'venture_connections'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'venture_docs'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'venture_links'.") | ({
-        error: true;
-    } & "column 'email' does not exist on 'venture_stack'."))[];
+    events: {
+        id: string;
+        title: string;
+        start_at: string;
+        end_at: string;
+        is_time_block: boolean | null;
+        all_day: boolean | null;
+        account_id: string | null;
+        task_id: string | null;
+        google_calendar_id: string | null;
+    }[];
+    accounts: {
+        id: string;
+        email: string;
+        color: string | null;
+        sync_enabled: boolean | null;
+        last_sync_at: string | null;
+    }[];
     tasks: {
         id: string;
         title: string;
         due_date: string | null;
-        priority: "urgent" | "high" | "medium" | "low" | null;
+        priority: "medium" | "urgent" | "high" | "low" | null;
         status: "backlog" | "todo" | "in-progress" | "review" | "done" | "blocked" | null;
     }[];
     subCalendars: SubCalendarEntry[];
     view: string;
     weekOffset: number;
     weekStart: string;
+    apiBase: string;
 }>;
 export declare function action({ request, context }: ActionFunctionArgs): Promise<null>;
-export default function Calendar(): import("react/jsx-runtime").JSX.Element;
+export default function CalendarPage(): import("react/jsx-runtime").JSX.Element;
 export {};

@@ -1,40 +1,116 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { Search, LayoutDashboard, Box, Rocket, DollarSign, Users, CheckSquare, BookOpen, Brain, X, } from "lucide-react";
-const actions = [
-    { label: "Command Center", icon: LayoutDashboard, to: "/dashboard" },
-    { label: "Ventures", icon: Box, to: "/dashboard/ventures" },
-    { label: "Pipeline", icon: Rocket, to: "/dashboard/pipeline" },
-    { label: "Revenue", icon: DollarSign, to: "/dashboard/revenue" },
-    { label: "Relationships", icon: Users, to: "/dashboard/relationships" },
-    { label: "Tasks", icon: CheckSquare, to: "/dashboard/tasks" },
-    { label: "Knowledge", icon: BookOpen, to: "/dashboard/knowledge" },
-    { label: "AI Agents", icon: Brain, to: "/dashboard/agents" },
+import { Search, X, LayoutDashboard, Rocket, GitBranch, Users, CheckSquare, Mail, Calendar, BookOpen, PenSquare, Bot, BarChart3, Plus, Lightbulb, UserPlus, ListPlus, FilePlus, FileText, Zap, MessageSquare, Megaphone, Package, DollarSign, Settings, TrendingUp, Crown, } from "lucide-react";
+const ACTIONS = [
+    // Navigation
+    { id: "nav-dashboard", label: "Go to Dashboard", description: "Open command center", shortcut: "g d", category: "navigation", icon: LayoutDashboard, type: "navigate", data: { route: "/dashboard" } },
+    { id: "nav-ventures", label: "Go to Ventures", description: "View all ventures", shortcut: "g v", category: "navigation", icon: Rocket, type: "navigate", data: { route: "/dashboard/ventures" } },
+    { id: "nav-pipeline", label: "Go to Pipeline", description: "View idea pipeline", shortcut: "g p", category: "navigation", icon: GitBranch, type: "navigate", data: { route: "/dashboard/pipeline" } },
+    { id: "nav-relationships", label: "Go to Relationships", description: "View CRM", shortcut: "g r", category: "navigation", icon: Users, type: "navigate", data: { route: "/dashboard/relationships" } },
+    { id: "nav-tasks", label: "Go to Tasks", description: "View all tasks", shortcut: "g t", category: "navigation", icon: CheckSquare, type: "navigate", data: { route: "/dashboard/tasks" } },
+    { id: "nav-inbox", label: "Go to Inbox", description: "Open email inbox", shortcut: "g i", category: "navigation", icon: Mail, type: "navigate", data: { route: "/dashboard/inbox" } },
+    { id: "nav-calendar", label: "Go to Calendar", description: "Open calendar", shortcut: "g c", category: "navigation", icon: Calendar, type: "navigate", data: { route: "/dashboard/calendar" } },
+    { id: "nav-knowledge", label: "Go to Knowledge", description: "Open knowledge base", shortcut: "g k", category: "navigation", icon: BookOpen, type: "navigate", data: { route: "/dashboard/knowledge" } },
+    { id: "nav-content", label: "Go to Content", description: "Content management", shortcut: "g o", category: "navigation", icon: PenSquare, type: "navigate", data: { route: "/dashboard/content" } },
+    { id: "nav-agents", label: "Go to Agents", description: "AI agents dashboard", shortcut: "g a", category: "navigation", icon: Bot, type: "navigate", data: { route: "/dashboard/agents" } },
+    { id: "nav-analytics", label: "Go to Analytics", description: "View analytics", shortcut: "g n", category: "navigation", icon: BarChart3, type: "navigate", data: { route: "/dashboard/analytics" } },
+    { id: "nav-chat", label: "Go to Chat", description: "AI assistant", shortcut: "g h", category: "navigation", icon: MessageSquare, type: "navigate", data: { route: "/dashboard/chat" } },
+    // Create
+    { id: "create-venture", label: "New Venture", description: "Create a new venture", shortcut: "c v", category: "create", icon: Plus, type: "create", data: { route: "/dashboard/ventures/new" } },
+    { id: "create-pipeline", label: "New Pipeline Idea", description: "Add idea to pipeline", shortcut: "c p", category: "create", icon: Lightbulb, type: "create", data: { route: "/dashboard/pipeline/new" } },
+    { id: "create-relationship", label: "New Relationship", description: "Add a contact", shortcut: "c r", category: "create", icon: UserPlus, type: "create", data: { route: "/dashboard/relationships/new" } },
+    { id: "create-task", label: "New Task", description: "Create a task", shortcut: "c t", category: "create", icon: ListPlus, type: "create", data: { route: "/dashboard/tasks/new" } },
+    { id: "create-knowledge", label: "New Knowledge", description: "Create knowledge item", shortcut: "c k", category: "create", icon: FilePlus, type: "create", data: { route: "/dashboard/knowledge/new" } },
+    { id: "create-content", label: "New Content", description: "Create content", shortcut: "c o", category: "create", icon: FileText, type: "create", data: { route: "/dashboard/content/new" } },
+    { id: "create-capture", label: "Quick Capture", description: "Capture a thought", shortcut: "c c", category: "create", icon: Zap, type: "create", data: { route: "/dashboard/knowledge/captures" } },
+    // Chat
+    { id: "chat-general", label: "Chat with Chief of Staff", description: "General assistant", category: "chat", icon: Crown, type: "chat", data: { department: "" } },
+    { id: "chat-marketing", label: "Chat with Marketing", description: "Marketing department", category: "chat", icon: Megaphone, type: "chat", data: { department: "marketing" } },
+    { id: "chat-product", label: "Chat with Product", description: "Product department", category: "chat", icon: Package, type: "chat", data: { department: "product" } },
+    { id: "chat-finance", label: "Chat with Finance", description: "Finance department", category: "chat", icon: DollarSign, type: "chat", data: { department: "finance" } },
+    { id: "chat-research", label: "Chat with Research", description: "Research department", category: "chat", icon: Search, type: "chat", data: { department: "research" } },
+    { id: "chat-operations", label: "Chat with Operations", description: "Operations department", category: "chat", icon: Settings, type: "chat", data: { department: "operations" } },
+    // Agents
+    { id: "agent-finance", label: "Run Finance Analyst", description: "Analyze finances now", category: "agents", icon: TrendingUp, type: "agent", data: { slug: "finance-analyst" } },
+    { id: "agent-chief", label: "Run Chief of Staff", description: "Weekly digest", category: "agents", icon: Crown, type: "agent", data: { slug: "chief-of-staff" } },
 ];
+const CATEGORY_LABELS = {
+    navigation: "Go to",
+    create: "Create",
+    chat: "Chat",
+    agents: "Agents",
+};
 export function CommandPalette({ open, onClose, }) {
     const [query, setQuery] = useState("");
+    const [selectedIndex, setSelectedIndex] = useState(0);
     const inputRef = useRef(null);
     const navigate = useNavigate();
     useEffect(() => {
         if (open) {
             setTimeout(() => inputRef.current?.focus(), 10);
             setQuery("");
+            setSelectedIndex(0);
         }
     }, [open]);
     const filtered = query
-        ? actions.filter((a) => a.label.toLowerCase().includes(query.toLowerCase()))
-        : actions;
-    function select(to) {
-        navigate(to);
+        ? ACTIONS.filter((a) => a.label.toLowerCase().includes(query.toLowerCase()) ||
+            (a.description?.toLowerCase().includes(query.toLowerCase())))
+        : ACTIONS;
+    // Group by category
+    const grouped = {};
+    for (const action of filtered) {
+        if (!grouped[action.category])
+            grouped[action.category] = [];
+        grouped[action.category].push(action);
+    }
+    // Flat list for index tracking
+    const flat = filtered;
+    useEffect(() => {
+        setSelectedIndex(0);
+    }, [query]);
+    function executeAction(action) {
         onClose();
+        switch (action.type) {
+            case "navigate":
+            case "create":
+                navigate(action.data.route);
+                break;
+            case "chat": {
+                const params = action.data.department
+                    ? `?department=${action.data.department}`
+                    : "";
+                navigate(`/dashboard/chat${params}`);
+                break;
+            }
+            case "agent":
+                navigate(`/dashboard/agents/${action.data.slug}`);
+                break;
+        }
     }
     if (!open)
         return null;
-    return (_jsx("div", { className: "fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-24 backdrop-blur-sm", onClick: onClose, children: _jsxs("div", { className: "w-full max-w-lg rounded-xl border border-surface-2 bg-surface-1 shadow-2xl", onClick: (e) => e.stopPropagation(), children: [_jsxs("div", { className: "flex items-center gap-3 border-b border-surface-2 px-4 py-3", children: [_jsx(Search, { className: "h-4 w-4 shrink-0 text-zinc-500" }), _jsx("input", { ref: inputRef, value: query, onChange: (e) => setQuery(e.target.value), placeholder: "Search or navigate...", className: "flex-1 bg-transparent text-sm text-white placeholder-zinc-500 outline-none", onKeyDown: (e) => {
-                                if (e.key === "Escape")
+    return (_jsx("div", { className: "fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-24 backdrop-blur-sm", onClick: onClose, children: _jsxs("div", { className: "w-full max-w-xl rounded-xl border border-surface-2 bg-surface-1 shadow-2xl overflow-hidden", onClick: (e) => e.stopPropagation(), children: [_jsxs("div", { className: "flex items-center gap-3 border-b border-surface-2 px-4 py-3", children: [_jsx(Search, { className: "h-4 w-4 shrink-0 text-zinc-500" }), _jsx("input", { ref: inputRef, value: query, onChange: (e) => setQuery(e.target.value), placeholder: "Type a command or search...", className: "flex-1 bg-transparent text-sm text-white placeholder-zinc-500 outline-none", onKeyDown: (e) => {
+                                if (e.key === "Escape") {
                                     onClose();
-                                if (e.key === "Enter" && filtered[0])
-                                    select(filtered[0].to);
-                            } }), _jsx("button", { onClick: onClose, className: "text-zinc-500 transition-colors hover:text-zinc-300", children: _jsx(X, { className: "h-4 w-4" }) })] }), _jsx("div", { className: "p-2", children: filtered.length === 0 ? (_jsx("p", { className: "px-3 py-4 text-center text-sm text-zinc-500", children: "No results" })) : (filtered.map(({ label, icon: Icon, to }) => (_jsxs("button", { onClick: () => select(to), className: "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-zinc-300 transition-colors hover:bg-surface-2 hover:text-white", children: [_jsx(Icon, { className: "h-4 w-4 text-zinc-500" }), label] }, to)))) }), _jsxs("div", { className: "border-t border-surface-2 px-4 py-2 font-mono text-xs text-zinc-600", children: [_jsx("kbd", { children: "\u21B5" }), " to select \u00B7 ", _jsx("kbd", { children: "esc" }), " to close"] })] }) }));
+                                }
+                                else if (e.key === "ArrowDown") {
+                                    e.preventDefault();
+                                    setSelectedIndex((i) => Math.min(i + 1, flat.length - 1));
+                                }
+                                else if (e.key === "ArrowUp") {
+                                    e.preventDefault();
+                                    setSelectedIndex((i) => Math.max(i - 1, 0));
+                                }
+                                else if (e.key === "Enter" && flat[selectedIndex]) {
+                                    e.preventDefault();
+                                    executeAction(flat[selectedIndex]);
+                                }
+                            } }), _jsx("button", { onClick: onClose, className: "text-zinc-500 transition-colors hover:text-zinc-300", children: _jsx(X, { className: "h-4 w-4" }) })] }), _jsx("div", { className: "max-h-96 overflow-auto p-2", children: flat.length === 0 ? (_jsxs("p", { className: "px-3 py-6 text-center text-sm text-zinc-500", children: ["No results for \u201C", query, "\u201D"] })) : (Object.entries(grouped).map(([category, actions]) => (_jsxs("div", { className: "mb-1", children: [_jsx("div", { className: "px-3 py-1.5 text-xs font-medium text-zinc-600 uppercase tracking-wider", children: CATEGORY_LABELS[category] || category }), actions.map((action) => {
+                                const globalIndex = flat.indexOf(action);
+                                const Icon = action.icon;
+                                return (_jsxs("button", { onClick: () => executeAction(action), onMouseEnter: () => setSelectedIndex(globalIndex), className: `flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${globalIndex === selectedIndex
+                                        ? "bg-surface-2 text-white"
+                                        : "text-zinc-300 hover:bg-surface-2/50"}`, children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsx(Icon, { className: "h-4 w-4 shrink-0 text-zinc-500" }), _jsxs("div", { className: "text-left", children: [_jsx("div", { children: action.label }), action.description && (_jsx("div", { className: "text-xs text-zinc-500", children: action.description }))] })] }), action.shortcut && (_jsx("div", { className: "flex shrink-0 gap-1", children: action.shortcut.split(" ").map((key, i) => (_jsx("kbd", { className: "rounded border border-surface-3 bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-zinc-400", children: key }, i))) }))] }, action.id));
+                            })] }, category)))) }), _jsxs("div", { className: "border-t border-surface-2 px-4 py-2 font-mono text-xs text-zinc-600", children: [_jsx("kbd", { children: "\u2191\u2193" }), " navigate \u00B7 ", _jsx("kbd", { children: "\u21B5" }), " select \u00B7 ", _jsx("kbd", { children: "esc" }), " close"] })] }) }));
 }

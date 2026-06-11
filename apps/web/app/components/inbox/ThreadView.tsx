@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useFetcher } from 'react-router';
 import { ChevronDown, ChevronUp, Reply, ReplyAll, Forward, Star, Archive, Trash2 } from 'lucide-react';
+import { EmailHtmlFrame } from './EmailHtmlFrame';
 
 interface Email {
   id: string;
@@ -167,7 +168,7 @@ export function ThreadView({ emails, onReply, onReplyAll, onForward, onClose }: 
 
                   <div className="pl-7 prose prose-invert prose-sm max-w-none">
                     {email.body_html ? (
-                      <div dangerouslySetInnerHTML={{ __html: email.body_html }} />
+                      <EmailHtmlFrame html={email.body_html} />
                     ) : (
                       <pre className="whitespace-pre-wrap font-sans">{email.body_text}</pre>
                     )}

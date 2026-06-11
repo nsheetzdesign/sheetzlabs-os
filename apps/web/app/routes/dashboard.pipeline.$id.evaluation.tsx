@@ -3,8 +3,7 @@ import { useLoaderData, useFetcher, Link, redirect } from "react-router";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
-
-const API_URL = "https://api.sheetzlabs.com";
+import { apiFetch } from "~/lib/api";
 
 export async function loader({ params, context }: LoaderFunctionArgs) {
   const supabase = getSupabaseClient(context.cloudflare.env);
@@ -31,7 +30,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
   if (intent === "evaluate") {
     // Call the API to trigger evaluation
-    await fetch(`${API_URL}/pipeline/${params.id}/evaluate`, { method: "POST" });
+    await apiFetch(request, context.cloudflare.env, `/pipeline/${params.id}/evaluate`, { method: "POST" });
     return redirect(`/dashboard/ventures/pipeline/${params.id}/evaluation`);
   }
 

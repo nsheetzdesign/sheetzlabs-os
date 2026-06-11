@@ -1,10 +1,10 @@
 import type { ActionFunctionArgs } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
+import { apiFetch } from '~/lib/api';
 
 export async function action({ request, context }: ActionFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
   const supabase = getSupabaseClient(env as any);
-  const apiUrl = env.INTERNAL_API_URL ?? 'https://api.sheetzlabs.com';
 
   // Parse form data to check for special intents
   const formData = await request.formData().catch(() => new FormData());
@@ -17,7 +17,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       return Response.json({ success: false, error: 'accountId required' }, { status: 400 });
     }
     try {
-      const res = await fetch(`${apiUrl}/email/accounts/${accountId}/full-sync`, {
+      const res = await apiFetch(request, env, `/email/accounts/${accountId}/full-sync`, {
         method: 'POST',
       });
       const data = await res.json();
@@ -38,7 +38,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
   for (const account of accounts ?? []) {
     try {
-      const res = await fetch(`${apiUrl}/email/accounts/${account.id}/sync`, {
+      const res = await apiFetch(request, env, `/email/accounts/${account.id}/sync`, {
         method: 'POST',
       });
       const data = await res.json() as Record<string, unknown>;

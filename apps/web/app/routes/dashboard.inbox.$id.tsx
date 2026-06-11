@@ -3,7 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react
 import { useLoaderData, Link, useFetcher, useNavigate } from "react-router";
 import { ArrowLeft, Star, Reply, Wand2, Archive, Trash2, Clock } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
-import { forceEmailDarkMode } from "~/lib/email-utils";
+import { EmailHtmlFrame } from "~/components/inbox/EmailHtmlFrame";
 import { SnoozePicker } from "~/components/inbox/SnoozePicker";
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
@@ -231,10 +231,7 @@ export default function EmailDetail() {
         {/* Body */}
         <div className="rounded-lg border border-surface-2/50 bg-surface-1/20 p-6">
           {bodyHtml ? (
-            <div
-              className="text-sm leading-relaxed"
-              dangerouslySetInnerHTML={{ __html: forceEmailDarkMode(bodyHtml) }}
-            />
+            <EmailHtmlFrame html={bodyHtml} />
           ) : (
             <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-300">
               {bodyText || email.snippet || "(empty)"}

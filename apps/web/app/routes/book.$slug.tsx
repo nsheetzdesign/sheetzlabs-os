@@ -44,8 +44,8 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
   if (intent === "get_slots") {
     const date = fd.get("date") as string;
     const res = await fetch(`${apiUrl}/booking/public/${params.slug}/slots?date=${date}`);
-    const data = await res.json();
-    return data;
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ...data, status: res.status };
   }
 
   if (intent === "book") {
@@ -60,8 +60,8 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
         timezone: fd.get("timezone"),
       }),
     });
-    const data = await res.json();
-    return data;
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ...data, status: res.status };
   }
 
   return null;
@@ -69,8 +69,8 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
 
 export default function BookingPage() {
   const { link } = useLoaderData<typeof loader>();
-  const slotFetcher = useFetcher<{ slots: string[]; date: string }>();
-  const bookFetcher = useFetcher<{ success?: boolean; booking?: { id: string; scheduled_at: string; duration_minutes: number } }>();
+  const slotFetcher = useFetcher<{ slots?: string[]; date?: string; status?: number; error?: string }>();
+  const bookFetcher = useFetcher<{ success?: boolean; booking?: { id: string; scheduled_at: string; duration_minutes: number }; status?: number; error?: string }>();
 
   const [step, setStep] = useState<"date" | "time" | "details" | "confirmed">("date");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -78,6 +78,14 @@ export default function BookingPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
+  const [bookError, setBookError] = useState<string | null>(null);
+
+  function refetchSlots(date: string) {
+    const fd = new FormData();
+    fd.set("intent", "get_slots");
+    fd.set("date", date);
+    slotFetcher.submit(fd, { method: "post" });
+  }
 
   const rules = link.availability_rules;
   const dateRangeDays = rules.date_range_days ?? 14;
@@ -102,10 +110,27 @@ export default function BookingPage() {
     setStep("time");
   }, [selectedDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Move to confirmed when booking succeeds
+  // Handle booking result — surface 409/422/503 instead of silently failing (BK-8)
   useEffect(() => {
-    if (bookFetcher.data?.success) setStep("confirmed");
-  }, [bookFetcher.data]);
+    const d = bookFetcher.data;
+    if (!d) return;
+    if (d.success) {
+      setBookError(null);
+      setStep("confirmed");
+      return;
+    }
+    if (d.status === 409) {
+      setBookError("That time was just taken — please pick another slot.");
+      setStep("time");
+      if (selectedDate) refetchSlots(selectedDate);
+    } else if (d.status === 422) {
+      setBookError("Please double-check your name and email, then try again.");
+    } else if (d.status === 503) {
+      setBookError("Availability is temporarily unavailable. Please try again in a moment.");
+    } else if (d.status && d.status >= 400) {
+      setBookError("Something went wrong confirming your booking. Please try again.");
+    }
+  }, [bookFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleBook() {
     if (!selectedTime || !name || !email) return;
@@ -219,8 +244,13 @@ export default function BookingPage() {
                     })}
                   </p>
                 )}
+                {bookError && (
+                  <p className="text-sm text-amber-400 mb-3">{bookError}</p>
+                )}
                 {isLoadingSlots ? (
                   <p className="text-zinc-500 text-sm">Loading available times…</p>
+                ) : slotFetcher.data?.status === 503 ? (
+                  <p className="text-amber-400 text-sm">Availability is temporarily unavailable. Please try again shortly.</p>
                 ) : slots.length === 0 ? (
                   <p className="text-zinc-500 text-sm">No available times on this date.</p>
                 ) : (
@@ -307,6 +337,9 @@ export default function BookingPage() {
                       />
                     </div>
                   </div>
+                  {bookError && (
+                    <p className="text-sm text-amber-400">{bookError}</p>
+                  )}
                   <button
                     onClick={handleBook}
                     disabled={!name || !email || isBooking}
