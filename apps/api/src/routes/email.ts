@@ -1094,8 +1094,15 @@ email.get("/search", async (c) => {
   if (filters.after) query = query.gte("received_at", filters.after);
   if (filters.before) query = query.lte("received_at", filters.before);
   if (textQuery) {
-    const t = esc(textQuery);
-    query = query.or(`subject.ilike.%${t}%,body_text.ilike.%${t}%,from_name.ilike.%${t}%`);
+    // Two escaping layers: esc() makes %/_/\ literal in the LIKE pattern; then the
+    // pattern is wrapped in double quotes for PostgREST's .or() parser and its `,`
+    // `(` `)` `"` `\` are neutralized — otherwise a query like `test,)inject` splits
+    // the or-filter into malformed conditions and the request 500s (Prompt 55).
+    const like = `%${esc(textQuery)}%`;
+    const pg = like.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    query = query.or(
+      `subject.ilike."${pg}",body_text.ilike."${pg}",from_name.ilike."${pg}"`
+    );
   }
 
   const { data, error } = await query;
