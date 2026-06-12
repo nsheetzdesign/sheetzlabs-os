@@ -1,4 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
+import { primaryAccount, recipientAccount, send, findBySubject, trigger, purgeSubject } from "../lib/email";
+import { pollFor } from "../lib/poll";
+import { e2eSubject } from "../lib/tags";
 
 /**
  * Responsive inbox layout (Prompt 60). Runs the "inbox loads" + one selection
@@ -9,7 +12,8 @@ import { test, expect, type Page } from "@playwright/test";
  *   <1024  nav collapses to a hamburger-triggered, focus-trapped drawer
  *
  * The invariant at every size: no horizontal PAGE scroll (scrollWidth ≤ innerWidth)
- * and the list is always reachable. Read-only — no mailbox mutations.
+ * and the list is always reachable. The e2e mailbox is otherwise empty, so we seed
+ * one tagged INBOX email up front (so there's a row to select) and purge it after.
  */
 
 async function expectNoPageHScroll(page: Page) {
@@ -28,6 +32,28 @@ const VIEWPORTS = [
 ] as const;
 
 test.describe("inbox responsive layout", () => {
+  const subject = e2eSubject("responsive");
+
+  test.beforeAll(async () => {
+    test.setTimeout(200_000);
+    const sender = await primaryAccount();
+    const recipient = await recipientAccount();
+    await send(sender, recipient.email, subject, "Responsive layout seed body.");
+    // The web inbox reads straight from the DB, so we only need the INBOX row to
+    // land — trigger the recipient sync and poll until it does (≤ ~3 min).
+    await pollFor(
+      async () => {
+        await trigger(recipient.id);
+        return findBySubject(subject, { folder: "INBOX" });
+      },
+      { timeoutMs: 180_000, intervalMs: 15_000, label: "seed inbox arrival" },
+    );
+  });
+
+  test.afterAll(async () => {
+    await purgeSubject(subject);
+  });
+
   for (const vp of VIEWPORTS) {
     test(`loads + selects with no page overflow @ ${vp.name}`, async ({ page }) => {
       const pageErrors: string[] = [];
