@@ -83,8 +83,9 @@ test.describe("booking rules enforcement", () => {
     const booked = await bookSlot(link.slug, free.slot, GUEST);
     expect(booked.status, JSON.stringify(booked.body)).toBe(200);
     const id = booked.body.booking!.id;
+    const token = booked.body.booking!.management_token!;
 
-    const res = await apiPublic<string>(`/booking/public/${id}/ics`);
+    const res = await apiPublic<string>(`/booking/public/${id}/ics?token=${token}`);
     expect(res.status).toBe(200);
     const ics = String(res.body);
     expect(ics).toContain("BEGIN:VCALENDAR");

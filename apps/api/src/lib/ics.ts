@@ -29,28 +29,52 @@ function fmt(date: Date): string {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 }
 
-/** Escape per RFC 5545 §3.3.11 (text value): backslash, comma, semicolon, newline. */
+/**
+ * Escape per RFC 5545 §3.3.11 (text value): backslash, comma, semicolon, newline.
+ * Critically, ALL line breaks — CRLF, lone CR, lone LF — collapse to the escaped
+ * `\n` sequence. A bare `\r` left unescaped (the old gap, NS-ICS-1) is treated by
+ * lenient parsers as a line boundary, letting a guest name/notes inject arbitrary
+ * VEVENT properties. Remaining C0 control chars are stripped — they have no valid
+ * place in a text value and only serve to confuse parsers.
+ */
 function esc(text: string): string {
   return text
     .replace(/\\/g, "\\\\")
-    .replace(/\n/g, "\\n")
+    .replace(/\r\n|\r|\n/g, "\\n")
     .replace(/,/g, "\\,")
-    .replace(/;/g, "\\;");
+    .replace(/;/g, "\\;")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 
-/** Fold lines to ≤75 octets per RFC 5545 §3.1 (CRLF + leading space continuation). */
+/**
+ * Fold lines to ≤75 OCTETS per RFC 5545 §3.1 (CRLF + leading-space continuation).
+ * Counts UTF-8 bytes (not UTF-16 code units) and never splits a multi-byte char,
+ * so non-ASCII guest names fold correctly (NS-ICS-2). The leading space on a
+ * continuation line counts toward its 75-octet budget, hence 74 octets of content.
+ */
 function fold(line: string): string {
-  if (line.length <= 75) return line;
-  const chunks: string[] = [];
-  let rest = line;
-  chunks.push(rest.slice(0, 75));
-  rest = rest.slice(75);
-  while (rest.length > 74) {
-    chunks.push(" " + rest.slice(0, 74));
-    rest = rest.slice(74);
+  const enc = new TextEncoder();
+  if (enc.encode(line).length <= 75) return line;
+  const out: string[] = [];
+  let cur = "";
+  let curBytes = 0;
+  let first = true;
+  for (const ch of line) {
+    const chBytes = enc.encode(ch).length;
+    const budget = first ? 75 : 74;
+    if (curBytes + chBytes > budget) {
+      out.push(first ? cur : " " + cur);
+      first = false;
+      cur = ch;
+      curBytes = chBytes;
+    } else {
+      cur += ch;
+      curBytes += chBytes;
+    }
   }
-  if (rest.length) chunks.push(" " + rest);
-  return chunks.join("\r\n");
+  if (cur) out.push(first ? cur : " " + cur);
+  return out.join("\r\n");
 }
 
 export function buildIcs(ev: IcsEvent): string {

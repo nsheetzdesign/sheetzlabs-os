@@ -13,22 +13,26 @@ type CancelBooking = Pick<
   "id" | "guest_name" | "guest_email" | "scheduled_at" | "duration_minutes" | "timezone" | "status"
 > & { booking_links: { title: string } };
 
-export async function loader({ params, context }: LoaderFunctionArgs) {
+export async function loader({ params, request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
   const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
+  // The management token (NS-BK-2) arrives in the manage-link URL; without it the
+  // public detail endpoint 404s.
+  const token = new URL(request.url).searchParams.get("token") ?? "";
+  const tokenQs = token ? `?token=${encodeURIComponent(token)}` : "";
 
-  const response = await fetch(`${apiUrl}/booking/public/booking/${params.bookingId}`);
+  const response = await fetch(`${apiUrl}/booking/public/booking/${params.bookingId}${tokenQs}`);
 
   if (!response.ok) {
     throw new Response("Booking not found", { status: 404 });
   }
 
   const data = (await response.json()) as { booking: CancelBooking };
-  return { booking: data.booking, apiUrl: env.API_URL ?? "https://api.sheetzlabs.com" };
+  return { booking: data.booking, apiUrl: env.API_URL ?? "https://api.sheetzlabs.com", token };
 }
 
 export default function CancelBookingPage() {
-  const { booking, apiUrl } = useLoaderData<typeof loader>();
+  const { booking, apiUrl, token } = useLoaderData<typeof loader>();
   const [cancelled, setCancelled] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +42,8 @@ export default function CancelBookingPage() {
     setError(null);
 
     try {
-      const response = await fetch(`${apiUrl}/booking/public/cancel/${booking.id}`, {
+      const tokenQs = token ? `?token=${encodeURIComponent(token)}` : "";
+      const response = await fetch(`${apiUrl}/booking/public/cancel/${booking.id}${tokenQs}`, {
         method: "POST",
       });
 

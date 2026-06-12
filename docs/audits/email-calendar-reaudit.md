@@ -281,3 +281,34 @@ Each item is currently acceptable; the **trigger** is the condition under which 
 - [x] DST slot-math reasoning shown explicitly — verified correct on both spring-forward and fall-back
 - [x] New findings severity-classified in original-audit format; residual-risk register with triggers
 - [x] NO code changes made
+
+---
+
+## Addendum — 2026-06-12 — Prompt 57 Remediation (`53` migration + code)
+
+The re-audit above was read-only. Prompt 57 remediated the cluster of new-surface Majors
+that affect daily-driver use or the public booking surface. History above is unchanged;
+this addendum records dispositions. Verified by `pnpm e2e` (incl. new specs) + `pnpm --filter web build` + API `tsc`.
+
+| Finding | New status | What shipped |
+|---------|-----------|--------------|
+| NS-CAL-1 drag PATCH silent desync | **RESOLVED** | `calendar.ts` PATCH `/events/:id` is now Google-first with `.ok` checked; DB write happens **only** on a 2xx, else returns `502` and the web client reverts + toasts. Local-only (`local-`/`timeblock-`) events branch explicitly to a DB-truth write. |
+| NS-BK-1 PII under UUID-only access | **RESOLVED** | Migration 053 adds `bookings.management_token` (32-byte). Public detail/`.ics` require `?token=` (constant-time, `lib/timing-safe.ts`); 404 on mismatch. |
+| NS-BK-2 mutate authority by UUID alone | **RESOLVED** | Cancel + reschedule (guest path) require the management token; host paths stay JWT-gated. Tokens flow through every email + the confirmation/manage pages. |
+| NS-ICS-1 `.ics` CR injection | **RESOLVED** | `ics.ts esc()` collapses `\r\n`/`\r`/`\n`→`\n` and strips other C0 controls; zod rejects control chars in `guest_name`/`guest_notes`. Fold pass now counts UTF-8 octets (NS-ICS-2 too). |
+| NS-SLOT-1 duplicate slots | **RESOLVED** | `computeSlotsForDate` dedups emitted instants via a Set + sort. |
+| NS-SLOT-2 daily-cap race | **RESOLVED** | `create_booking_atomic()` RPC: per-(link,day) advisory lock → re-count → insert in one txn. Cap overrun → 409. |
+| NS-IMG-1..4 image-proxy SSRF | **RESOLVED** | `redirect:"manual"` (3xx→502); strict `image/*` only; real IP parser blocks decimal/octal/hex/short-form IPv4, IPv6, and IPv4-mapped IPv6; fresh Response strips upstream headers. |
+| NS-AUTH-1 `X-Internal-Secret` timing | **RESOLVED** | Constant-time compare via `lib/timing-safe.ts`. |
+| NS-CRON-1 unbounded cron selects | **RESOLVED** | Reminder + completed selects are `.order(...).limit(...)`; carryover handled next minute. |
+| NS-UNDO-1 undo log unbounded + stale replay | **RESOLVED** | Cron purges `email_undo_actions` >24h; "undo last" is recency-bounded (5 min). |
+| NS-UNDO-2 bulk/undo no ownership scoping | **RESOLVED (single-tenant chokepoint)** | `/bulk` + `/undo` scope targets to configured accounts via one helper; becomes user-scoped the moment `email_accounts` gains a `user_id`. |
+| NS-OAUTH-1 `oauth_states` consume race | **RESOLVED** | `DELETE … RETURNING` atomic claim. |
+| Rate-limiter fails open (BK-5 note) | **RESOLVED for mutations** | Booking POSTs fail **closed** (503) when the limiter binding is absent/errors; slot display still fails open (logged). |
+
+**Still residual (unchanged trigger):** OAuth tokens plaintext at rest; no RLS / service-role
+everywhere; alias From-header (EC-6); `$id` calendar page duplication; the `email_accounts`/
+`emails`/`calendar_events`/`bookings` lack of `user_id` (the ownership chokepoints above are in
+place but the columns themselves are the multi-tenant trigger); image-proxy DNS-rebinding —
+**mitigated, not eliminated** (no redirects, `image/*` only, Cloudflare egress); register the
+trigger "if the proxy ever serves non-image content." Mail/calendar is otherwise closed.

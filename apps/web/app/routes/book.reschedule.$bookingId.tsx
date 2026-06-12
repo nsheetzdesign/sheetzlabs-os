@@ -23,15 +23,19 @@ type RescheduleBooking = Pick<
   };
 };
 
-export async function loader({ params, context }: LoaderFunctionArgs) {
+export async function loader({ params, request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
   const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";
+  // Management token (NS-BK-2) from the manage-link URL; required by the detail +
+  // reschedule endpoints. Carried into the page so the confirm POST can resend it.
+  const token = new URL(request.url).searchParams.get("token") ?? "";
+  const tokenQs = token ? `?token=${encodeURIComponent(token)}` : "";
 
-  const res = await fetch(`${apiUrl}/booking/public/reschedule/${params.bookingId}`);
+  const res = await fetch(`${apiUrl}/booking/public/reschedule/${params.bookingId}${tokenQs}`);
   if (!res.ok) throw new Response("Booking not found", { status: 404 });
 
   const data = (await res.json()) as { booking: RescheduleBooking };
-  return { booking: data.booking };
+  return { booking: data.booking, token };
 }
 
 export async function action({ params, request, context }: ActionFunctionArgs) {
@@ -52,7 +56,9 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
     const bookingId = params.bookingId as string;
     const scheduled_at = fd.get("scheduled_at") as string;
     const timezone = fd.get("timezone") as string;
-    const res = await fetch(`${apiUrl}/booking/public/reschedule/${bookingId}`, {
+    const token = (fd.get("token") as string) || "";
+    const tokenQs = token ? `?token=${encodeURIComponent(token)}` : "";
+    const res = await fetch(`${apiUrl}/booking/public/reschedule/${bookingId}${tokenQs}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scheduled_at, timezone }),
@@ -65,7 +71,7 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
 }
 
 export default function ReschedulePage() {
-  const { booking } = useLoaderData<typeof loader>();
+  const { booking, token } = useLoaderData<typeof loader>();
   const slotFetcher = useFetcher<{ slots?: string[]; status?: number }>();
   const rescheduleFetcher = useFetcher<{ success?: boolean; status?: number; error?: string }>();
 
@@ -125,6 +131,7 @@ export default function ReschedulePage() {
         intent: "reschedule",
         scheduled_at: selectedTime,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        token,
       },
       { method: "post" }
     );

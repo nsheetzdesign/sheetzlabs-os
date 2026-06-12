@@ -52,19 +52,21 @@ export async function consumeOAuthState(
 ): Promise<{ valid: boolean; userId?: string }> {
   if (!nonce) return { valid: false };
 
+  // Atomic claim: DELETE ... RETURNING is a single statement, so of two concurrent
+  // callbacks replaying the same captured `state` only one gets the row — the nonce
+  // is truly single-use (NS-OAUTH-1). The prior read-then-delete could hand the row
+  // to both before either delete landed.
   const { data } = await supabase
     .from("oauth_states")
-    .select("user_id, provider, expires_at")
+    .delete()
     .eq("nonce", nonce)
-    .maybeSingle();
+    .select("user_id, provider, expires_at");
 
-  if (!data) return { valid: false };
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return { valid: false };
 
-  // Single-use: delete on every lookup hit, even if it later fails validation.
-  await supabase.from("oauth_states").delete().eq("nonce", nonce);
+  if (row.provider !== provider) return { valid: false };
+  if (new Date(row.expires_at as string).getTime() < Date.now()) return { valid: false };
 
-  if (data.provider !== provider) return { valid: false };
-  if (new Date(data.expires_at as string).getTime() < Date.now()) return { valid: false };
-
-  return { valid: true, userId: data.user_id as string };
+  return { valid: true, userId: row.user_id as string };
 }

@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Context, Next } from "hono";
 import { isAllowedUser } from "@sheetzlabs/shared";
+import { timingSafeEqual } from "../lib/timing-safe";
 
 /**
  * Authentication middleware for the API worker.
@@ -62,9 +63,12 @@ export async function authMiddleware(
     return next();
   }
 
-  // Trusted internal caller (cron) — shared secret.
+  // Trusted internal caller (cron) — shared secret, compared in constant time so the
+  // header (which grants the allowlist-bypassing internal-cron identity and is
+  // checked on every non-public request) can't be recovered via a timing oracle
+  // (NS-AUTH-1).
   const internalSecret = c.req.header("X-Internal-Secret");
-  if (internalSecret && c.env.CRON_SECRET && internalSecret === c.env.CRON_SECRET) {
+  if (internalSecret && c.env.CRON_SECRET && timingSafeEqual(internalSecret, c.env.CRON_SECRET)) {
     c.set("userId", "internal-cron");
     return next();
   }

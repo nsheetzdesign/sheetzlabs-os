@@ -145,30 +145,32 @@ export function computeSlotsForDate(params: {
   const incrementMin = rules.slot_increment_minutes ?? durationMinutes;
   const strideMs = Math.max(1, incrementMin) * 60000;
 
-  const slots: string[] = [];
+  // Dedup by emitted instant: overlapping/adjacent windows (e.g. 09:00–11:00 +
+  // 10:00–12:00) would otherwise emit 10:00/10:30 twice → duplicate buttons on the
+  // public grid (NS-SLOT-1). Collect into a Set, then return sorted-ascending.
+  const seen = new Set<number>();
   for (const window of dayRule.slots ?? []) {
     const windowStart = zonedTimeToUtc(date, window.start, tz);
     const windowEnd = zonedTimeToUtc(date, window.end, tz);
 
     let current = windowStart.getTime();
     while (current + durationMs <= windowEnd.getTime()) {
-      const slotStart = new Date(current);
-      const slotEnd = new Date(current + durationMs);
-
-      // The candidate's footprint (incl. buffers) must not touch any busy block.
-      const bufStart = current - bufferBeforeMs;
-      const bufEnd = slotEnd.getTime() + bufferAfterMs;
-      const hasConflict = busy.some((b) => bufStart < b.end.getTime() && bufEnd > b.start.getTime());
-      const hasNotice = current - now.getTime() >= minNoticeMs;
-
-      if (!hasConflict && hasNotice) {
-        slots.push(slotStart.toISOString());
+      if (!seen.has(current)) {
+        const slotEnd = current + durationMs;
+        // The candidate's footprint (incl. buffers) must not touch any busy block.
+        const bufStart = current - bufferBeforeMs;
+        const bufEnd = slotEnd + bufferAfterMs;
+        const hasConflict = busy.some((b) => bufStart < b.end.getTime() && bufEnd > b.start.getTime());
+        const hasNotice = current - now.getTime() >= minNoticeMs;
+        if (!hasConflict && hasNotice) seen.add(current);
       }
       current += strideMs;
     }
   }
 
-  return slots;
+  return Array.from(seen)
+    .sort((a, b) => a - b)
+    .map((ms) => new Date(ms).toISOString());
 }
 
 export type ValidationResult =

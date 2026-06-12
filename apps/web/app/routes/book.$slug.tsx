@@ -106,7 +106,7 @@ function compactUtc(d: Date): string {
 export default function BookingPage() {
   const { link, apiUrl } = useLoaderData<typeof loader>();
   const slotFetcher = useFetcher<{ slots?: string[]; date?: string; status?: number; error?: string }>();
-  const bookFetcher = useFetcher<{ success?: boolean; booking?: { id: string; scheduled_at: string; duration_minutes: number }; status?: number; error?: string }>();
+  const bookFetcher = useFetcher<{ success?: boolean; booking?: { id: string; scheduled_at: string; duration_minutes: number; management_token?: string }; status?: number; error?: string }>();
 
   const [step, setStep] = useState<"date" | "time" | "details" | "confirmed">("date");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -182,6 +182,10 @@ export default function BookingPage() {
   const isLoadingSlots = slotFetcher.state === "submitting";
   const isBooking = bookFetcher.state === "submitting";
   const bookingId = bookFetcher.data?.booking?.id;
+  // Per-booking management token (NS-BK-2) — every manage link carries it or the
+  // public endpoints 404.
+  const manageToken = bookFetcher.data?.booking?.management_token;
+  const tokenQs = manageToken ? `?token=${encodeURIComponent(manageToken)}` : "";
 
   const fmtTime = (iso: string) =>
     new Date(iso).toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit", timeZone: guestTz });
@@ -195,7 +199,7 @@ export default function BookingPage() {
     const summary = encodeURIComponent(`${link.title}${link.host_name ? ` with ${link.host_name}` : ""}`);
     const gcalUrl = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${summary}&dates=${compactUtc(start)}/${compactUtc(end)}`;
     const outlookUrl = `https://outlook.office.com/calendar/0/deeplink/compose?path=/calendar/action/compose&rru=addevent&subject=${summary}&startdt=${start.toISOString()}&enddt=${end.toISOString()}`;
-    const icsUrl = bookingId ? `${apiUrl}/booking/public/${bookingId}/ics` : null;
+    const icsUrl = bookingId ? `${apiUrl}/booking/public/${bookingId}/ics${tokenQs}` : null;
 
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
@@ -230,9 +234,9 @@ export default function BookingPage() {
 
           {bookingId && (
             <div className="mt-6 flex items-center justify-center gap-4 text-sm">
-              <a href={`/book/reschedule/${bookingId}`} className="text-zinc-300 hover:text-emerald-400 transition-colors">Reschedule</a>
+              <a href={`/book/reschedule/${bookingId}${tokenQs}`} className="text-zinc-300 hover:text-emerald-400 transition-colors">Reschedule</a>
               <span className="text-zinc-700">·</span>
-              <a href={`/book/cancel/${bookingId}`} className="text-zinc-300 hover:text-red-400 transition-colors">Cancel</a>
+              <a href={`/book/cancel/${bookingId}${tokenQs}`} className="text-zinc-300 hover:text-red-400 transition-colors">Cancel</a>
             </div>
           )}
         </div>

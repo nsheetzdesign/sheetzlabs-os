@@ -14,9 +14,35 @@ import {
 } from "../lib/slots";
 import { buildIcs, googleCalendarUrl, outlookCalendarUrl } from "../lib/ics";
 import { getValidAccessToken as getGoogleAccessToken } from "../lib/google-auth";
+import { timingSafeEqual } from "../lib/timing-safe";
 
 const APP_BASE = "https://app.sheetzlabs.com";
 const API_BASE = "https://api.sheetzlabs.com";
+
+// ── Per-booking management token (NS-BK-1/2) ─────────────────────────────────
+// The public detail/cancel/reschedule/.ics endpoints are unauthenticated; the
+// booking UUID alone must NOT return PII or permit mutation. Each booking carries
+// a 32-byte random token; the manage links in the UI + every email embed it, and
+// these endpoints require `?token=` to match (constant-time) or 404 — mismatch is
+// indistinguishable from a missing booking, so we never confirm a UUID's existence.
+
+/** 32-byte random hex management token (matches the migration's gen_random_bytes). */
+function generateManagementToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** True only when a non-empty provided token constant-time-matches the stored one. */
+function tokenOk(provided: string | undefined | null, stored: unknown): boolean {
+  if (!provided || typeof stored !== "string" || !stored) return false;
+  return timingSafeEqual(provided, stored);
+}
+
+/** Append `?token=` to a public manage URL. */
+function withToken(url: string, token: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
 
 /** Count non-cancelled bookings for a link on a host-tz calendar date (daily cap). */
 async function countLinkBookingsOnDate(
@@ -61,10 +87,17 @@ const booking = new Hono<HonoEnv>();
 
 // ── Input validation (BK-4) ──────────────────────────────────────────────────
 
+// A name never contains control chars; notes may contain tab/newlines but no other
+// C0 controls. Both are belt-and-suspenders with the .ics `esc()` hardening (NS-ICS-1).
+// eslint-disable-next-line no-control-regex
+const NAME_CONTROL = /[\x00-\x1f\x7f]/;
+// eslint-disable-next-line no-control-regex
+const NOTES_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+
 const bookingCreateSchema = z.object({
-  guest_name: z.string().trim().min(1).max(120),
+  guest_name: z.string().trim().min(1).max(120).refine((s) => !NAME_CONTROL.test(s), "Invalid characters in name"),
   guest_email: z.string().trim().email().max(254),
-  guest_notes: z.string().max(2000).optional(),
+  guest_notes: z.string().max(2000).refine((s) => !NOTES_CONTROL.test(s), "Invalid characters in notes").optional(),
   scheduled_at: z.string().datetime({ offset: true }),
   timezone: z.string().max(64).optional(),
 });
@@ -85,17 +118,21 @@ function zodErrors(error: z.ZodError): Record<string, string> {
 
 // ── Rate limiting (BK-5) ──────────────────────────────────────────────────────
 
+type RateLimitOutcome = "allowed" | "limited" | "unavailable";
+
 /**
- * Returns true if the request is allowed. If no rate-limit binding is configured
- * (e.g. plan without the unsafe binding), fails open with a warning — see summary.
+ * Classify a request against the limiter. `unavailable` means the binding is absent
+ * or errored — the caller decides fail-open vs fail-closed per route (Prompt 57):
+ * mutations fail closed (503), slot display fails open. Never silently allows a
+ * mutation just because the binding is missing.
  */
-async function checkRateLimit(limiter: RateLimit | undefined, key: string): Promise<boolean> {
-  if (!limiter) return true;
+async function checkRateLimit(limiter: RateLimit | undefined, key: string): Promise<RateLimitOutcome> {
+  if (!limiter) return "unavailable";
   try {
     const { success } = await limiter.limit({ key });
-    return success;
+    return success ? "allowed" : "limited";
   } catch {
-    return true;
+    return "unavailable";
   }
 }
 
@@ -429,11 +466,20 @@ booking.use("/public/*", async (c, next) => {
   const ip = clientIp(c);
 
   if (method === "POST") {
-    const allowed = await checkRateLimit(c.env.BOOKING_RATE_LIMITER, `book:${ip}`);
-    if (!allowed) return c.json({ error: "Too many requests. Please try again shortly." }, 429);
+    const outcome = await checkRateLimit(c.env.BOOKING_RATE_LIMITER, `book:${ip}`);
+    if (outcome === "limited") return c.json({ error: "Too many requests. Please try again shortly." }, 429);
+    if (outcome === "unavailable") {
+      // Fail CLOSED on mutations — a missing/erroring limiter must not become an
+      // open booking-spam door (Prompt 57). Slot display below still fails open.
+      console.error("[booking] rate-limit binding unavailable — failing closed on mutation");
+      return c.json({ error: "Booking is temporarily unavailable. Please try again shortly." }, 503);
+    }
   } else if (path.endsWith("/slots")) {
-    const allowed = await checkRateLimit(c.env.BOOKING_SLOTS_RATE_LIMITER, `slots:${ip}`);
-    if (!allowed) return c.json({ error: "Too many requests. Please try again shortly." }, 429);
+    const outcome = await checkRateLimit(c.env.BOOKING_SLOTS_RATE_LIMITER, `slots:${ip}`);
+    if (outcome === "limited") return c.json({ error: "Too many requests. Please try again shortly." }, 429);
+    if (outcome === "unavailable") {
+      console.warn("[booking] slots rate-limit binding unavailable — failing open (read-only)");
+    }
   }
 
   return next();
@@ -503,24 +549,33 @@ booking.get("/public/:slug/slots", async (c) => {
   return c.json({ slots, date, duration: link.duration_minutes });
 });
 
-// Public booking lookup (for cancel page)
+// Public booking lookup (for cancel page). Requires the management token — the UUID
+// alone no longer returns guest PII (NS-BK-1). 404 (not 403) on mismatch so we don't
+// confirm the booking exists.
 booking.get("/public/booking/:bookingId", async (c) => {
   const { bookingId } = c.req.param();
+  const token = c.req.query("token");
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   const { data: bk, error } = await supabase
     .from("bookings")
-    .select("id, guest_name, guest_email, scheduled_at, duration_minutes, timezone, status, booking_links(title)")
+    .select("id, guest_name, guest_email, scheduled_at, duration_minutes, timezone, status, management_token, booking_links(title)")
     .eq("id", bookingId)
     .single();
 
-  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
-  return c.json({ booking: bk });
+  if (error || !bk || !tokenOk(token, bk.management_token)) {
+    return c.json({ error: "Booking not found" }, 404);
+  }
+  // Never echo the token back in the PII payload.
+  const { management_token: _t, ...safe } = bk;
+  return c.json({ booking: safe });
 });
 
-// Guest cancellation (public, no auth)
+// Guest cancellation (public, no auth) — gated by the management token (NS-BK-2).
+// Possession of the UUID is no longer sufficient to cancel + delete the Google event.
 booking.post("/public/cancel/:bookingId", async (c) => {
   const { bookingId } = c.req.param();
+  const token = c.req.query("token");
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   const { data: bk, error } = await supabase
@@ -529,7 +584,9 @@ booking.post("/public/cancel/:bookingId", async (c) => {
     .eq("id", bookingId)
     .single();
 
-  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+  if (error || !bk || !tokenOk(token, bk.management_token)) {
+    return c.json({ error: "Booking not found" }, 404);
+  }
   if (bk.status === "cancelled") return c.json({ error: "Booking already cancelled" }, 400);
 
   // 1. DB cancellation first — abort on failure.
@@ -630,32 +687,44 @@ booking.post("/public/:slug", async (c) => {
     return c.json({ error: validation.error, code: "SLOT_UNAVAILABLE" }, validation.code);
   }
 
-  // Create booking record. The partial unique index on (booking_link_id,
-  // scheduled_at) WHERE status != 'cancelled' guards against the race.
-  const { data: newBooking, error: bookingError } = await supabase
-    .from("bookings")
-    .insert({
-      booking_link_id: link.id,
-      calendar_account_id: link.calendar_account_id,
-      guest_name: body.guest_name,
-      guest_email: body.guest_email,
-      guest_notes: body.guest_notes ?? null,
-      scheduled_at: body.scheduled_at,
-      duration_minutes: link.duration_minutes,
-      timezone: guestTimezone,
-      // requires_confirmation was a half-built pending state (confirmed emails +
-      // invite, but unapprovable). Bookings are always confirmed now (BK-7).
-      status: "confirmed",
-    })
-    .select()
-    .single();
+  // Create booking record via the atomic RPC: the daily-cap count and the insert run
+  // inside one transaction under a per-(link,day) advisory lock, so concurrent
+  // bookings for different slots on a capped day can't both slip past the cap
+  // (NS-SLOT-2). The partial unique index on (booking_link_id, scheduled_at) WHERE
+  // status != 'cancelled' still guards the exact-slot race. A fresh management token
+  // (NS-BK-2) is minted here and embedded in every manage link + email.
+  const managementToken = generateManagementToken();
+  const capDayStart = zonedTimeToUtc(slotDate, "00:00", hostTz);
+  const capDayEnd = new Date(capDayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const { data: rpcData, error: bookingError } = await supabase.rpc("create_booking_atomic", {
+    p_booking_link_id: link.id,
+    p_calendar_account_id: link.calendar_account_id,
+    p_guest_name: body.guest_name,
+    p_guest_email: body.guest_email,
+    p_guest_notes: body.guest_notes ?? null,
+    p_scheduled_at: body.scheduled_at,
+    p_duration_minutes: link.duration_minutes,
+    p_timezone: guestTimezone,
+    p_management_token: managementToken,
+    p_day_start: capDayStart.toISOString(),
+    p_day_end: capDayEnd.toISOString(),
+    p_max_per_day: rules.max_bookings_per_day ?? null,
+  });
 
   if (bookingError) {
+    // Cap overrun and exact-slot collision both map to 409 (pick another time).
+    if (bookingError.message?.includes("DAILY_CAP_EXCEEDED")) {
+      return c.json({ error: "That day is fully booked.", code: "SLOT_UNAVAILABLE" }, 409);
+    }
     if (bookingError.code === "23505") {
       return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
     }
     return c.json({ error: bookingError.message }, 500);
   }
+  // RETURNS bookings → a single composite row (object); guard the array shape too.
+  const newBooking = (Array.isArray(rpcData) ? rpcData[0] : rpcData) as Record<string, unknown> & { id: string; scheduled_at: string; duration_minutes: number };
+  if (!newBooking?.id) return c.json({ error: "Booking failed" }, 500);
 
   // Create Google Calendar event with Meet link. If this fails the booking still
   // stands (DB is truth) but we flag calendar_sync_failed and leave meet_link null,
@@ -739,15 +808,15 @@ booking.post("/public/:slug", async (c) => {
     timezone: guestTimezone,
     bookingId: newBooking.id,
     notes: body.guest_notes,
-    cancelUrl: `${APP_BASE}/book/cancel/${newBooking.id}`,
-    rescheduleUrl: `${APP_BASE}/book/reschedule/${newBooking.id}`,
+    cancelUrl: withToken(`${APP_BASE}/book/cancel/${newBooking.id}`, managementToken),
+    rescheduleUrl: withToken(`${APP_BASE}/book/reschedule/${newBooking.id}`, managementToken),
     meetLink: meetLink ?? undefined,
     // Drives the "a calendar invitation has been sent" copy — only true copy when
     // the Google event actually got created (BK-12).
     calendarInviteSent: calendarEventCreated,
     addToGoogleUrl: googleCalendarUrl({ summary: calSummary, start: eventStart, end: eventEndDt, description: calDescription, location: meetLink ?? undefined }),
     addToOutlookUrl: outlookCalendarUrl({ summary: calSummary, start: eventStart, end: eventEndDt, description: calDescription, location: meetLink ?? undefined }),
-    icsUrl: `${API_BASE}/booking/public/${newBooking.id}/ics`,
+    icsUrl: withToken(`${API_BASE}/booking/public/${newBooking.id}/ics`, managementToken),
   };
 
   // Attach a real .ics to the guest's confirmation so any calendar can import it.
@@ -785,25 +854,32 @@ booking.post("/public/:slug", async (c) => {
       scheduled_at: newBooking.scheduled_at,
       duration_minutes: newBooking.duration_minutes,
       meet_link: meetLink,
+      // The confirmation page needs the token to build working manage links.
+      management_token: managementToken,
     },
   });
 });
 
 // ── Public: Reschedule Flow ───────────────────────────────────────────────────
 
-// Get booking info for reschedule page
+// Get booking info for reschedule page — gated by the management token (NS-BK-1/2).
 booking.get("/public/reschedule/:bookingId", async (c) => {
   const { bookingId } = c.req.param();
+  const token = c.req.query("token");
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   const { data: bk, error } = await supabase
     .from("bookings")
-    .select("id, guest_name, scheduled_at, duration_minutes, timezone, status, booking_links(id, slug, title, duration_minutes, availability_rules)")
+    .select("id, guest_name, scheduled_at, duration_minutes, timezone, status, management_token, booking_links(id, slug, title, duration_minutes, availability_rules)")
     .eq("id", bookingId)
     .single();
 
-  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+  if (error || !bk || !tokenOk(token, bk.management_token)) {
+    return c.json({ error: "Booking not found" }, 404);
+  }
   if (bk.status === "cancelled") return c.json({ error: "Booking is cancelled" }, 400);
+  // Strip the token from the projection below — never echo it back.
+  delete (bk as { management_token?: string }).management_token;
 
   // BK-17: don't over-expose. The reschedule page only needs date_range_days from
   // the rules and never reads guest_notes/guest_email — strip the rest.
@@ -846,6 +922,9 @@ async function rescheduleBooking(
   scheduledAtIso: string,
   timezone: string | undefined,
   byHost: boolean,
+  // The guest path supplies the management token; the host path is JWT-authed and
+  // passes null to skip the check (NS-BK-2).
+  guestToken: string | null,
 ) {
   const newDateTime = new Date(scheduledAtIso);
   if (Number.isNaN(newDateTime.getTime())) {
@@ -858,7 +937,10 @@ async function rescheduleBooking(
     .eq("id", bookingId)
     .single();
 
-  if (!bk || bk.status === "cancelled") return c.json({ error: "Booking not found or cancelled" }, 404);
+  // Token gate for the public (guest) path; 404 on missing booking OR bad token.
+  if (!bk || bk.status === "cancelled" || (!byHost && !tokenOk(guestToken, bk.management_token))) {
+    return c.json({ error: "Booking not found or cancelled" }, 404);
+  }
 
   const oldDateTime = new Date(bk.scheduled_at as string);
   const newTimezone = timezone ?? (bk.timezone as string);
@@ -956,9 +1038,9 @@ async function rescheduleBooking(
     timezone: newTimezone,
     bookingId: bk.id as string,
     meetLink: (bk.meet_link as string) ?? undefined,
-    cancelUrl: `${APP_BASE}/book/cancel/${bk.id}`,
-    rescheduleUrl: `${APP_BASE}/book/reschedule/${bk.id}`,
-    icsUrl: `${API_BASE}/booking/public/${bk.id}/ics`,
+    cancelUrl: bk.management_token ? withToken(`${APP_BASE}/book/cancel/${bk.id}`, bk.management_token as string) : undefined,
+    rescheduleUrl: bk.management_token ? withToken(`${APP_BASE}/book/reschedule/${bk.id}`, bk.management_token as string) : undefined,
+    icsUrl: bk.management_token ? withToken(`${API_BASE}/booking/public/${bk.id}/ics`, bk.management_token as string) : undefined,
   };
 
   const guestEmailContent = rescheduleConfirmationEmail(emailData, false, oldDateTime, byHost);
@@ -972,9 +1054,10 @@ async function rescheduleBooking(
   return c.json({ success: true });
 }
 
-// Reschedule a booking (guest-initiated, public)
+// Reschedule a booking (guest-initiated, public) — gated by the management token.
 booking.post("/public/reschedule/:bookingId", async (c) => {
   const { bookingId } = c.req.param();
+  const token = c.req.query("token") ?? null;
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   const parsed = rescheduleSchema.safeParse(await c.req.json().catch(() => ({})));
@@ -982,7 +1065,7 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
     return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
   }
 
-  return rescheduleBooking(c, supabase, bookingId, parsed.data.scheduled_at, parsed.data.timezone, false);
+  return rescheduleBooking(c, supabase, bookingId, parsed.data.scheduled_at, parsed.data.timezone, false, token);
 });
 
 // ── Public: .ics download (BK-15) ─────────────────────────────────────────────
@@ -990,15 +1073,19 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
 // every booking email so guests on any calendar can import the event.
 booking.get("/public/:bookingId/ics", async (c) => {
   const { bookingId } = c.req.param();
+  const token = c.req.query("token");
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   const { data: bk, error } = await supabase
     .from("bookings")
-    .select("id, guest_name, guest_email, scheduled_at, duration_minutes, status, meet_link, booking_links(title, calendar_accounts(email, display_name))")
+    .select("id, guest_name, guest_email, scheduled_at, duration_minutes, status, meet_link, management_token, booking_links(title, calendar_accounts(email, display_name))")
     .eq("id", bookingId)
     .single();
 
-  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+  // The .ics carries guest + host email — require the token (NS-BK-1); 404 on miss.
+  if (error || !bk || !tokenOk(token, bk.management_token)) {
+    return c.json({ error: "Booking not found" }, 404);
+  }
 
   const linkJoin = bk.booking_links as unknown as {
     title?: string;
@@ -1031,6 +1118,8 @@ booking.get("/public/:bookingId/ics", async (c) => {
     headers: {
       "Content-Type": "text/calendar; charset=utf-8",
       "Content-Disposition": `attachment; filename="booking-${bk.id}.ics"`,
+      // Carries guest + host email — keep it out of shared caches (NS-BK-3).
+      "Cache-Control": "no-store",
     },
   });
 });
@@ -1045,8 +1134,9 @@ booking.post("/bookings/:bookingId/reschedule", async (c) => {
     return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
   }
 
-  // byHost = true → the guest gets the "rescheduled by host" email variant.
-  return rescheduleBooking(c, supabase, bookingId, parsed.data.scheduled_at, parsed.data.timezone, true);
+  // byHost = true → the guest gets the "rescheduled by host" email variant. Host is
+  // JWT-authed (this route is behind authMiddleware), so no management token needed.
+  return rescheduleBooking(c, supabase, bookingId, parsed.data.scheduled_at, parsed.data.timezone, true, null);
 });
 
 export default booking;

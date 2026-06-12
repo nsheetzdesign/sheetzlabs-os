@@ -107,8 +107,10 @@ test.describe("booking", () => {
     const booked = await bookSlot(link.slug, free.slot, GUEST);
     expect(booked.status, JSON.stringify(booked.body)).toBe(200);
     const bookingId = booked.body.booking!.id;
+    const token = booked.body.booking!.management_token!;
 
-    await page.goto(`/book/cancel/${bookingId}`, { waitUntil: "networkidle" });
+    // Manage links carry the management token (NS-BK-2); without it the page 404s.
+    await page.goto(`/book/cancel/${bookingId}?token=${token}`, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: /Yes, Cancel/i }).click();
     await expect(page.getByRole("heading", { name: /Booking Cancelled/i })).toBeVisible({
       timeout: 30_000,

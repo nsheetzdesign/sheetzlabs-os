@@ -104,7 +104,7 @@ export async function findFreeSlot(slug: string, startDay = 2, maxDays = 14): Pr
 
 export interface BookResult {
   status: number;
-  body: { success?: boolean; booking?: { id: string }; error?: string };
+  body: { success?: boolean; booking?: { id: string; management_token?: string }; error?: string };
 }
 
 /**
@@ -149,7 +149,7 @@ export async function bookSlot(
 export async function getBookingDb(id: string) {
   const { data } = await admin()
     .from("bookings")
-    .select("id, status, guest_email, scheduled_at")
+    .select("id, status, guest_email, scheduled_at, management_token")
     .eq("id", id)
     .single();
   return data;

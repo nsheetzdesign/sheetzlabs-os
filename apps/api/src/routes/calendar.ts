@@ -488,13 +488,21 @@ calendar.patch("/events/:id", async (c) => {
   if (body.end_at !== undefined) updates.end_at = body.end_at;
   if (body.meeting_link !== undefined) updates.meeting_link = body.meeting_link;
 
-  // Sync to Google Calendar if connected and has a real external ID
+  // Google is the source of truth for synced events: PATCH it FIRST, check `.ok`,
+  // and write the local DB ONLY on success — so a failed Google call can't silently
+  // desync the calendar (NS-CAL-1, rule 11). A drag against a revoked/410 event must
+  // revert in the UI (the web `move_event` handler reverts + toasts on a non-2xx)
+  // rather than move the local copy with no record. Local-only events (`local-` /
+  // `timeblock-`) have no Google counterpart, so the DB is their source of truth and
+  // we skip straight to the write.
   const extId = event.external_id as string;
-  if (
-    event.calendar_accounts &&
+  const isGoogleBacked =
+    !!event.calendar_accounts &&
     !extId.startsWith("local-") &&
-    !extId.startsWith("timeblock-")
-  ) {
+    !extId.startsWith("timeblock-");
+
+  if (isGoogleBacked) {
+    let gcalOk = false;
     try {
       const accessToken = await getValidAccessToken(event.calendar_accounts, c.env, supabase);
       const calendarId = (event.google_calendar_id as string) ?? "primary";
@@ -528,6 +536,7 @@ calendar.patch("/events/:id", async (c) => {
         body: JSON.stringify(gcalBody),
       });
 
+      gcalOk = gcalRes.ok;
       if (gcalRes.ok) {
         const gcalData = (await gcalRes.json()) as {
           hangoutLink?: string;
@@ -539,9 +548,18 @@ calendar.patch("/events/:id", async (c) => {
             updates.meeting_link = gcalData.conferenceData.entryPoints[0].uri;
           }
         }
+      } else {
+        const text = await gcalRes.text().catch(() => "");
+        console.error(`[calendar] gcal event patch failed (${gcalRes.status}) for ${id}: ${text}`);
       }
     } catch (err) {
       console.error("Failed to update Google Calendar event:", err);
+    }
+
+    if (!gcalOk) {
+      // Do NOT touch the DB — the local event must keep matching Google, and the
+      // client reverts the optimistic move on this non-2xx (NS-CAL-1).
+      return c.json({ error: "Couldn't sync the change to Google Calendar. Reverting." }, 502);
     }
   }
 

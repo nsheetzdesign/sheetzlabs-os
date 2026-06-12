@@ -1022,6 +1022,25 @@ const INVERSE_ACTION: Record<string, string> = {
 
 type BulkResult = { status: number; body: Record<string, unknown>; okIds: string[] };
 
+// "Undo last" only reverses an action recent enough to still have a live toast —
+// pressing `z` days later must not silently reverse a stale breadcrumb (NS-UNDO-1).
+const UNDO_RECENCY_MS = 5 * 60 * 1000;
+
+/**
+ * The set of email-account ids the authenticated context may act on (NS-UNDO-2).
+ * `emails` has no `user_id`; ownership chains account_id → email_accounts. The app is
+ * single-tenant, so today this is "all configured accounts" — but routing every
+ * bulk/undo target through this chokepoint means a `{email_ids:[<any uuid>]}` payload
+ * can only touch rows under a real account, and the moment email_accounts gains a
+ * user_id the WHERE clause here is the only line that changes.
+ */
+async function ownedAccountIds(
+  supabase: any, // loose like the rest of this file
+): Promise<Set<string>> {
+  const { data } = await supabase.from("email_accounts").select("id");
+  return new Set((data ?? []).map((a: { id: string }) => a.id));
+}
+
 /**
  * Core flag/folder/label mutation shared by POST /bulk and POST /undo. Writes to
  * Gmail FIRST (per account), then patches Supabase for the survivors (ES-1). Returns
@@ -1032,20 +1051,31 @@ async function applyBulk(
   env: Bindings,
   action: string,
   email_ids: string[],
-  label_id?: string,
+  label_id: string | undefined,
+  // Account ids the caller owns. Targets outside this set are silently dropped
+  // (never the caller's to mutate). Null = trusted internal caller (no scoping).
+  owned: Set<string> | null,
 ): Promise<BulkResult> {
   if (!email_ids?.length) return { status: 400, body: { error: "No emails specified" }, okIds: [] };
 
-  const { data: targets, error: loadErr } = await supabase
+  const { data: loaded, error: loadErr } = await supabase
     .from("emails")
     .select("id, external_id, account_id, folder")
     .in("id", email_ids);
   if (loadErr) return { status: 500, body: { error: loadErr.message }, okIds: [] };
-  if (!targets?.length) return { status: 200, body: { success: true, succeeded: 0, failed: [] }, okIds: [] };
 
   type Target = { id: string; external_id: string; account_id: string; folder: string | null };
+  // Ownership scoping (NS-UNDO-2): only act on rows under an owned account.
+  const targets = (loaded as Target[] | null ?? []).filter(
+    (t) => owned === null || owned.has(t.account_id),
+  );
+  if (!targets.length) return { status: 200, body: { success: true, succeeded: 0, failed: [] }, okIds: [] };
+  // Constrain id-keyed sub-operations (label assignment) to the owned subset too.
+  const ownedIds = new Set(targets.map((t) => t.id));
+  email_ids = email_ids.filter((id) => ownedIds.has(id));
+
   const byAccount = new Map<string, Target[]>();
-  for (const t of targets as Target[]) {
+  for (const t of targets) {
     if (!byAccount.has(t.account_id)) byAccount.set(t.account_id, []);
     byAccount.get(t.account_id)!.push(t);
   }
@@ -1139,16 +1169,21 @@ async function unsnoozeIds(
   supabase: any, // loose like the rest of this file (typed client resolves tables to never)
   env: Bindings,
   email_ids: string[],
+  owned: Set<string> | null,
 ): Promise<BulkResult> {
   const okIds: string[] = [];
   const failed: Array<{ id: string; error: string }> = [];
   for (const id of email_ids) {
     const { data: row } = await supabase
       .from("emails")
-      .select("external_id, snooze_return_folder, email_accounts(*)")
+      .select("external_id, account_id, snooze_return_folder, email_accounts(*)")
       .eq("id", id)
       .single();
-    if (!row) { failed.push({ id, error: "Email not found" }); continue; }
+    // Ownership scoping (NS-UNDO-2): drop ids outside the caller's accounts.
+    if (!row || (owned !== null && !owned.has(row.account_id as string))) {
+      failed.push({ id, error: "Email not found" });
+      continue;
+    }
     const returnFolder = (row.snooze_return_folder as string) || "INBOX";
     try {
       if (returnFolder === "INBOX") {
@@ -1172,7 +1207,8 @@ email.post("/bulk", async (c) => {
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
   if (!email_ids?.length) return c.json({ error: "No emails specified" }, 400);
 
-  const r = await applyBulk(supabase, c.env, action, email_ids, label_id);
+  const owned = await ownedAccountIds(supabase);
+  const r = await applyBulk(supabase, c.env, action, email_ids, label_id, owned);
 
   // Record an undo breadcrumb for reversible folder moves (Part 1). Only the ids
   // that actually changed are stored so a partial failure is replayed precisely.
@@ -1200,11 +1236,15 @@ email.post("/undo", async (c) => {
   let logId: string | null = null;
 
   if (!action || !emailIds?.length) {
+    // Recency-bounded: only the most recent action still within its toast window is
+    // reversible — never a days-old breadcrumb (NS-UNDO-1).
+    const recentIso = new Date(Date.now() - UNDO_RECENCY_MS).toISOString();
     const { data: last } = await supabase
       .from("email_undo_actions")
       .select("id, action, email_ids")
       .eq("user_id", userId)
       .is("undone_at", null)
+      .gte("created_at", recentIso)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -1226,10 +1266,11 @@ email.post("/undo", async (c) => {
     logId = (match?.id as string) ?? null;
   }
 
+  const owned = await ownedAccountIds(supabase);
   const result = action === "snooze"
-    ? await unsnoozeIds(supabase, c.env, emailIds!)
+    ? await unsnoozeIds(supabase, c.env, emailIds!, owned)
     : INVERSE_ACTION[action!]
-      ? await applyBulk(supabase, c.env, INVERSE_ACTION[action!], emailIds!)
+      ? await applyBulk(supabase, c.env, INVERSE_ACTION[action!], emailIds!, undefined, owned)
       : null;
 
   if (!result) return c.json({ error: "Action not undoable" }, 400);
@@ -1248,21 +1289,127 @@ email.post("/undo", async (c) => {
 // blocked, no cookies, 10 MB cap, cached.
 const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024;
 
-function isPrivateHost(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal")) return true;
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const a = Number(v4[1]), b = Number(v4[2]);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 169 && b === 254) return true;       // link-local + cloud metadata
-    if (a === 192 && b === 168) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    return false;
+// ── SSRF host guard (NS-IMG-1..4) ─────────────────────────────────────────────
+// The old guard string-matched only canonical dotted-decimal IPv4, so decimal
+// (2130706433), octal (0177.0.0.1), hex (0x7f000001), short forms (127.1), and
+// every IPv6/IPv4-mapped form sailed through. We now parse the hostname as an IP in
+// ANY encoding and test the resulting bytes against the private/reserved ranges.
+// `new URL()` already normalizes most of these, but we re-parse defensively so the
+// guard doesn't depend on the platform's URL parser doing it.
+
+/** Decode one inet_aton-style part (decimal / 0-octal / 0x-hex). */
+function parseInetPart(s: string): number | null {
+  if (/^0x[0-9a-f]+$/i.test(s)) return parseInt(s, 16);
+  if (/^0[0-7]+$/.test(s)) return parseInt(s, 8);
+  if (/^(0|[1-9][0-9]*)$/.test(s)) return parseInt(s, 10);
+  return null;
+}
+
+/** Parse an IPv4 literal in any encoding (a / a.b / a.b.c / a.b.c.d) → 32-bit int, or null. */
+function ipv4ToInt(host: string): number | null {
+  const parts = host.split(".");
+  if (parts.length === 0 || parts.length > 4) return null;
+  const nums: number[] = [];
+  for (const p of parts) {
+    const n = parseInetPart(p);
+    if (n === null || !Number.isFinite(n) || n < 0) return null;
+    nums.push(n);
   }
-  // IPv6 loopback / unique-local / link-local
-  if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80")) return true;
+  let value: number;
+  if (nums.length === 1) {
+    value = nums[0];
+  } else if (nums.length === 2) {
+    if (nums[0] > 0xff || nums[1] > 0xffffff) return null;
+    value = nums[0] * 0x1000000 + nums[1];
+  } else if (nums.length === 3) {
+    if (nums[0] > 0xff || nums[1] > 0xff || nums[2] > 0xffff) return null;
+    value = nums[0] * 0x1000000 + nums[1] * 0x10000 + nums[2];
+  } else {
+    if (nums.some((x) => x > 0xff)) return null;
+    value = nums[0] * 0x1000000 + nums[1] * 0x10000 + nums[2] * 0x100 + nums[3];
+  }
+  if (value > 0xffffffff) return null;
+  return value >>> 0;
+}
+
+/** True for a private / loopback / link-local / reserved / multicast IPv4 int. */
+function isPrivateV4Int(v: number): boolean {
+  const a = (v >>> 24) & 0xff, b = (v >>> 16) & 0xff;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;          // link-local + cloud metadata
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  if (a >= 224) return true;                          // multicast + reserved
   return false;
+}
+
+function parseHextet(s: string): number | null {
+  return /^[0-9a-f]{1,4}$/i.test(s) ? parseInt(s, 16) : null;
+}
+
+/** Expand an IPv6 literal (incl. `::` and a dotted-IPv4 tail) to 8 hextets, or null. */
+function expandV6(input: string): number[] | null {
+  let h = input.toLowerCase().split("%")[0]; // strip zone id
+  let tail: number[] = [];
+  const m = h.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (m) {
+    const v = ipv4ToInt(m[2]);
+    if (v === null) return null;
+    tail = [(v >>> 16) & 0xffff, v & 0xffff];
+    h = m[1].slice(0, -1); // drop the ':' separating the v4 tail
+  }
+  const halves = h.split("::");
+  if (halves.length > 2) return null;
+  const toNums = (str: string): number[] | null => {
+    if (!str) return [];
+    const out: number[] = [];
+    for (const g of str.split(":")) {
+      const n = parseHextet(g);
+      if (n === null) return null;
+      out.push(n);
+    }
+    return out;
+  };
+  const head = toNums(halves[0]);
+  const back = halves.length === 2 ? toNums(halves[1]) : null;
+  if (head === null || (halves.length === 2 && back === null)) return null;
+  let groups: number[];
+  if (halves.length === 2) {
+    const fixed = head.length + (back as number[]).length + tail.length;
+    const missing = 8 - fixed;
+    if (missing < 0) return null;
+    groups = [...head, ...Array(missing).fill(0), ...(back as number[]), ...tail];
+  } else {
+    groups = [...head, ...tail];
+  }
+  return groups.length === 8 ? groups : null;
+}
+
+/** True for loopback / unspecified / ULA / link-local / private-v4-mapped IPv6. */
+function isPrivateV6(host: string): boolean {
+  const g = expandV6(host);
+  if (!g) return true; // unparseable IPv6 literal → fail closed
+  if (g.every((x) => x === 0)) return true;                       // ::
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true; // ::1
+  if ((g[0] & 0xfe00) === 0xfc00) return true;                    // fc00::/7 ULA
+  if ((g[0] & 0xffc0) === 0xfe80) return true;                    // fe80::/10 link-local
+  // v4-mapped (::ffff:a.b.c.d) and deprecated v4-compatible (::a.b.c.d).
+  if (g.slice(0, 5).every((x) => x === 0) && (g[5] === 0xffff || g[5] === 0)) {
+    return isPrivateV4Int((((g[6] << 16) >>> 0) | g[7]) >>> 0);
+  }
+  return false;
+}
+
+function isPrivateHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/\.$/, "");
+  const bare = h.replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (bare.includes(":")) return isPrivateV6(bare);
+  const v4 = ipv4ToInt(bare);
+  if (v4 !== null) return isPrivateV4Int(v4);
+  return false; // a real DNS name → allowed (DNS-rebinding residual, see summary)
 }
 
 email.get("/image-proxy", async (c) => {
@@ -1282,15 +1429,22 @@ email.get("/image-proxy", async (c) => {
         "User-Agent": "Mozilla/5.0 (compatible; SheetzLabsImageProxy/1.0)",
         Accept: "image/*,*/*;q=0.8",
       },
-      redirect: "follow",
+      // Do NOT follow redirects: a public host can 302 → 169.254.169.254 and the
+      // hop would never be re-checked (NS-IMG-1). Reject any 3xx instead.
+      redirect: "manual",
     });
   } catch {
     return c.json({ error: "fetch failed" }, 502);
   }
+  if (upstream.status >= 300 && upstream.status < 400) {
+    return c.json({ error: "redirect not allowed" }, 502);
+  }
   if (!upstream.ok) return c.json({ error: `upstream ${upstream.status}` }, 502);
 
-  const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
-  if (!/^image\//i.test(contentType) && contentType !== "application/octet-stream") {
+  // Strict image/* only — `application/octet-stream` and an absent type are no longer
+  // an exfil escape hatch (NS-IMG-4).
+  const contentType = upstream.headers.get("content-type") ?? "";
+  if (!/^image\//i.test(contentType)) {
     return c.json({ error: "not an image" }, 415);
   }
   const declaredLen = Number(upstream.headers.get("content-length") ?? "0");
@@ -1299,6 +1453,7 @@ email.get("/image-proxy", async (c) => {
   const buf = await upstream.arrayBuffer();
   if (buf.byteLength > IMAGE_PROXY_MAX_BYTES) return c.json({ error: "too large" }, 413);
 
+  // Build a fresh Response so no upstream header (Set-Cookie, etc.) is forwarded.
   return new Response(buf, {
     status: 200,
     headers: {

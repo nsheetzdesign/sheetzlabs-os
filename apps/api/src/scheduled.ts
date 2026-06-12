@@ -101,6 +101,19 @@ export default {
       )
     );
 
+    // Purge undo breadcrumbs older than 24h every 15 minutes — the table grows on
+    // every archive/trash/spam/snooze and is never otherwise pruned (NS-UNDO-1). The
+    // empty-body "undo last" already enforces its own recency bound, so day-old rows
+    // are dead weight.
+    if (now.getUTCMinutes() % 15 === 0) {
+      const undoCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+      ctx.waitUntil(
+        Promise.resolve(
+          supabase.from("email_undo_actions").delete().lt("created_at", undoCutoff)
+        )
+      );
+    }
+
     // Auto-sync all email accounts every 5 minutes — call the sync logic directly
     // instead of HTTP-fetching our own (now-authenticated) endpoint.
     if (now.getUTCMinutes() % 5 === 0) {
@@ -328,13 +341,18 @@ async function sendRemindersForWindow(
 ): Promise<number> {
   const { column, hoursUntil, windowStart, windowEnd } = opts;
 
+  // Bounded + ordered: one cycle can't exhaust the shared Workers subrequest budget
+  // (NS-CRON-1). Soonest-first so a backlog drains in time order; the carryover is
+  // picked up next minute (claims are idempotent).
   const { data: candidates, error } = await supabase
     .from("bookings")
     .select("*, booking_links(title, calendar_accounts(email, display_name))")
     .eq("status", "confirmed")
     .is(column, null)
     .gte("scheduled_at", windowStart.toISOString())
-    .lte("scheduled_at", windowEnd.toISOString());
+    .lte("scheduled_at", windowEnd.toISOString())
+    .order("scheduled_at", { ascending: true })
+    .limit(100);
 
   if (error) {
     console.error(`[reminders] ${column} select failed: ${error.message}`);
@@ -426,6 +444,7 @@ async function markCompletedBookings(supabase: ReturnType<typeof createClient<an
     .select("id, scheduled_at, duration_minutes")
     .eq("status", "confirmed")
     .lte("scheduled_at", now.toISOString())
+    .order("scheduled_at", { ascending: true }) // oldest backlog first (NS-CRON-1)
     .limit(500);
 
   if (error) {
