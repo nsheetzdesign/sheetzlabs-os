@@ -8,7 +8,9 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "desktop:dev": "pnpm --filter sheetzlabs-desktop dev",
-    "desktop:build": "pnpm --filter sheetzlabs-desktop build:universal"
+    "desktop:build": "pnpm --filter sheetzlabs-desktop build:universal",
+    "e2e": "pnpm --filter @sheetzlabs/e2e e2e",
+    "e2e:report": "pnpm --filter @sheetzlabs/e2e report"
   },
   "devDependencies": {
     "turbo": "latest"

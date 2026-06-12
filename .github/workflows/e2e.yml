@@ -1,0 +1,59 @@
+name: E2E Smoke
+
+# Runs the Playwright smoke suite against the live deployment. NOT on every push —
+# these tests hit real Google APIs and mutate live state, so nightly + on-demand is
+# the right cadence.
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Web app base URL to test"
+        required: false
+        default: "https://app.sheetzlabs.com"
+  schedule:
+    # 08:00 UTC nightly (~02:00–03:00 America/Chicago).
+    - cron: "0 8 * * *"
+
+# Never run two suites against the same live data at once.
+concurrency:
+  group: e2e-smoke
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: Smoke suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @sheetzlabs/e2e exec playwright install --with-deps chromium
+
+      - name: Run smoke suite
+        run: pnpm --filter @sheetzlabs/e2e e2e
+        env:
+          BASE_URL: ${{ github.event.inputs.base_url || 'https://app.sheetzlabs.com' }}
+          API_URL: ${{ secrets.E2E_API_URL || 'https://api.sheetzlabs.com' }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: Upload HTML report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/e2e/report/
+          retention-days: 14
