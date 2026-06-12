@@ -150,6 +150,11 @@ export default function BookingPage() {
   const isLoadingSlots = slotFetcher.state === "submitting";
   const isBooking = bookFetcher.state === "submitting";
 
+  // The guest's local timezone — shown so they know what the slot times mean.
+  const guestTz =
+    typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC";
+  const bookingId = bookFetcher.data?.booking?.id;
+
   if (step === "confirmed" && selectedTime) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
@@ -173,6 +178,23 @@ export default function BookingPage() {
           <p className="text-sm text-zinc-500 mt-4">
             A calendar invitation has been sent to {email}
           </p>
+          {bookingId && (
+            <div className="mt-6 flex items-center justify-center gap-4 text-sm">
+              <a
+                href={`/book/reschedule/${bookingId}`}
+                className="text-zinc-300 hover:text-emerald-400 transition-colors"
+              >
+                Reschedule
+              </a>
+              <span className="text-zinc-700">·</span>
+              <a
+                href={`/book/cancel/${bookingId}`}
+                className="text-zinc-300 hover:text-red-400 transition-colors"
+              >
+                Cancel
+              </a>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -240,12 +262,15 @@ export default function BookingPage() {
                   </button>
                 </div>
                 {selectedDate && (
-                  <p className="text-sm text-zinc-500 mb-3">
+                  <p className="text-sm text-zinc-500 mb-1">
                     {new Date(selectedDate + "T12:00:00").toLocaleDateString("en-US", {
                       weekday: "long", month: "long", day: "numeric",
                     })}
                   </p>
                 )}
+                <p className="text-xs text-zinc-600 mb-3" data-testid="timezone-label">
+                  Times shown in {guestTz}
+                </p>
                 {bookError && (
                   <p className="text-sm text-amber-400 mb-3">{bookError}</p>
                 )}
