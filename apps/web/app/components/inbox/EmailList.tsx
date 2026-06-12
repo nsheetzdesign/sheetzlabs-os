@@ -159,6 +159,7 @@ export function EmailList({
             return (
               <div
                 key={email.id}
+                data-testid="email-row"
                 draggable
                 onDragStart={(e) => handleDragStart(e, email)}
                 onClick={() => onOpen(email)}
@@ -252,9 +253,15 @@ export function EmailList({
                   </div>
                 )}
 
-                {/* Date */}
+                {/* Date — formatted with the runtime's locale/timezone + a "now"
+                    baseline, so the server (UTC) and client (browser tz) strings
+                    legitimately differ. suppressHydrationWarning tells React this
+                    text mismatch is expected (was throwing minified error #418). */}
                 {!isHovered && (
-                  <span className={`text-xs flex-shrink-0 ${email.is_read ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                  <span
+                    suppressHydrationWarning
+                    className={`text-xs flex-shrink-0 ${email.is_read ? 'text-zinc-500' : 'text-zinc-400'}`}
+                  >
                     {formatDate(email.received_at)}
                   </span>
                 )}
