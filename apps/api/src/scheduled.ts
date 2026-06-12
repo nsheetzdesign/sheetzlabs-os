@@ -3,6 +3,7 @@ import { executeAgent, postToLinkedIn } from "./lib/agent-engine";
 import { reminderEmail } from "./lib/booking-emails";
 import { sendBookingEmail } from "./lib/send-booking-email";
 import { runEmailSync, processScheduledSends } from "./routes/email";
+import { reconcileAccount } from "./lib/email-reconcile";
 import { getValidAccessToken as getGoogleAccessToken, ReauthRequiredError } from "./lib/google-auth";
 import { syncCalendarAccount } from "./lib/calendar-sync";
 
@@ -138,8 +139,79 @@ export default {
     if (now.getUTCMinutes() % 15 === 0) {
       ctx.waitUntil(syncAllCalendars(env, supabase));
     }
+
+    // Gmail full-state reconciliation (Prompt 59). Weekly per account, but at most
+    // ONE account per qualifying tick so the set-diff + metadata fetches never
+    // contend with the email/calendar syncs for the shared subrequest budget. An
+    // in-progress backlog (non-null reconcile_cursor) takes priority and continues
+    // every 15 min until drained.
+    if (now.getUTCMinutes() % 15 === 0) {
+      ctx.waitUntil(reconcileNextAccount(env, supabase, now));
+    }
   },
 };
+
+/**
+ * Pick the single most-eligible email account and reconcile it (Prompt 59). An
+ * account is eligible when it has an in-progress cursor, has never been reconciled,
+ * or was last reconciled over a week ago. Eligibility is filtered in JS over the
+ * tiny account set to sidestep the PostgREST `.or()` mutex pitfall. Cursor-active
+ * accounts sort first (drain the backlog), then oldest-reconciled.
+ */
+async function reconcileNextAccount(
+  env: Env,
+  supabase: ReturnType<typeof createClient<any>>,
+  now: Date
+) {
+  const { data: accounts, error } = await supabase
+    .from("email_accounts")
+    .select("*")
+    .eq("sync_enabled", true)
+    .eq("needs_reauth", false);
+
+  if (error) {
+    console.error(`[reconcile-cron] account query failed: ${error.message}`);
+    return;
+  }
+
+  const weekAgo = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+  const eligible = (accounts ?? []).filter((a) => {
+    if (a.reconcile_cursor) return true; // in-progress backlog — continue
+    if (!a.last_reconciled_at) return true; // never reconciled
+    return new Date(a.last_reconciled_at).getTime() < weekAgo;
+  });
+  if (!eligible.length) return;
+
+  eligible.sort((a, b) => {
+    // Cursor-active first.
+    const ac = a.reconcile_cursor ? 0 : 1;
+    const bc = b.reconcile_cursor ? 0 : 1;
+    if (ac !== bc) return ac - bc;
+    // Then oldest last_reconciled_at first (nulls — never reconciled — are oldest).
+    const at = a.last_reconciled_at ? new Date(a.last_reconciled_at).getTime() : 0;
+    const bt = b.last_reconciled_at ? new Date(b.last_reconciled_at).getTime() : 0;
+    return at - bt;
+  });
+
+  const account = eligible[0];
+  try {
+    const result = await reconcileAccount(account, env, supabase);
+    if (result.skipped) {
+      console.warn(`[reconcile-cron] ${account.email} skipped: ${result.skipped}`);
+    } else if (result.error) {
+      console.error(`[reconcile-cron] ${account.email} failed: ${result.error}`);
+    } else {
+      const s = result.summary;
+      console.log(
+        `[reconcile-cron] ${account.email}: folder=${s.folder_fixed} read=${s.read_fixed} ` +
+          `star=${s.starred_fixed} del=${s.deleted} missing=${s.missing_local} ` +
+          `(complete=${result.complete}, pending=${result.pending})`
+      );
+    }
+  } catch (err) {
+    console.error(`[reconcile-cron] ${account.email} threw:`, err);
+  }
+}
 
 /**
  * Calendar sync cron (CS-8). One try/catch per account so a single failing or

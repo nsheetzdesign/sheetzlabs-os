@@ -9,11 +9,13 @@ import { EmailList, type Email } from '~/components/inbox/EmailList';
 import { EmailPreview, type PreviewEmail } from '~/components/inbox/EmailPreview';
 import { ComposeModal } from '~/components/inbox/ComposeModal';
 import { ThreadView } from '~/components/inbox/ThreadView';
+import { SyncStatusIndicator } from '~/components/inbox/SyncStatusIndicator';
 import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
 import { useToasts, ToastContainer } from '~/components/ui/Toast';
 import { EmailListSkeleton } from '~/components/ui/Skeleton';
 import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
 import { useEmailPolling } from '~/hooks/useEmailPolling';
+import { useSyncStatus, looksLikeAuthError } from '~/hooks/useSyncStatus';
 
 // Human-readable past-tense labels for the undo toast, keyed by action.
 const UNDO_LABELS: Record<string, string> = {
@@ -244,6 +246,7 @@ export default function Inbox() {
   const undoFetcher = useFetcher();
   const revalidator = useRevalidator();
   const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  const sync = useSyncStatus();
   // Optimistic removal: ids hidden from the list the instant an action fires, kept
   // hidden until the revalidated loader confirms they're actually gone. On failure
   // they're un-hidden + an error toast is shown.
@@ -346,42 +349,78 @@ export default function Inbox() {
     }
   }, [searchParams, emails]);
 
+  // Run a sync POST and translate its `{ success, accounts:[{success,error}] }`
+  // envelope into the shared sync-status indicator. Previously every failure here
+  // was swallowed (console.error / empty catch), so a transient backend blip
+  // looked like a frozen inbox (Prompt 59). `toast` is on for the manual button,
+  // off for background focus-sync.
+  const runSync = useCallback(
+    async (opts: { toast: boolean }) => {
+      sync.reportStart();
+      try {
+        const res = await fetch('/dashboard/inbox/sync', { method: 'POST' });
+        const data = (await res.json().catch(() => null)) as
+          | { success?: boolean; accounts?: Array<{ email?: string; success?: boolean; error?: string | null }> }
+          | null;
+        const failedAccounts = (data?.accounts ?? []).filter((a) => a && a.success === false);
+        const ok = res.ok && data?.success !== false && failedAccounts.length === 0;
+
+        if (!ok) {
+          const detail =
+            failedAccounts[0]?.error || (data as any)?.error || `Sync failed (${res.status})`;
+          const auth = looksLikeAuthError(res.status, data);
+          sync.reportError(detail, { auth });
+          if (opts.toast) pushToast({ message: `Sync failed — ${detail}`, variant: 'error' });
+          return;
+        }
+        sync.reportSuccess();
+        revalidator.revalidate();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Network error';
+        sync.reportError(detail);
+        if (opts.toast) pushToast({ message: `Sync failed — ${detail}`, variant: 'error' });
+      }
+    },
+    [sync, pushToast, revalidator]
+  );
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
-      await fetch('/dashboard/inbox/sync', { method: 'POST' });
-      revalidator.revalidate();
-    } catch (error) {
-      console.error('[Inbox] Sync failed:', error);
+      await runSync({ toast: true });
     } finally {
       setIsRefreshing(false);
     }
   };
 
   // Auto-sync on window focus — throttled to once per 2 minutes (Part 5, EU-14)
-  // so tab-flipping doesn't hammer the sync endpoint.
+  // so tab-flipping doesn't hammer the sync endpoint. Failures now feed the
+  // indicator instead of being silently dropped.
   const lastFocusSync = useRef(0);
   useEffect(() => {
-    const onFocus = async () => {
+    const onFocus = () => {
       const now = Date.now();
       if (now - lastFocusSync.current < 120_000) return;
       lastFocusSync.current = now;
-      try {
-        await fetch('/dashboard/inbox/sync', { method: 'POST' });
-        revalidator.revalidate();
-      } catch {
-        // ignore focus sync errors
-      }
+      void runSync({ toast: false });
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, []);
+  }, [runSync]);
 
-  // Lightweight polling every 60s — only revalidates when new inbox emails actually exist
+  // Lightweight polling every 60s — only revalidates when new inbox emails actually
+  // exist. A failed poll now reports to the indicator (transient → next ok poll
+  // clears it); a healthy poll clears any standing transient issue.
   const newestEmailAt = emails.length > 0
     ? (emails[0] as any).received_at as string | undefined
     : undefined;
-  useEmailPolling({ enabled: true, interval: 60_000, newestEmailAt });
+  useEmailPolling({
+    enabled: true,
+    interval: 60_000,
+    newestEmailAt,
+    onSyncError: sync.reportError,
+    onSyncSuccess: sync.reportSuccess,
+  });
 
   const handleOpenEmail = async (email: PreviewEmail) => {
     setActiveEmail(email);
@@ -681,6 +720,11 @@ export default function Inbox() {
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
               />
             </form>
+            <SyncStatusIndicator
+              sync={sync}
+              busy={isRefreshing || sync.state === 'syncing'}
+              onRetry={handleRefresh}
+            />
             <button
               onClick={handleRefresh}
               disabled={isRefreshing || revalidator.state === 'loading'}

@@ -10,12 +10,17 @@ interface UseEmailPollingOptions {
   interval?: number; // milliseconds
   /** ISO timestamp of the newest email currently displayed */
   newestEmailAt?: string | null;
+  /** Surface a failed/recovered poll to the shared sync indicator (Prompt 59). */
+  onSyncError?: (message: string, opts?: { auth?: boolean }) => void;
+  onSyncSuccess?: () => void;
 }
 
 export function useEmailPolling({
   enabled = true,
   interval = 60_000,
   newestEmailAt,
+  onSyncError,
+  onSyncSuccess,
 }: UseEmailPollingOptions = {}) {
   const revalidator = useRevalidator();
   const sinceRef = useRef<string>(newestEmailAt ?? new Date().toISOString());
@@ -40,20 +45,30 @@ export function useEmailPolling({
       const res = await fetch(
         `${API_URL}/email/check-updates?since=${encodeURIComponent(sinceRef.current)}`
       );
-      if (!res.ok) return;
+      // A non-ok poll used to be swallowed — surface it so a transient backend
+      // blip doesn't masquerade as a frozen inbox (Prompt 59). The next ok poll
+      // clears the indicator (self-heal); 3 in a row reads as persistent.
+      if (!res.ok) {
+        onSyncError?.(`Sync check failed (${res.status})`, {
+          auth: res.status === 401 || res.status === 403 || res.status === 409,
+        });
+        return;
+      }
 
       const data = (await res.json()) as { hasUpdates: boolean; newestAt?: string };
+      onSyncSuccess?.();
 
       if (data.hasUpdates) {
         if (data.newestAt) sinceRef.current = data.newestAt;
         revalidator.revalidate();
       }
     } catch {
-      // network errors are expected when offline — ignore
+      // Network/offline errors were silently ignored — now reported (transient).
+      onSyncError?.('Network error while checking for new mail');
     } finally {
       isPollingRef.current = false;
     }
-  }, [revalidator]);
+  }, [revalidator, onSyncError, onSyncSuccess]);
 
   // Set up interval polling
   useEffect(() => {

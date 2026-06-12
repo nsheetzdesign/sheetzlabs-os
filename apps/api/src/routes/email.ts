@@ -7,6 +7,7 @@ import {
   getValidAccessToken as getGoogleAccessToken,
   ReauthRequiredError,
 } from "../lib/google-auth";
+import { reconcileAccount } from "../lib/email-reconcile";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -1897,6 +1898,44 @@ email.post("/accounts/:id/sync", async (c) => {
   });
 });
 
+/**
+ * Full-state reconciliation for one account (Prompt 59 Part 2). On-demand trigger
+ * for the set-diff repair engine — diffs Gmail's authoritative INBOX/UNREAD/
+ * STARRED/TRASH/SPAM sets against local rows and fixes fossilized drift (e.g.
+ * folder='INBOX' for mail Gmail archived before label deltas were tracked). One
+ * budgeted run; a backlog larger than the per-run cap leaves a `reconcile_cursor`
+ * and the weekly cron continues it. Returns the run's fix-count summary.
+ */
+email.post("/accounts/:id/reconcile", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("email_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const result = await reconcileAccount(account, c.env, supabase);
+
+  if (result.skipped === "needs_reauth") {
+    return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+  }
+  if (result.error) {
+    return c.json({ error: result.error }, 500);
+  }
+
+  return c.json({
+    success: true,
+    email: result.email,
+    complete: result.complete,
+    pending: result.pending,
+    summary: result.summary,
+  });
+});
+
 // ============================================
 // FULL INBOX DOWNLOAD (paginate all messages)
 // ============================================
@@ -2284,7 +2323,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
  * parser, the full-sync update path, history-delta application, and write-back
  * confirmation. Kills the triplicated folder-derivation logic.
  */
-function applyLabelStateToEmail(labels: string[]): {
+export function applyLabelStateToEmail(labels: string[]): {
   folder: string;
   is_read: boolean;
   is_starred: boolean;

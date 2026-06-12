@@ -44,8 +44,14 @@ test.describe("email", () => {
 
     await page.goto("/dashboard/inbox", { waitUntil: "networkidle" });
 
-    // Sidebar account addresses render.
-    await expect(page.getByText(sender.email, { exact: false }).first()).toBeVisible();
+    // Sidebar account renders. The sidebar shows the account's local-part (it has
+    // rendered `email.split('@')[0]` for ~3 months); the full address only appears
+    // in the settings panel, not the always-visible list. Asserting the full
+    // address made this canary depend on the founder's live mailbox happening to
+    // surface it in a visible row — flaky. Assert the local-part the sidebar
+    // actually renders.
+    const localPart = sender.email.split("@")[0];
+    await expect(page.getByText(localPart, { exact: false }).first()).toBeVisible();
     // The Inbox folder label is present.
     await expect(page.getByText(/Inbox/i).first()).toBeVisible();
     // The message list has at least one row (founder mailbox is non-empty).
