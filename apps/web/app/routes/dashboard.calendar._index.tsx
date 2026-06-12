@@ -978,6 +978,14 @@ export default function CalendarPage() {
   const [subCalColors, setSubCalColors] = useState<Record<string, string>>({});
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
 
+  const dayList = days as DayDescriptor[];
+  // Precompute each column's local-midnight UTC instant for placement. Declared
+  // up here so the drag/keyboard effects below can depend on it without a TDZ.
+  const dayBoundaries = useMemo(
+    () => dayList.map((d) => dayStartUtc(d, tz).getTime()),
+    [dayList, tz]
+  );
+
   const navigate = useNavigate();
   const { toasts, push, dismiss } = useToasts();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1190,13 +1198,6 @@ export default function CalendarPage() {
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, offset, navigate, newEventModal, selectedEvent, settingsAccount, accounts.length]);
-
-  const dayList = days as DayDescriptor[];
-  // Precompute each column's local-midnight UTC instant for placement.
-  const dayBoundaries = useMemo(
-    () => dayList.map((d) => dayStartUtc(d, tz).getTime()),
-    [dayList, tz]
-  );
 
   // Look up DB sub-cal by Google calendar ID (external_id)
   function findSubCal(googleCalId: string | null, accountId: string): SubCalendar | undefined {
@@ -1641,13 +1642,11 @@ export default function CalendarPage() {
                     const dragging = drag?.id === event.id && drag.moved;
                     const draggable = isDraggable(event);
                     return (
-                      <div
+                      <button
                         key={event.id}
-                        role="button"
-                        tabIndex={0}
+                        type="button"
                         aria-label={`${event.title}, ${formatTimeInTz(event.start_at, tz)}`}
                         onClick={(e) => { e.stopPropagation(); if (!drag) setSelectedEvent(event); }}
-                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedEvent(event); } }}
                         onPointerDown={(e) => draggable && startDrag(e, event, dayIndex, "move")}
                         style={{ ...chipStyle(top, height, eventColor(event), col, colCount), cursor: draggable ? "grab" : "pointer", opacity: dragging ? 0.75 : 1, zIndex: dragging ? 5 : 2 }}
                         className="overflow-hidden rounded-sm px-1.5 py-0.5 text-left hover:brightness-110 transition-[filter] select-none focus:outline-none focus:ring-1 focus:ring-emerald-400"
@@ -1660,13 +1659,13 @@ export default function CalendarPage() {
                         </div>
                         {/* Resize handle (bottom edge) */}
                         {draggable && (
-                          <div
+                          <span
                             onPointerDown={(e) => startDrag(e, event, dayIndex, "resize")}
                             className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize"
                             aria-hidden="true"
                           />
                         )}
-                      </div>
+                      </button>
                     );
                   })}
                 </div>

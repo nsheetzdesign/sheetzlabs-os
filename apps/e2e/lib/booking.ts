@@ -107,13 +107,33 @@ export interface BookResult {
   body: { success?: boolean; booking?: { id: string }; error?: string };
 }
 
-/** Direct public booking POST (used for guard/validation checks). */
+/**
+ * Direct public booking POST (used for guard/validation checks). The public
+ * booking endpoint is rate-limited to 5 POSTs / 60s per IP (BK-5); as the suite
+ * grew past that, legitimate POSTs started getting 429s. Rather than weaken the
+ * prod limit, wait out a 429 and retry so assertions see the real status.
+ */
 export async function bookSlot(
   slug: string,
   scheduledAt: string,
   guestEmail: string,
   guestName = "[E2E] Guest"
 ): Promise<BookResult> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await apiPublic<BookResult["body"]>(`/booking/public/${slug}`, {
+      method: "POST",
+      body: JSON.stringify({
+        guest_name: guestName,
+        guest_email: guestEmail,
+        scheduled_at: scheduledAt,
+        timezone: "America/Chicago",
+      }),
+    });
+    if (res.status !== 429) return { status: res.status, body: res.body };
+    // 5/60s window — wait ~13s to free a token, then retry.
+    await new Promise((r) => setTimeout(r, 13_000));
+  }
+  // Final attempt after the loop exhausted (surfaces the 429 if still limited).
   const res = await apiPublic<BookResult["body"]>(`/booking/public/${slug}`, {
     method: "POST",
     body: JSON.stringify({
