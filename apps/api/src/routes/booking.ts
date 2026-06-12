@@ -6,12 +6,40 @@ import { sendBookingEmail } from "../lib/send-booking-email";
 import { escapeHtml } from "../lib/escape";
 import {
   computeSlotsForDate,
+  validateBookingRequest,
   zonedTimeToUtc,
   utcToZonedDateStr,
   type AvailabilityRules,
   type BusyInterval,
 } from "../lib/slots";
+import { buildIcs, googleCalendarUrl, outlookCalendarUrl } from "../lib/ics";
 import { getValidAccessToken as getGoogleAccessToken } from "../lib/google-auth";
+
+const APP_BASE = "https://app.sheetzlabs.com";
+const API_BASE = "https://api.sheetzlabs.com";
+
+/** Count non-cancelled bookings for a link on a host-tz calendar date (daily cap). */
+async function countLinkBookingsOnDate(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  linkId: string,
+  date: string,
+  tz: string,
+  excludeBookingId?: string,
+): Promise<number> {
+  const start = zonedTimeToUtc(date, "00:00", tz);
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  let q = supabase
+    .from("bookings")
+    .select("id", { count: "exact", head: true })
+    .eq("booking_link_id", linkId)
+    .neq("status", "cancelled")
+    .gte("scheduled_at", start.toISOString())
+    .lt("scheduled_at", end.toISOString());
+  if (excludeBookingId) q = q.neq("id", excludeBookingId);
+  const { count } = await q;
+  return count ?? 0;
+}
 
 interface RateLimit {
   limit(options: { key: string }): Promise<{ success: boolean }>;
@@ -237,6 +265,7 @@ booking.post("/links", async (c) => {
     description?: string;
     duration_minutes: number;
     availability_rules?: object;
+    host_image_url?: string;
   }>();
 
   const cleanSlug = body.slug.toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -250,6 +279,7 @@ booking.post("/links", async (c) => {
       description: body.description ?? null,
       duration_minutes: body.duration_minutes,
       availability_rules: body.availability_rules ?? DEFAULT_AVAILABILITY,
+      host_image_url: body.host_image_url ?? null,
     })
     .select()
     .single();
@@ -270,18 +300,22 @@ booking.patch("/links/:id", async (c) => {
   const body = await c.req.json<{
     title?: string;
     description?: string;
+    slug?: string;
     duration_minutes?: number;
     availability_rules?: object;
     is_active?: boolean;
+    host_image_url?: string | null;
   }>();
 
   // Explicit column allowlist — never trust the raw body (XC-1 mass assignment).
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (body.title !== undefined) updates.title = body.title;
   if (body.description !== undefined) updates.description = body.description;
+  if (body.slug !== undefined) updates.slug = body.slug.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   if (body.duration_minutes !== undefined) updates.duration_minutes = body.duration_minutes;
   if (body.availability_rules !== undefined) updates.availability_rules = body.availability_rules;
   if (body.is_active !== undefined) updates.is_active = body.is_active;
+  if (body.host_image_url !== undefined) updates.host_image_url = body.host_image_url;
 
   const { data, error } = await supabase
     .from("booking_links")
@@ -290,8 +324,25 @@ booking.patch("/links/:id", async (c) => {
     .select()
     .single();
 
-  if (error) return c.json({ error: error.message }, 500);
+  if (error) {
+    if (error.code === "23505") {
+      return c.json({ error: "A booking link with this slug already exists" }, 409);
+    }
+    return c.json({ error: error.message }, 500);
+  }
   return c.json({ link: data });
+});
+
+// Slug availability check for the editor's live URL preview (Part C).
+booking.get("/links/check-slug", async (c) => {
+  const slug = (c.req.query("slug") ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const excludeId = c.req.query("exclude_id");
+  if (!slug) return c.json({ available: false, slug });
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  let q = supabase.from("booking_links").select("id").eq("slug", slug);
+  if (excludeId) q = q.neq("id", excludeId);
+  const { data } = await q;
+  return c.json({ available: (data?.length ?? 0) === 0, slug });
 });
 
 booking.delete("/links/:id", async (c) => {
@@ -397,13 +448,19 @@ booking.get("/public/:slug", async (c) => {
 
   const { data: link, error } = await supabase
     .from("booking_links")
-    .select("id, slug, title, description, duration_minutes, availability_rules, is_active")
+    .select("id, slug, title, description, duration_minutes, availability_rules, is_active, host_image_url, calendar_accounts(display_name, email)")
     .eq("slug", slug)
     .eq("is_active", true)
     .single();
 
   if (error || !link) return c.json({ error: "Booking link not found" }, 404);
-  return c.json({ link });
+
+  // Host identity for the public page header (BK-15) — display name only, never
+  // expose the host's email/tokens. Strip the joined account down to a label.
+  const acct = link.calendar_accounts as { display_name?: string; email?: string } | null;
+  const hostName = acct?.display_name || acct?.email?.split("@")[0] || "Your host";
+  const { calendar_accounts: _omit, ...rest } = link;
+  return c.json({ link: { ...rest, host_name: hostName } });
 });
 
 // Get available slots for a date
@@ -439,7 +496,9 @@ booking.get("/public/:slug/slots", async (c) => {
     return c.json({ error: "AVAILABILITY_UNAVAILABLE" }, 503);
   }
 
-  const slots = computeSlotsForDate({ rules, date, durationMinutes: duration, busy });
+  // Daily cap hides a date that's already at capacity (Part B).
+  const bookedToday = await countLinkBookingsOnDate(supabase, link.id, date, tz);
+  const slots = computeSlotsForDate({ rules, date, durationMinutes: duration, busy, bookedToday });
 
   return c.json({ slots, date, duration: link.duration_minutes });
 });
@@ -557,15 +616,18 @@ booking.post("/public/:slug", async (c) => {
   );
   if (!ok) return c.json({ error: "AVAILABILITY_UNAVAILABLE" }, 503);
 
-  const validSlots = computeSlotsForDate({
+  // Full rules enforcement (window / increment / day / notice / cap / conflict).
+  // Returns 422 for out-of-policy requests, 409 for capacity/conflict races (BK-13).
+  const bookedToday = await countLinkBookingsOnDate(supabase, link.id, slotDate, hostTz);
+  const validation = validateBookingRequest({
     rules,
-    date: slotDate,
     durationMinutes: link.duration_minutes as number,
+    startUtc: scheduledAt,
     busy,
+    bookedToday,
   });
-  const requestedMs = scheduledAt.getTime();
-  if (!validSlots.some((s) => new Date(s).getTime() === requestedMs)) {
-    return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
+  if (!validation.ok) {
+    return c.json({ error: validation.error, code: "SLOT_UNAVAILABLE" }, validation.code);
   }
 
   // Create booking record. The partial unique index on (booking_link_id,
@@ -661,6 +723,11 @@ booking.post("/public/:slug", async (c) => {
   const hostName = (account.display_name as string) || (account.email as string).split("@")[0];
   const hostEmailAddr = account.email as string;
 
+  // Add-to-calendar deep links + hosted .ics (BK-15).
+  const eventStart = new Date(body.scheduled_at);
+  const eventEndDt = new Date(eventStart.getTime() + (link.duration_minutes as number) * 60000);
+  const calSummary = `${link.title as string} with ${hostName}`;
+  const calDescription = meetLink ? `Join: ${meetLink}` : (body.guest_notes ?? "");
   const emailData = {
     guestName: body.guest_name,
     guestEmail: body.guest_email,
@@ -672,16 +739,39 @@ booking.post("/public/:slug", async (c) => {
     timezone: guestTimezone,
     bookingId: newBooking.id,
     notes: body.guest_notes,
-    cancelUrl: `https://app.sheetzlabs.com/book/cancel/${newBooking.id}`,
-    rescheduleUrl: `https://app.sheetzlabs.com/book/reschedule/${newBooking.id}`,
+    cancelUrl: `${APP_BASE}/book/cancel/${newBooking.id}`,
+    rescheduleUrl: `${APP_BASE}/book/reschedule/${newBooking.id}`,
     meetLink: meetLink ?? undefined,
     // Drives the "a calendar invitation has been sent" copy — only true copy when
     // the Google event actually got created (BK-12).
     calendarInviteSent: calendarEventCreated,
+    addToGoogleUrl: googleCalendarUrl({ summary: calSummary, start: eventStart, end: eventEndDt, description: calDescription, location: meetLink ?? undefined }),
+    addToOutlookUrl: outlookCalendarUrl({ summary: calSummary, start: eventStart, end: eventEndDt, description: calDescription, location: meetLink ?? undefined }),
+    icsUrl: `${API_BASE}/booking/public/${newBooking.id}/ics`,
   };
 
+  // Attach a real .ics to the guest's confirmation so any calendar can import it.
+  const icsBody = buildIcs({
+    uid: `booking-${newBooking.id}@sheetzlabs.com`,
+    start: eventStart,
+    end: eventEndDt,
+    summary: calSummary,
+    description: calDescription,
+    location: meetLink ?? undefined,
+    organizerName: hostName,
+    organizerEmail: hostEmailAddr,
+    attendeeName: body.guest_name,
+    attendeeEmail: body.guest_email,
+  });
+
   const guestEmail = guestConfirmationEmail(emailData);
-  const gRes = await sendBookingEmail({ to: body.guest_email, subject: guestEmail.subject, html: guestEmail.html, resendApiKey: c.env.RESEND_API_KEY });
+  const gRes = await sendBookingEmail({
+    to: body.guest_email,
+    subject: guestEmail.subject,
+    html: guestEmail.html,
+    resendApiKey: c.env.RESEND_API_KEY,
+    attachments: [{ filename: "invite.ics", content: icsBody, contentType: "text/calendar; method=PUBLISH; charset=utf-8" }],
+  });
   if (!gRes.ok) console.error(`[booking] guest confirmation email failed for ${newBooking.id}: ${gRes.error}`);
 
   const hostEmail = hostNotificationEmail(emailData);
@@ -741,18 +831,23 @@ booking.get("/public/reschedule/:bookingId", async (c) => {
   return c.json({ booking: trimmed });
 });
 
-// Reschedule a booking
-booking.post("/public/reschedule/:bookingId", async (c) => {
-  const { bookingId } = c.req.param();
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
-
-  const parsed = rescheduleSchema.safeParse(await c.req.json().catch(() => ({})));
-  if (!parsed.success) {
-    return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
-  }
-  const body = parsed.data;
-
-  const newDateTime = new Date(body.scheduled_at);
+/**
+ * Shared reschedule machinery used by BOTH the public (guest) and authenticated
+ * (host) endpoints. DB-first, then best-effort Google patch (flag on failure),
+ * then emails. `byHost` flips the guest's email to the "rescheduled by host"
+ * variant (Part E). Returns a Hono JSON response.
+ */
+async function rescheduleBooking(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  c: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  bookingId: string,
+  scheduledAtIso: string,
+  timezone: string | undefined,
+  byHost: boolean,
+) {
+  const newDateTime = new Date(scheduledAtIso);
   if (Number.isNaN(newDateTime.getTime())) {
     return c.json({ error: "Invalid input", fields: { scheduled_at: "Invalid date" } }, 422);
   }
@@ -766,7 +861,7 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
   if (!bk || bk.status === "cancelled") return c.json({ error: "Booking not found or cancelled" }, 404);
 
   const oldDateTime = new Date(bk.scheduled_at as string);
-  const newTimezone = body.timezone ?? (bk.timezone as string);
+  const newTimezone = timezone ?? (bk.timezone as string);
 
   // Re-validate the new time against live availability in the host tz (BK-1/2/3).
   const rules = bk.booking_links.availability_rules as AvailabilityRules;
@@ -781,15 +876,17 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
   );
   if (!ok) return c.json({ error: "AVAILABILITY_UNAVAILABLE" }, 503);
 
-  const validSlots = computeSlotsForDate({
+  // Exclude this booking from the daily-cap count (it's being moved, not added).
+  const bookedToday = await countLinkBookingsOnDate(supabase, bk.booking_link_id as string, slotDate, hostTz, bookingId);
+  const validation = validateBookingRequest({
     rules,
-    date: slotDate,
     durationMinutes: bk.duration_minutes as number,
+    startUtc: newDateTime,
     busy,
+    bookedToday,
   });
-  const requestedMs = newDateTime.getTime();
-  if (!validSlots.some((s) => new Date(s).getTime() === requestedMs)) {
-    return c.json({ error: "SLOT_UNAVAILABLE" }, 409);
+  if (!validation.ok) {
+    return c.json({ error: validation.error, code: "SLOT_UNAVAILABLE" }, validation.code);
   }
 
   // 1. DB update first (source of truth). Reset reminder claims so the new time
@@ -797,7 +894,7 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
   const { error: updateError } = await supabase
     .from("bookings")
     .update({
-      scheduled_at: body.scheduled_at,
+      scheduled_at: scheduledAtIso,
       timezone: newTimezone,
       updated_at: new Date().toISOString(),
       reminder_24h_sent_at: null,
@@ -826,7 +923,7 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
           method: "PATCH",
           headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            start: { dateTime: body.scheduled_at, timeZone: newTimezone },
+            start: { dateTime: scheduledAtIso, timeZone: newTimezone },
             end: { dateTime: eventEnd.toISOString(), timeZone: newTimezone },
           }),
         }
@@ -859,17 +956,97 @@ booking.post("/public/reschedule/:bookingId", async (c) => {
     timezone: newTimezone,
     bookingId: bk.id as string,
     meetLink: (bk.meet_link as string) ?? undefined,
+    cancelUrl: `${APP_BASE}/book/cancel/${bk.id}`,
+    rescheduleUrl: `${APP_BASE}/book/reschedule/${bk.id}`,
+    icsUrl: `${API_BASE}/booking/public/${bk.id}/ics`,
   };
 
-  const guestEmailContent = rescheduleConfirmationEmail(emailData, false, oldDateTime);
+  const guestEmailContent = rescheduleConfirmationEmail(emailData, false, oldDateTime, byHost);
   const gRes = await sendBookingEmail({ to: emailData.guestEmail, subject: guestEmailContent.subject, html: guestEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
   if (!gRes.ok) console.error(`[booking] guest reschedule email failed for ${bookingId}: ${gRes.error}`);
 
-  const hostEmailContent = rescheduleConfirmationEmail(emailData, true, oldDateTime);
+  const hostEmailContent = rescheduleConfirmationEmail(emailData, true, oldDateTime, byHost);
   const hRes = await sendBookingEmail({ to: hostEmail, subject: hostEmailContent.subject, html: hostEmailContent.html, resendApiKey: c.env.RESEND_API_KEY });
   if (!hRes.ok) console.error(`[booking] host reschedule email failed for ${bookingId}: ${hRes.error}`);
 
   return c.json({ success: true });
+}
+
+// Reschedule a booking (guest-initiated, public)
+booking.post("/public/reschedule/:bookingId", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const parsed = rescheduleSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
+  }
+
+  return rescheduleBooking(c, supabase, bookingId, parsed.data.scheduled_at, parsed.data.timezone, false);
+});
+
+// ── Public: .ics download (BK-15) ─────────────────────────────────────────────
+// Hosted iCalendar for a single booking — linked from the confirmation page +
+// every booking email so guests on any calendar can import the event.
+booking.get("/public/:bookingId/ics", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: bk, error } = await supabase
+    .from("bookings")
+    .select("id, guest_name, guest_email, scheduled_at, duration_minutes, status, meet_link, booking_links(title, calendar_accounts(email, display_name))")
+    .eq("id", bookingId)
+    .single();
+
+  if (error || !bk) return c.json({ error: "Booking not found" }, 404);
+
+  const linkJoin = bk.booking_links as unknown as {
+    title?: string;
+    calendar_accounts?: { email?: string; display_name?: string };
+  } | null;
+  const acct = (linkJoin?.calendar_accounts ?? {}) as { email?: string; display_name?: string };
+  const hostEmail = acct.email ?? "host@sheetzlabs.com";
+  const hostName = acct.display_name || hostEmail.split("@")[0];
+  const start = new Date(bk.scheduled_at as string);
+  const end = new Date(start.getTime() + (bk.duration_minutes as number) * 60000);
+  const title = linkJoin?.title ?? "Meeting";
+  const meet = (bk.meet_link as string) || undefined;
+
+  const ics = buildIcs({
+    uid: `booking-${bk.id}@sheetzlabs.com`,
+    start,
+    end,
+    summary: `${title} with ${hostName}`,
+    description: meet ? `Join: ${meet}` : "",
+    location: meet,
+    organizerName: hostName,
+    organizerEmail: hostEmail,
+    attendeeName: bk.guest_name as string,
+    attendeeEmail: bk.guest_email as string,
+    cancelled: bk.status === "cancelled",
+  });
+
+  return new Response(ics, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/calendar; charset=utf-8",
+      "Content-Disposition": `attachment; filename="booking-${bk.id}.ics"`,
+    },
+  });
+});
+
+// ── Authenticated: host-initiated reschedule (Part E) ─────────────────────────
+booking.post("/bookings/:bookingId/reschedule", async (c) => {
+  const { bookingId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const parsed = rescheduleSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return c.json({ error: "Invalid input", fields: zodErrors(parsed.error) }, 422);
+  }
+
+  // byHost = true → the guest gets the "rescheduled by host" email variant.
+  return rescheduleBooking(c, supabase, bookingId, parsed.data.scheduled_at, parsed.data.timezone, true);
 });
 
 export default booking;

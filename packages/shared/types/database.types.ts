@@ -330,6 +330,7 @@ export type Database = {
           created_at: string | null
           description: string | null
           duration_minutes: number
+          host_image_url: string | null
           id: string
           is_active: boolean | null
           requires_confirmation: boolean | null
@@ -343,6 +344,7 @@ export type Database = {
           created_at?: string | null
           description?: string | null
           duration_minutes?: number
+          host_image_url?: string | null
           id?: string
           is_active?: boolean | null
           requires_confirmation?: boolean | null
@@ -356,6 +358,7 @@ export type Database = {
           created_at?: string | null
           description?: string | null
           duration_minutes?: number
+          host_image_url?: string | null
           id?: string
           is_active?: boolean | null
           requires_confirmation?: boolean | null

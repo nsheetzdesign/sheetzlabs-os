@@ -50,6 +50,35 @@ export async function deleteLink(id: string) {
   await api(`/booking/links/${id}`, { method: "DELETE" }).catch(() => null);
 }
 
+/** Create a link with explicit duration + availability rules (rules-enforcement tests). */
+export async function createLinkWith(
+  title: string,
+  slug: string,
+  durationMinutes: number,
+  rules: Record<string, unknown>,
+): Promise<BookingLink> {
+  const cal = await calendarAccount();
+  const res = await api<{ link?: BookingLink }>("/booking/links", {
+    method: "POST",
+    body: JSON.stringify({
+      calendar_account_id: cal.id,
+      slug,
+      title,
+      duration_minutes: durationMinutes,
+      availability_rules: rules,
+    }),
+  });
+  if (!res.ok || !res.body?.link) {
+    throw new Error(`createLinkWith failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+  return res.body.link;
+}
+
+/** PATCH a link (edit round-trip tests). */
+export async function patchLink(id: string, updates: Record<string, unknown>) {
+  return api(`/booking/links/${id}`, { method: "PATCH", body: JSON.stringify(updates) });
+}
+
 /** Local YYYY-MM-DD for `daysFromNow` in the host tz (America/Chicago). */
 export function dateNDaysOut(daysFromNow: number): string {
   const d = new Date(Date.now() + daysFromNow * 86_400_000);

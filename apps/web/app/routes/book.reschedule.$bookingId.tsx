@@ -7,25 +7,20 @@ export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/Book
 
 export const meta: MetaFunction = () => [{ title: "Reschedule Meeting" }];
 
-type AvailabilityRules = {
-  date_range_days?: number;
-};
+import type { Booking, AvailabilityRules } from "@sheetzlabs/shared";
 
-type BookingLink = {
-  slug: string;
-  title: string;
-  duration_minutes: number;
-  availability_rules: AvailabilityRules;
-};
-
-type Booking = {
-  id: string;
-  guest_name: string;
-  scheduled_at: string;
-  duration_minutes: number;
-  timezone: string;
-  status: string;
-  booking_links: BookingLink;
+// View projection of the trimmed reschedule payload (BK-17), built from the
+// shared Booking row + the joined link — not a divergent re-declaration.
+type RescheduleBooking = Pick<
+  Booking,
+  "id" | "guest_name" | "scheduled_at" | "duration_minutes" | "timezone" | "status"
+> & {
+  booking_links: {
+    slug: string;
+    title: string;
+    duration_minutes: number;
+    availability_rules: Pick<AvailabilityRules, "date_range_days" | "timezone">;
+  };
 };
 
 export async function loader({ params, context }: LoaderFunctionArgs) {
@@ -35,7 +30,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
   const res = await fetch(`${apiUrl}/booking/public/reschedule/${params.bookingId}`);
   if (!res.ok) throw new Response("Booking not found", { status: 404 });
 
-  const data = (await res.json()) as { booking: Booking };
+  const data = (await res.json()) as { booking: RescheduleBooking };
   return { booking: data.booking };
 }
 
@@ -105,10 +100,12 @@ export default function ReschedulePage() {
   const currentDate = new Date(booking.scheduled_at);
   const dateRangeDays = bookingLink.availability_rules?.date_range_days ?? 14;
 
+  // Build keys from LOCAL calendar parts (not toISOString) so an evening US guest
+  // never sees the day shifted by the UTC off-by-one (BK-18).
   const availableDates = Array.from({ length: dateRangeDays }, (_, i) => {
     const date = new Date();
     date.setDate(date.getDate() + i + 1); // start tomorrow
-    return date.toISOString().split("T")[0];
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   });
 
   function handleDateSelect(date: string) {

@@ -112,6 +112,12 @@ export default {
       ctx.waitUntil(processBookingReminders(env));
     }
 
+    // Flip past confirmed bookings to "completed" every 15 minutes — feeds
+    // analytics and clears them out of the host's "upcoming" view (Part E, XC-6).
+    if (now.getUTCMinutes() % 15 === 0) {
+      ctx.waitUntil(markCompletedBookings(supabase));
+    }
+
     // Sync calendars every 15 minutes (CS-8). Gated by modulo on the single
     // every-minute trigger — consistent with the email/reminder cadence above and
     // avoids the double-invocation a second `wrangler.toml` trigger would cause at
@@ -405,6 +411,43 @@ async function sendRemindersForWindow(
   }
 
   return sent;
+}
+
+/**
+ * Mark confirmed bookings whose end time (`scheduled_at` + duration) is in the
+ * past as `completed` (Part E). PostgREST can't express the duration arithmetic
+ * in a filter, so we pull recently-past confirmed rows and finish the check in
+ * JS, then batch-update by id.
+ */
+async function markCompletedBookings(supabase: ReturnType<typeof createClient<any>>) {
+  const now = new Date();
+  const { data, error } = await supabase
+    .from("bookings")
+    .select("id, scheduled_at, duration_minutes")
+    .eq("status", "confirmed")
+    .lte("scheduled_at", now.toISOString())
+    .limit(500);
+
+  if (error) {
+    console.error(`[bookings-complete] query failed: ${error.message}`);
+    return;
+  }
+
+  const due = (data ?? [])
+    .filter(
+      (b: { scheduled_at: string; duration_minutes: number }) =>
+        new Date(b.scheduled_at).getTime() + b.duration_minutes * 60000 <= now.getTime()
+    )
+    .map((b: { id: string }) => b.id);
+
+  if (!due.length) return;
+
+  const { error: upErr } = await supabase
+    .from("bookings")
+    .update({ status: "completed", updated_at: now.toISOString() })
+    .in("id", due);
+  if (upErr) console.error(`[bookings-complete] update failed: ${upErr.message}`);
+  else console.log(`[bookings-complete] marked ${due.length} completed`);
 }
 
 function shouldRunNow(cronExpr: string, now: Date): boolean {

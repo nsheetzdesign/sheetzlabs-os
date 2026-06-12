@@ -1,6 +1,7 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, Form, useFetcher, useRevalidator, redirect } from "react-router";
+import { useLoaderData, Link, Form, useFetcher, useRevalidator, useNavigate, redirect } from "react-router";
 import { useState, useEffect, useRef, useMemo } from "react";
+import { useToasts, ToastContainer } from "~/components/ui/Toast";
 import {
   RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin,
   Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar, AlertTriangle,
@@ -24,10 +25,13 @@ export const meta: MetaFunction = () => [{ title: "Calendar — Sheetz Labs OS" 
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const START_HOUR = 4;      // 4 am
+// Full 24-hour grid (CS-14 — the 4 AM clamp is gone). Auto-scroll on mount keeps
+// early hours out of the way without hiding them.
+const START_HOUR = 0;
 const HOUR_HEIGHT = 56;    // px per hour
-const VISIBLE_HOURS = 21;  // 4 am → midnight (hour indices 4..24)
+const VISIBLE_HOURS = 24;  // midnight → midnight
 const HOURS = Array.from({ length: VISIBLE_HOURS }, (_, i) => i + START_HOUR);
+const SNAP_MIN = 15;       // drag/resize snap granularity
 
 const COLOR_SWATCHES = [
   "#ef4444", "#f97316", "#f59e0b", "#22c55e", "#06b6d4",
@@ -346,6 +350,23 @@ export async function action({ request, context }: ActionFunctionArgs) {
     return Response.json({ ok: true });
   }
 
+  // Drag-to-move / resize (CS-14). Patches ONLY start/end through the same
+  // Google-first PATCH path used by edit — so a drag writes back to Google.
+  // start_at/end_at already arrive as UTC ISO (converted client-side).
+  if (intent === "move_event") {
+    const eventId = fd.get("event_id") as string;
+    const res = await apiFetch(request, env, `/calendar/events/${eventId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ start_at: fd.get("start_at"), end_at: fd.get("end_at") }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      return Response.json({ ok: false, error: data.error ?? "Failed to move event" }, { status: res.status });
+    }
+    return Response.json({ ok: true });
+  }
+
   // Delete time block called from the event modal on the index page
   if (intent === "delete_time_block") {
     const eventId = fd.get("event_id") as string;
@@ -443,7 +464,7 @@ function NewEventModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-xl" role="dialog" aria-modal="true" aria-label="New event" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-base font-semibold text-zinc-100">New Event</h2>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 transition-colors"><X className="h-4 w-4" /></button>
@@ -541,6 +562,8 @@ function EventDetailModal({ event, tz, onClose }: { event: CalendarEvent; tz: st
   const [isEditing, setIsEditing] = useState(false);
   const [videoType, setVideoType] = useState<"none" | "meet" | "teams">("none");
   const [editError, setEditError] = useState<string | null>(null);
+  const [briefState, setBriefState] = useState<"idle" | "generating" | "failed">("idle");
+  const briefStartRef = useRef(0);
   const didLoad = useRef(false);
   const editingRef = useRef(false);
 
@@ -572,6 +595,28 @@ function EventDetailModal({ event, tz, onClose }: { event: CalendarEvent; tz: st
     }
   }, [editFetcher.state, editFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Generate Brief state machine (CS-15): idle → generating → ready/failed.
+  // The prep endpoint kicks off an async agent; we poll the detail until the
+  // knowledge doc appears (ready), or surface Retry after a timeout (failed) —
+  // never a permanently stuck "Generating…".
+  const full0 = detailFetcher.data?.event;
+  useEffect(() => {
+    if (briefState !== "generating") return;
+    if (full0?.knowledge) {
+      setBriefState("idle");
+      return;
+    }
+    const iv = setInterval(() => {
+      if (Date.now() - briefStartRef.current > 90_000) {
+        setBriefState("failed");
+        clearInterval(iv);
+        return;
+      }
+      detailFetcher.load(`/dashboard/calendar/${event.id}`);
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [briefState, full0?.knowledge]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleEditSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setEditError(null);
@@ -598,6 +643,9 @@ function EventDetailModal({ event, tz, onClose }: { event: CalendarEvent; tz: st
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div
         className="w-full max-w-lg max-h-[85vh] flex flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-xl overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-label={event.title}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -763,12 +811,20 @@ function EventDetailModal({ event, tz, onClose }: { event: CalendarEvent; tz: st
                             className="text-sm text-emerald-400 hover:text-emerald-300 flex items-center gap-1">
                             View <ExternalLink className="h-3 w-3" />
                           </Link>
+                        ) : briefState === "generating" ? (
+                          <span className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-400">
+                            <RefreshCw className="h-3 w-3 animate-spin" /> Generating…
+                          </span>
                         ) : (
-                          <actionFetcher.Form method="post" action={actionUrl}>
+                          <actionFetcher.Form
+                            method="post"
+                            action={actionUrl}
+                            onSubmit={() => { briefStartRef.current = Date.now(); setBriefState("generating"); }}
+                          >
                             <input type="hidden" name="intent" value="prep" />
-                            <button type="submit" disabled={actionFetcher.state !== "idle" || full.ai_prep_generated}
+                            <button type="submit" disabled={actionFetcher.state !== "idle"}
                               className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded-md disabled:opacity-50 transition-colors">
-                              {full.ai_prep_generated ? "Generating…" : "Generate Brief"}
+                              {briefState === "failed" ? "Retry" : "Generate Brief"}
                             </button>
                           </actionFetcher.Form>
                         )}
@@ -857,7 +913,7 @@ function CalendarSettingsModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-xl p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-md bg-zinc-900 border border-zinc-700 rounded-xl p-6 shadow-xl" role="dialog" aria-modal="true" aria-label="Calendar settings" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-sm font-semibold text-zinc-100">Calendar Settings</h2>
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200"><X className="h-4 w-4" /></button>
@@ -922,6 +978,170 @@ export default function CalendarPage() {
   const [subCalColors, setSubCalColors] = useState<Record<string, string>>({});
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
 
+  const navigate = useNavigate();
+  const { toasts, push, dismiss } = useToasts();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const colsRef = useRef<HTMLDivElement>(null);
+  const moveFetcher = useFetcher<{ ok?: boolean; error?: string }>();
+
+  // Now-line: a minute-ticking clock used to draw the current-time indicator.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const iv = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Auto-scroll to ~1h before the current hour on mount (CS-14).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = Math.max(0, (new Date().getHours() - 1) * HOUR_HEIGHT);
+  }, []);
+
+  // Optimistic position overrides from drag/resize, keyed by event id. Cleared
+  // (reverted) on a failed PATCH; otherwise kept until the next loader refresh.
+  const [eventOverrides, setEventOverrides] = useState<
+    Record<string, { start_at: string; end_at: string }>
+  >({});
+  type DragState = {
+    id: string;
+    mode: "move" | "resize";
+    startClientX: number;
+    startClientY: number;
+    origStartMs: number;
+    origEndMs: number;
+    origDayIndex: number;
+    curStartMs: number;
+    curEndMs: number;
+    curDayIndex: number;
+    moved: boolean;
+  };
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const pendingMoveRef = useRef<string | null>(null);
+
+  // While dragging, overlay a live preview override for the dragged event.
+  const liveOverrides = useMemo(() => {
+    if (drag && drag.moved) {
+      return {
+        ...eventOverrides,
+        [drag.id]: {
+          start_at: new Date(drag.curStartMs).toISOString(),
+          end_at: new Date(drag.curEndMs).toISOString(),
+        },
+      };
+    }
+    return eventOverrides;
+  }, [eventOverrides, drag]);
+
+  function withOverride(e: CalendarEvent): CalendarEvent {
+    const o = liveOverrides[e.id];
+    return o ? { ...e, start_at: o.start_at, end_at: o.end_at } : e;
+  }
+
+  // Booking-sourced events and others' events shouldn't be draggable. We only
+  // have limited fields here; allow timed (non-all-day) events, the common case.
+  function isDraggable(e: CalendarEvent): boolean {
+    return !e.all_day;
+  }
+
+  function commitDrag(d: DragState) {
+    const startIso = new Date(d.curStartMs).toISOString();
+    const endIso = new Date(d.curEndMs).toISOString();
+    setEventOverrides((prev) => ({ ...prev, [d.id]: { start_at: startIso, end_at: endIso } }));
+    pendingMoveRef.current = d.id;
+    const fd = new FormData();
+    fd.set("intent", "move_event");
+    fd.set("event_id", d.id);
+    fd.set("start_at", startIso);
+    fd.set("end_at", endIso);
+    moveFetcher.submit(fd, { method: "post" });
+  }
+
+  // Revert + toast when the PATCH fails (Google or DB error).
+  useEffect(() => {
+    if (moveFetcher.state !== "idle" || !moveFetcher.data) return;
+    const id = pendingMoveRef.current;
+    if (moveFetcher.data.ok === false && id) {
+      setEventOverrides((prev) => {
+        const n = { ...prev };
+        delete n[id];
+        return n;
+      });
+      push({ message: moveFetcher.data.error ?? "Couldn’t move event", variant: "error" });
+    }
+    pendingMoveRef.current = null;
+  }, [moveFetcher.state, moveFetcher.data, push]);
+
+  // Pointer drag/resize lifecycle (CS-14). Threshold of 4px distinguishes a
+  // click (opens the event) from a drag.
+  useEffect(() => {
+    if (!drag) return;
+    function onMove(e: PointerEvent) {
+      setDrag((d) => {
+        if (!d) return d;
+        const dy = e.clientY - d.startClientY;
+        const minutesDelta = Math.round((dy / HOUR_HEIGHT) * 60 / SNAP_MIN) * SNAP_MIN;
+        let curDayIndex = d.origDayIndex;
+        if (d.mode === "move" && colsRef.current && dayBoundaries.length > 1) {
+          const rect = colsRef.current.getBoundingClientRect();
+          const colW = rect.width / dayBoundaries.length;
+          const idx = Math.floor((e.clientX - rect.left) / colW);
+          curDayIndex = Math.max(0, Math.min(dayBoundaries.length - 1, idx));
+        }
+        const timeOfDay = d.origStartMs - dayBoundaries[d.origDayIndex];
+        const duration = d.origEndMs - d.origStartMs;
+        let curStartMs = d.origStartMs;
+        let curEndMs = d.origEndMs;
+        if (d.mode === "move") {
+          curStartMs = dayBoundaries[curDayIndex] + timeOfDay + minutesDelta * 60_000;
+          curEndMs = curStartMs + duration;
+        } else {
+          curEndMs = Math.max(d.origStartMs + SNAP_MIN * 60_000, d.origEndMs + minutesDelta * 60_000);
+        }
+        const moved = d.moved || Math.abs(dy) > 4 || curDayIndex !== d.origDayIndex;
+        return { ...d, curStartMs, curEndMs, curDayIndex, moved };
+      });
+    }
+    function onUp() {
+      setDrag((d) => {
+        if (d && d.moved) commitDrag(d);
+        return null;
+      });
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [drag, dayBoundaries]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function startDrag(
+    e: React.PointerEvent,
+    event: CalendarEvent,
+    dayIndex: number,
+    mode: "move" | "resize",
+  ) {
+    if (e.button !== 0 || !isDraggable(event)) return;
+    if (mode === "resize") e.stopPropagation();
+    const eff = withOverride(event);
+    const startMs = new Date(eff.start_at).getTime();
+    const endMs = new Date(eff.end_at).getTime();
+    setDrag({
+      id: event.id,
+      mode,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      origStartMs: startMs,
+      origEndMs: endMs,
+      origDayIndex: dayIndex,
+      curStartMs: startMs,
+      curEndMs: endMs,
+      curDayIndex: dayIndex,
+      moved: false,
+    });
+  }
+
   // Report the browser's IANA tz to the server (cookie) so the loader computes the
   // week/day window in the user's timezone. Revalidates once when it changes (CS-5).
   useEffect(() => {
@@ -931,6 +1151,45 @@ export default function CalendarPage() {
       revalidator.revalidate();
     }
   }, [tz, tzKnown, revalidator]);
+
+  // Keyboard navigation (CS-14): t today, ←/→ prev/next, d/w view, c create, Esc
+  // close. Same modifier-guard pattern as the inbox (Prompt 54A): ignore when an
+  // input is focused, when a chord modifier is held, or when a modal owns focus.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Modals own their own keys (incl. Esc).
+      if (newEventModal || selectedEvent || settingsAccount) return;
+      switch (e.key) {
+        case "t":
+          navigate(`/dashboard/calendar?view=${view}&offset=0`);
+          break;
+        case "ArrowLeft":
+          navigate(`/dashboard/calendar?view=${view}&offset=${offset - 1}`);
+          break;
+        case "ArrowRight":
+          navigate(`/dashboard/calendar?view=${view}&offset=${offset + 1}`);
+          break;
+        case "d":
+          navigate(`/dashboard/calendar?view=day&offset=0`);
+          break;
+        case "w":
+          navigate(`/dashboard/calendar?view=week&offset=0`);
+          break;
+        case "c":
+          if (accounts.length > 0) {
+            e.preventDefault();
+            openNewEventDefault();
+          }
+          break;
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, offset, navigate, newEventModal, selectedEvent, settingsAccount, accounts.length]);
 
   const dayList = days as DayDescriptor[];
   // Precompute each column's local-midnight UTC instant for placement.
@@ -984,8 +1243,9 @@ export default function CalendarPage() {
   // Build placed (column-packed) timed events for a given day column.
   function placedTimedEventsForDay(dayStart: number): PlacedEvent[] {
     const items: Array<{ event: CalendarEvent; top: number; height: number }> = [];
-    for (const e of visibleEvents) {
-      if (e.all_day) continue;
+    for (const raw of visibleEvents) {
+      if (raw.all_day) continue;
+      const e = withOverride(raw); // reflect optimistic drag/resize position
       const pos = timedEventInDay(e, dayStart);
       if (pos) items.push({ event: e, top: pos.top, height: pos.height });
     }
@@ -1078,6 +1338,7 @@ export default function CalendarPage() {
       {settingsAccount && (
         <CalendarSettingsModal account={settingsAccount} onClose={() => setSettingsAccount(null)} />
       )}
+      <ToastContainer toasts={toasts} onDismiss={dismiss} />
 
       {/* Sidebar */}
       <aside className="w-56 shrink-0 border-r border-zinc-800 flex flex-col overflow-hidden">
@@ -1273,7 +1534,7 @@ export default function CalendarPage() {
         </div>
 
         {/* Scrollable grid */}
-        <div className="flex-1 overflow-auto">
+        <div ref={scrollRef} className="flex-1 overflow-auto">
           {/* Day headers — sticky. Dates derive from the actual computed days (CS-5). */}
           <div className="grid border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10"
             style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)` }}>
@@ -1340,9 +1601,12 @@ export default function CalendarPage() {
             </div>
 
             {/* Day columns */}
+            <div ref={colsRef} className="flex flex-1">
             {dayList.map((d, dayIndex) => {
               const dayStart = dayBoundaries[dayIndex];
               const placed = placedTimedEventsForDay(dayStart);
+              const isToday = nowMs >= dayStart && nowMs < dayStart + 86_400_000;
+              const nowTop = ((nowMs - dayStart) / 3_600_000) * HOUR_HEIGHT;
               return (
                 <div key={`${d.year}-${d.month}-${d.day}`} className="flex-1 relative border-r border-zinc-800/40 last:border-r-0"
                   style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}>
@@ -1360,26 +1624,55 @@ export default function CalendarPage() {
                     </div>
                   ))}
 
-                  {/* Events (column-packed for overlaps — CS-7) */}
-                  {placed.map(({ event, top, height, col, colCount }) => (
-                    <button
-                      key={event.id}
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); setSelectedEvent(event); }}
-                      style={chipStyle(top, height, eventColor(event), col, colCount)}
-                      className="overflow-hidden rounded-sm px-1.5 py-0.5 text-left hover:brightness-110 transition-all"
+                  {/* Now-line: current-time indicator across today's column (CS-14) */}
+                  {isToday && (
+                    <div
+                      className="absolute left-0 right-0 z-[3] pointer-events-none"
+                      style={{ top: nowTop }}
+                      aria-hidden="true"
                     >
-                      <div className="truncate text-xs font-medium text-zinc-200 leading-tight">
-                        {event.is_time_block ? "⏱ " : ""}{event.title}
+                      <div className="h-px bg-red-500" />
+                      <div className="absolute -left-1 -top-[3px] h-1.5 w-1.5 rounded-full bg-red-500" />
+                    </div>
+                  )}
+
+                  {/* Events (column-packed for overlaps — CS-7) */}
+                  {placed.map(({ event, top, height, col, colCount }) => {
+                    const dragging = drag?.id === event.id && drag.moved;
+                    const draggable = isDraggable(event);
+                    return (
+                      <div
+                        key={event.id}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`${event.title}, ${formatTimeInTz(event.start_at, tz)}`}
+                        onClick={(e) => { e.stopPropagation(); if (!drag) setSelectedEvent(event); }}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedEvent(event); } }}
+                        onPointerDown={(e) => draggable && startDrag(e, event, dayIndex, "move")}
+                        style={{ ...chipStyle(top, height, eventColor(event), col, colCount), cursor: draggable ? "grab" : "pointer", opacity: dragging ? 0.75 : 1, zIndex: dragging ? 5 : 2 }}
+                        className="overflow-hidden rounded-sm px-1.5 py-0.5 text-left hover:brightness-110 transition-[filter] select-none focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                      >
+                        <div className="truncate text-xs font-medium text-zinc-200 leading-tight">
+                          {event.is_time_block ? "⏱ " : ""}{event.title}
+                        </div>
+                        <div className="text-[10px] text-zinc-400 leading-tight">
+                          {formatTimeInTz(event.start_at, tz)}
+                        </div>
+                        {/* Resize handle (bottom edge) */}
+                        {draggable && (
+                          <div
+                            onPointerDown={(e) => startDrag(e, event, dayIndex, "resize")}
+                            className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize"
+                            aria-hidden="true"
+                          />
+                        )}
                       </div>
-                      <div className="text-[10px] text-zinc-400 leading-tight">
-                        {formatTimeInTz(event.start_at, tz)}
-                      </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               );
             })}
+            </div>
           </div>
         </div>
 

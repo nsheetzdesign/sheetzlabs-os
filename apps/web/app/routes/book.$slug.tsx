@@ -1,7 +1,9 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
 import { useState, useEffect } from "react";
-import { Clock, User, Mail, MessageSquare, Check, ChevronLeft } from "lucide-react";
+import { Clock, User, Mail, MessageSquare, Check, ChevronLeft, ChevronDown, CalendarPlus, Download } from "lucide-react";
+import type { AvailabilityRules } from "@sheetzlabs/shared";
+import { MonthGrid, dateKey } from "~/components/booking/MonthGrid";
 
 export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 
@@ -9,21 +11,15 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: data ? `Book: ${data.link.title}` : "Book a Meeting" },
 ];
 
-type AvailabilityRules = {
-  timezone?: string;
-  days?: Record<string, { enabled: boolean; slots: Array<{ start: string; end: string }> }>;
-  buffer_after_minutes?: number;
-  minimum_notice_hours?: number;
-  date_range_days?: number;
-};
-
-type BookingLink = {
+type PublicLink = {
   id: string;
   slug: string;
   title: string;
   description?: string;
   duration_minutes: number;
   availability_rules: AvailabilityRules;
+  host_image_url?: string | null;
+  host_name?: string;
 };
 
 export async function loader({ params, context }: LoaderFunctionArgs) {
@@ -33,7 +29,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
   const res = await fetch(`${apiUrl}/booking/public/${params.slug}`);
   if (!res.ok) throw new Response("Booking link not found", { status: 404 });
 
-  const data = (await res.json()) as { link: BookingLink };
+  const data = (await res.json()) as { link: PublicLink };
   return { link: data.link, apiUrl: env.API_URL ?? "https://api.sheetzlabs.com" };
 }
 
@@ -69,18 +65,71 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
   return null;
 }
 
+// ── tz helpers (guest-local, locale-aware) ────────────────────────────────────
+
+function detectedTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Chicago";
+  } catch {
+    return "America/Chicago";
+  }
+}
+
+function tzOptions(current: string): string[] {
+  const fallback = [
+    "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+    "America/Phoenix", "Pacific/Honolulu", "Europe/London", "Europe/Paris",
+    "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney", "UTC",
+  ];
+  let zones = fallback;
+  try {
+    const s = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.("timeZone");
+    if (s?.length) zones = s;
+  } catch { /* keep fallback */ }
+  return zones.includes(current) ? zones : [current, ...zones];
+}
+
+/** YYYY-MM-DD for `instant` in `tz` (en-CA → ISO date). */
+function keyInTz(instant: Date, tz: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(instant);
+}
+
+function weekdayName(key: string): string {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
+}
+
+function compactUtc(d: Date): string {
+  return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
 export default function BookingPage() {
-  const { link } = useLoaderData<typeof loader>();
+  const { link, apiUrl } = useLoaderData<typeof loader>();
   const slotFetcher = useFetcher<{ slots?: string[]; date?: string; status?: number; error?: string }>();
   const bookFetcher = useFetcher<{ success?: boolean; booking?: { id: string; scheduled_at: string; duration_minutes: number }; status?: number; error?: string }>();
 
   const [step, setStep] = useState<"date" | "time" | "details" | "confirmed">("date");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
+  const [guestTz, setGuestTz] = useState<string>(detectedTz);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
   const [bookError, setBookError] = useState<string | null>(null);
+
+  const locale = typeof navigator !== "undefined" ? navigator.language : undefined;
+  const rules = link.availability_rules ?? ({} as AvailabilityRules);
+  const dateRangeDays = rules.date_range_days ?? 14;
+
+  // Window bounds + per-day availability, all keyed in the GUEST tz (kills the
+  // UTC off-by-one). "Available" = weekday enabled AND within rolling window.
+  const now = new Date();
+  const todayKey = keyInTz(now, guestTz);
+  const maxKey = keyInTz(new Date(now.getTime() + dateRangeDays * 86400000), guestTz);
+  function isAvailable(key: string): boolean {
+    if (key < todayKey || key > maxKey) return false;
+    return rules.days?.[weekdayName(key)]?.enabled ?? true;
+  }
 
   function refetchSlots(date: string) {
     const fd = new FormData();
@@ -89,30 +138,12 @@ export default function BookingPage() {
     slotFetcher.submit(fd, { method: "post" });
   }
 
-  const rules = link.availability_rules;
-  const dateRangeDays = rules.date_range_days ?? 14;
-
-  // Generate available dates (skip days with no rules enabled)
-  const availableDates = Array.from({ length: dateRangeDays }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() + i);
-    return d.toISOString().split("T")[0];
-  }).filter((date) => {
-    const dayName = new Date(date + "T12:00:00").toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
-    return rules.days?.[dayName]?.enabled ?? true;
-  });
-
-  // Fetch slots when date is selected
   useEffect(() => {
     if (!selectedDate) return;
-    const fd = new FormData();
-    fd.set("intent", "get_slots");
-    fd.set("date", selectedDate);
-    slotFetcher.submit(fd, { method: "post" });
+    refetchSlots(selectedDate);
     setStep("time");
   }, [selectedDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Handle booking result — surface 409/422/503 instead of silently failing (BK-8)
   useEffect(() => {
     const d = bookFetcher.data;
     if (!d) return;
@@ -126,7 +157,8 @@ export default function BookingPage() {
       setStep("time");
       if (selectedDate) refetchSlots(selectedDate);
     } else if (d.status === 422) {
-      setBookError("Please double-check your name and email, then try again.");
+      setBookError("That time isn't available. Please pick another slot.");
+      setStep("time");
     } else if (d.status === 503) {
       setBookError("Availability is temporarily unavailable. Please try again in a moment.");
     } else if (d.status && d.status >= 400) {
@@ -142,20 +174,29 @@ export default function BookingPage() {
     fd.set("guest_email", email);
     fd.set("guest_notes", notes);
     fd.set("scheduled_at", selectedTime);
-    fd.set("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone);
+    fd.set("timezone", guestTz);
     bookFetcher.submit(fd, { method: "post" });
   }
 
   const slots = slotFetcher.data?.slots ?? [];
   const isLoadingSlots = slotFetcher.state === "submitting";
   const isBooking = bookFetcher.state === "submitting";
-
-  // The guest's local timezone — shown so they know what the slot times mean.
-  const guestTz =
-    typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC";
   const bookingId = bookFetcher.data?.booking?.id;
 
+  const fmtTime = (iso: string) =>
+    new Date(iso).toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit", timeZone: guestTz });
+  const fmtDate = (iso: string) =>
+    new Date(iso).toLocaleDateString(locale, { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: guestTz });
+
+  // ── Confirmation ────────────────────────────────────────────────────────────
   if (step === "confirmed" && selectedTime) {
+    const start = new Date(selectedTime);
+    const end = new Date(start.getTime() + link.duration_minutes * 60000);
+    const summary = encodeURIComponent(`${link.title}${link.host_name ? ` with ${link.host_name}` : ""}`);
+    const gcalUrl = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${summary}&dates=${compactUtc(start)}/${compactUtc(end)}`;
+    const outlookUrl = `https://outlook.office.com/calendar/0/deeplink/compose?path=/calendar/action/compose&rru=addevent&subject=${summary}&startdt=${start.toISOString()}&enddt=${end.toISOString()}`;
+    const icsUrl = bookingId ? `${apiUrl}/booking/public/${bookingId}/ics` : null;
+
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 max-w-md w-full text-center">
@@ -165,34 +206,33 @@ export default function BookingPage() {
           <h1 className="text-2xl font-semibold text-zinc-100 mb-2">Booking Confirmed!</h1>
           <p className="text-zinc-400 mb-6">You&apos;re scheduled for {link.title}</p>
           <div className="bg-zinc-800 rounded-lg p-4 text-left space-y-1">
-            <p className="text-zinc-200 font-medium">
-              {new Date(selectedTime).toLocaleDateString("en-US", {
-                weekday: "long", month: "long", day: "numeric", year: "numeric",
-              })}
-            </p>
+            <p className="text-zinc-200 font-medium">{fmtDate(selectedTime)}</p>
             <p className="text-zinc-400 text-sm">
-              {new Date(selectedTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
-              {" · "}{link.duration_minutes} minutes
+              {fmtTime(selectedTime)}{" · "}{link.duration_minutes} minutes
             </p>
+            <p className="text-zinc-600 text-xs pt-1">Times shown in {guestTz}</p>
           </div>
-          <p className="text-sm text-zinc-500 mt-4">
-            A calendar invitation has been sent to {email}
-          </p>
+          <p className="text-sm text-zinc-500 mt-4">A calendar invitation has been sent to {email}</p>
+
+          <div className="mt-5 grid grid-cols-3 gap-2 text-xs">
+            <a href={gcalUrl} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300">
+              <CalendarPlus className="w-4 h-4" /> Google
+            </a>
+            <a href={outlookUrl} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300">
+              <CalendarPlus className="w-4 h-4" /> Outlook
+            </a>
+            {icsUrl && (
+              <a href={icsUrl} className="flex flex-col items-center gap-1 p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-300">
+                <Download className="w-4 h-4" /> .ics
+              </a>
+            )}
+          </div>
+
           {bookingId && (
             <div className="mt-6 flex items-center justify-center gap-4 text-sm">
-              <a
-                href={`/book/reschedule/${bookingId}`}
-                className="text-zinc-300 hover:text-emerald-400 transition-colors"
-              >
-                Reschedule
-              </a>
+              <a href={`/book/reschedule/${bookingId}`} className="text-zinc-300 hover:text-emerald-400 transition-colors">Reschedule</a>
               <span className="text-zinc-700">·</span>
-              <a
-                href={`/book/cancel/${bookingId}`}
-                className="text-zinc-300 hover:text-red-400 transition-colors"
-              >
-                Cancel
-              </a>
+              <a href={`/book/cancel/${bookingId}`} className="text-zinc-300 hover:text-red-400 transition-colors">Cancel</a>
             </div>
           )}
         </div>
@@ -204,11 +244,16 @@ export default function BookingPage() {
     <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden max-w-3xl w-full">
         <div className="grid md:grid-cols-5">
-          {/* Left panel: meeting info */}
+          {/* Left panel: host + meeting info */}
           <div className="md:col-span-2 p-8 border-b md:border-b-0 md:border-r border-zinc-800">
-            <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center mb-4">
-              <Clock className="w-5 h-5 text-emerald-400" />
-            </div>
+            {link.host_image_url ? (
+              <img src={link.host_image_url} alt={link.host_name ?? "Host"} className="w-12 h-12 rounded-full object-cover mb-4" />
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center mb-4">
+                <Clock className="w-5 h-5 text-emerald-400" />
+              </div>
+            )}
+            {link.host_name && <p className="text-sm text-zinc-400 mb-1">{link.host_name}</p>}
             <h1 className="text-xl font-semibold text-zinc-100 mb-1">{link.title}</h1>
             <div className="flex items-center gap-1.5 text-zinc-400 text-sm mb-3">
               <Clock className="w-3.5 h-3.5" />
@@ -224,29 +269,14 @@ export default function BookingPage() {
             {step === "date" && (
               <>
                 <h2 className="text-base font-medium text-zinc-100 mb-4">Select a Date</h2>
-                <div className="grid grid-cols-3 gap-2 max-h-72 overflow-y-auto pr-1">
-                  {availableDates.map((date) => {
-                    const d = new Date(date + "T12:00:00");
-                    return (
-                      <button
-                        key={date}
-                        onClick={() => setSelectedDate(date)}
-                        className={`p-3 rounded-lg text-sm transition-colors text-center ${
-                          selectedDate === date
-                            ? "bg-emerald-600 text-white"
-                            : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-                        }`}
-                      >
-                        <div className="font-medium text-xs">
-                          {d.toLocaleDateString("en-US", { weekday: "short" })}
-                        </div>
-                        <div className="text-sm">
-                          {d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                <MonthGrid
+                  selected={selectedDate}
+                  onSelect={setSelectedDate}
+                  isAvailable={isAvailable}
+                  todayKey={todayKey}
+                  maxKey={maxKey}
+                />
+                <TzSelector value={guestTz} onChange={setGuestTz} />
               </>
             )}
 
@@ -263,19 +293,17 @@ export default function BookingPage() {
                 </div>
                 {selectedDate && (
                   <p className="text-sm text-zinc-500 mb-1">
-                    {new Date(selectedDate + "T12:00:00").toLocaleDateString("en-US", {
-                      weekday: "long", month: "long", day: "numeric",
-                    })}
+                    {new Date(selectedDate + "T12:00:00").toLocaleDateString(locale, { weekday: "long", month: "long", day: "numeric" })}
                   </p>
                 )}
-                <p className="text-xs text-zinc-600 mb-3" data-testid="timezone-label">
-                  Times shown in {guestTz}
-                </p>
-                {bookError && (
-                  <p className="text-sm text-amber-400 mb-3">{bookError}</p>
-                )}
+                <TzSelector value={guestTz} onChange={setGuestTz} compact />
+                {bookError && <p className="text-sm text-amber-400 mb-3">{bookError}</p>}
                 {isLoadingSlots ? (
-                  <p className="text-zinc-500 text-sm">Loading available times…</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <div key={i} className="h-11 bg-zinc-800/60 rounded-lg animate-pulse" />
+                    ))}
+                  </div>
                 ) : slotFetcher.data?.status === 503 ? (
                   <p className="text-amber-400 text-sm">Availability is temporarily unavailable. Please try again shortly.</p>
                 ) : slots.length === 0 ? (
@@ -288,9 +316,7 @@ export default function BookingPage() {
                         onClick={() => { setSelectedTime(slot); setStep("details"); }}
                         className="p-3 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm text-zinc-200 transition-colors"
                       >
-                        {new Date(slot).toLocaleTimeString("en-US", {
-                          hour: "numeric", minute: "2-digit",
-                        })}
+                        {fmtTime(slot)}
                       </button>
                     ))}
                   </div>
@@ -311,16 +337,9 @@ export default function BookingPage() {
                 </div>
 
                 <div className="bg-zinc-800 rounded-lg p-3 mb-5 text-sm">
-                  <p className="text-zinc-200 font-medium">
-                    {new Date(selectedTime).toLocaleDateString("en-US", {
-                      weekday: "long", month: "long", day: "numeric",
-                    })}
-                  </p>
+                  <p className="text-zinc-200 font-medium">{fmtDate(selectedTime)}</p>
                   <p className="text-zinc-400 text-xs mt-0.5">
-                    {new Date(selectedTime).toLocaleTimeString("en-US", {
-                      hour: "numeric", minute: "2-digit",
-                    })}
-                    {" · "}{link.duration_minutes} min
+                    {fmtTime(selectedTime)}{" · "}{link.duration_minutes} min · {guestTz}
                   </p>
                 </div>
 
@@ -364,9 +383,7 @@ export default function BookingPage() {
                       />
                     </div>
                   </div>
-                  {bookError && (
-                    <p className="text-sm text-amber-400">{bookError}</p>
-                  )}
+                  {bookError && <p className="text-sm text-amber-400">{bookError}</p>}
                   <button
                     onClick={handleBook}
                     disabled={!name || !email || isBooking}
@@ -380,6 +397,29 @@ export default function BookingPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TzSelector({ value, onChange, compact }: { value: string; onChange: (tz: string) => void; compact?: boolean }) {
+  return (
+    <div className={compact ? "mb-3" : "mt-4"}>
+      <label className="flex items-center gap-1.5 text-xs text-zinc-500" data-testid="timezone-label">
+        <span>Times shown in</span>
+        <span className="relative inline-flex items-center">
+          <select
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            aria-label="Timezone"
+            className="appearance-none bg-transparent text-zinc-300 pr-4 focus:outline-none cursor-pointer hover:text-zinc-100"
+          >
+            {tzOptions(value).map((tz) => (
+              <option key={tz} value={tz} className="bg-zinc-800">{tz}</option>
+            ))}
+          </select>
+          <ChevronDown className="w-3 h-3 absolute right-0 pointer-events-none text-zinc-500" />
+        </span>
+      </label>
     </div>
   );
 }

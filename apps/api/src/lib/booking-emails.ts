@@ -17,6 +17,28 @@ export interface BookingEmailData {
   // BK-12: when the Google Calendar event creation failed, the confirmation must NOT
   // promise a calendar invite. Defaults to true for back-compat with other senders.
   calendarInviteSent?: boolean;
+  // BK-15: add-to-calendar deep links + hosted .ics download, surfaced in the
+  // confirmation + reminder emails so guests on any calendar can save the event.
+  addToGoogleUrl?: string;
+  addToOutlookUrl?: string;
+  icsUrl?: string;
+}
+
+/** Shared "manage / add to calendar" footer block (BK-15). */
+function manageBlock(data: BookingEmailData): string {
+  const buttons: string[] = [];
+  if (data.addToGoogleUrl)
+    buttons.push(`<a href="${data.addToGoogleUrl}" style="color: #a1a1aa; font-size: 12px; text-decoration: none;">Add to Google</a>`);
+  if (data.addToOutlookUrl)
+    buttons.push(`<a href="${data.addToOutlookUrl}" style="color: #a1a1aa; font-size: 12px; text-decoration: none;">Add to Outlook</a>`);
+  if (data.icsUrl)
+    buttons.push(`<a href="${data.icsUrl}" style="color: #a1a1aa; font-size: 12px; text-decoration: none;">Download .ics</a>`);
+  if (data.rescheduleUrl)
+    buttons.push(`<a href="${data.rescheduleUrl}" style="color: #a1a1aa; font-size: 12px; text-decoration: none;">Reschedule</a>`);
+  if (data.cancelUrl)
+    buttons.push(`<a href="${data.cancelUrl}" style="color: #ef4444; font-size: 12px; text-decoration: none;">Cancel</a>`);
+  if (!buttons.length) return "";
+  return `<div style="text-align: center; margin-top: 24px; line-height: 2;">${buttons.join('<span style="color: #3f3f46; margin: 0 8px;">·</span>')}</div>`;
 }
 
 export function formatDateTime(date: Date, timezone: string): { date: string; time: string } {
@@ -75,12 +97,9 @@ export function guestConfirmationEmail(data: BookingEmailData): { subject: strin
         <p style="color: #d4d4d8; font-size: 14px; margin: 0;">${escapeHtml(data.notes)}</p>
       </div>` : ""}
       ${data.calendarInviteSent === false
-        ? ""
-        : `<p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">A calendar invitation has been sent to your email.</p>`}
-      <div style="text-align: center; margin-top: 24px;">
-        ${data.rescheduleUrl ? `<a href="${data.rescheduleUrl}" style="color: #a1a1aa; font-size: 12px; text-decoration: none; margin-right: 16px;">Reschedule</a>` : ""}
-        ${data.cancelUrl ? `<a href="${data.cancelUrl}" style="color: #ef4444; font-size: 12px; text-decoration: none;">Cancel</a>` : ""}
-      </div>
+        ? `<p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">Add this meeting to your calendar using the links below.</p>`
+        : `<p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">A calendar invitation (.ics) is attached.</p>`}
+      ${manageBlock(data)}
     </div>
     <p style="color: #52525b; font-size: 11px; text-align: center; margin-top: 24px;">Powered by Sheetz Labs</p>
   </div>
@@ -159,6 +178,7 @@ export function reminderEmail(
         </div>
       </div>
       ${data.meetLink ? `<a href="${data.meetLink}" style="display: block; background-color: #10b981; color: white; text-align: center; padding: 12px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500;">Join Meeting</a>` : ""}
+      ${manageBlock(data)}
     </div>
   </div>
 </body>
@@ -208,11 +228,18 @@ export function cancellationEmail(
 export function rescheduleConfirmationEmail(
   data: BookingEmailData,
   isHost: boolean,
-  oldDateTime: Date
+  oldDateTime: Date,
+  byHost = false
 ): { subject: string; html: string } {
   const { date: newDate, time: newTime } = formatDateTime(data.dateTime, data.timezone);
   const { date: oldDate, time: oldTime } = formatDateTime(oldDateTime, data.timezone);
   const otherParty = isHost ? data.guestName : data.hostName;
+  // "Rescheduled by host" copy when the host initiated (Part E). The host's own
+  // copy stays neutral; only the guest is told the host moved it.
+  const intro =
+    byHost && !isHost
+      ? `${escapeHtml(data.hostName)} has rescheduled your meeting.`
+      : `Your meeting with ${escapeHtml(otherParty)} has been rescheduled.`;
 
   return {
     subject: `Rescheduled: ${data.title}`,
@@ -231,7 +258,7 @@ export function rescheduleConfirmationEmail(
         </div>
       </div>
       <h1 style="color: #fafafa; font-size: 20px; font-weight: 600; text-align: center; margin: 0 0 8px 0;">Meeting Rescheduled</h1>
-      <p style="color: #a1a1aa; text-align: center; margin: 0 0 24px 0;">Your meeting with ${escapeHtml(otherParty)} has been rescheduled.</p>
+      <p style="color: #a1a1aa; text-align: center; margin: 0 0 24px 0;">${intro}</p>
       <div style="background-color: #27272a; border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.6;">
         <p style="color: #a1a1aa; font-size: 12px; margin: 0 0 8px 0;">Previous time:</p>
         <p style="color: #71717a; font-size: 14px; margin: 0; text-decoration: line-through;">${oldDate} at ${oldTime}</p>
@@ -247,6 +274,7 @@ export function rescheduleConfirmationEmail(
       </div>
       ${data.meetLink ? `<a href="${data.meetLink}" style="display: block; background-color: #10b981; color: white; text-align: center; padding: 12px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500;">Join Meeting</a>` : ""}
       <p style="color: #71717a; font-size: 12px; text-align: center; margin: 24px 0 0 0;">Your calendar has been updated automatically.</p>
+      ${manageBlock(data)}
     </div>
   </div>
 </body>

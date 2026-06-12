@@ -1,11 +1,20 @@
 import { Resend } from "resend";
 
+interface EmailAttachment {
+  filename: string;
+  /** Raw file content; Resend accepts a string (e.g. an .ics body) or Buffer. */
+  content: string;
+  /** e.g. "text/calendar; method=REQUEST". */
+  contentType?: string;
+}
+
 interface SendEmailParams {
   to: string;
   subject: string;
   html: string;
   resendApiKey: string;
   from?: string;
+  attachments?: EmailAttachment[];
 }
 
 export interface SendEmailResult {
@@ -25,6 +34,7 @@ export async function sendBookingEmail({
   html,
   resendApiKey,
   from,
+  attachments,
 }: SendEmailParams): Promise<SendEmailResult> {
   try {
     const resend = new Resend(resendApiKey);
@@ -33,6 +43,15 @@ export async function sendBookingEmail({
       to,
       subject,
       html,
+      ...(attachments && attachments.length
+        ? {
+            attachments: attachments.map((a) => ({
+              filename: a.filename,
+              content: a.content,
+              contentType: a.contentType,
+            })),
+          }
+        : {}),
     });
     if (error) {
       console.error("Resend rejected booking email:", error);

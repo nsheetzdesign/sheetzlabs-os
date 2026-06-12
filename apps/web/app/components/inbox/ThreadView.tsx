@@ -7,7 +7,7 @@ import type { Email as EmailRow } from '@sheetzlabs/shared';
 // View model derived from the canonical shared Email row (Part 7, XC-4).
 type Email = Pick<
   EmailRow,
-  'id' | 'subject' | 'from_name' | 'from_email' | 'to_emails' | 'cc_emails'
+  'id' | 'account_id' | 'subject' | 'from_name' | 'from_email' | 'to_emails' | 'cc_emails'
   | 'body_html' | 'body_text' | 'received_at' | 'is_read' | 'is_starred'
 >;
 
@@ -21,9 +21,34 @@ interface Props {
 
 export function ThreadView({ emails, onReply, onReplyAll, onForward, onClose }: Props) {
   const fetcher = useFetcher();
+  const replyFetcher = useFetcher<{ success?: boolean; error?: string }>();
   const [expandedIds, setExpandedIds] = useState<Set<string>>(
     new Set([emails[emails.length - 1]?.id])
   );
+  const [replyText, setReplyText] = useState('');
+
+  // Inline quick-reply (Part 0.3): sends through the real send path with
+  // threading (reply_to_id → rfc_message_id server-side). No modal.
+  const last = emails[emails.length - 1];
+  const sendingReply = replyFetcher.state !== 'idle';
+  function sendInlineReply() {
+    if (!replyText.trim() || !last) return;
+    const to = Array.isArray(last.to_emails) ? last.from_email : last.from_email;
+    const baseSubject = last.subject || '';
+    const subject = /^re:/i.test(baseSubject) ? baseSubject : `Re: ${baseSubject}`;
+    replyFetcher.submit(
+      {
+        account_id: last.account_id ?? '',
+        to_emails: to ?? '',
+        subject,
+        body: replyText,
+        reply_to_id: last.id,
+        action: 'send',
+      },
+      { method: 'post', action: '/dashboard/inbox/send' }
+    );
+    setReplyText('');
+  }
 
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
@@ -198,14 +223,41 @@ export function ThreadView({ emails, onReply, onReplyAll, onForward, onClose }: 
         })}
       </div>
 
-      {/* Quick Reply */}
+      {/* Quick Reply — inline, threaded (Part 0.3) */}
       <div className="border-t border-zinc-800 p-4">
-        <button
-          onClick={() => onReply(emails[emails.length - 1])}
-          className="w-full px-4 py-3 border border-zinc-700 hover:border-zinc-600 rounded-lg text-left text-zinc-500 hover:text-zinc-300"
-        >
-          Click here to reply...
-        </button>
+        <textarea
+          value={replyText}
+          onChange={(e) => setReplyText(e.target.value)}
+          onKeyDown={(e) => {
+            // ⌘/Ctrl+Enter sends.
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault();
+              sendInlineReply();
+            }
+          }}
+          placeholder={last ? `Reply to ${last.from_name || last.from_email}…` : 'Reply…'}
+          rows={3}
+          aria-label="Quick reply"
+          className="w-full px-4 py-3 bg-zinc-900 border border-zinc-700 focus:border-emerald-500 rounded-lg text-sm text-zinc-200 placeholder-zinc-600 resize-none focus:outline-none"
+        />
+        <div className="flex items-center justify-between mt-2">
+          <button
+            onClick={() => last && onReply(last)}
+            className="text-xs text-zinc-500 hover:text-zinc-300"
+          >
+            Open full composer
+          </button>
+          <button
+            onClick={sendInlineReply}
+            disabled={!replyText.trim() || sendingReply}
+            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded-lg disabled:opacity-50"
+          >
+            {sendingReply ? 'Sending…' : 'Send'}
+          </button>
+        </div>
+        {replyFetcher.data?.error && (
+          <p className="text-xs text-red-400 mt-1">{replyFetcher.data.error}</p>
+        )}
       </div>
     </div>
   );

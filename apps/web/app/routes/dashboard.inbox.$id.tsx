@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react-router";
 import { useLoaderData, Link, useFetcher, useNavigate } from "react-router";
 import { ArrowLeft, Star, Reply, Wand2, Archive, Trash2, Clock } from "lucide-react";
@@ -6,6 +6,8 @@ import { getSupabaseClient } from "~/lib/supabase.server";
 import { apiFetch } from "~/lib/api";
 import { EmailHtmlFrame } from "~/components/inbox/EmailHtmlFrame";
 import { SnoozePicker } from "~/components/inbox/SnoozePicker";
+import { useToasts, ToastContainer } from "~/components/ui/Toast";
+import { useEmailKeyboardShortcuts } from "~/hooks/useEmailKeyboardShortcuts";
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: `${data?.email?.subject ?? "Email"} — Inbox — Sheetz Labs OS` },
@@ -77,9 +79,15 @@ export default function EmailDetail() {
   const { email, thread } = useLoaderData<typeof loader>();
   const starFetcher = useFetcher();
   const actionFetcher = useFetcher();
+  const undoFetcher = useFetcher();
   const aiFetcher = useFetcher();
   const navigate = useNavigate();
   const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  // Optimistic action state: once set, the message is treated as gone and we
+  // hand the user an Undo window before navigating back to the inbox.
+  const [actioned, setActioned] = useState(false);
+  const navTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const rel = email.relationships as { id: string; name: string; company: string | null } | null;
   const isStarred =
@@ -87,15 +95,55 @@ export default function EmailDetail() {
       ? starFetcher.formData.get("is_starred") === "true"
       : email.is_starred;
 
-  // Navigate to inbox after archive/trash completes
-  useEffect(() => {
-    if (actionFetcher.state === "idle" && actionFetcher.data) {
-      const data = actionFetcher.data as { success?: boolean; action?: string };
-      if (data.success && (data.action === "archived" || data.action === "trashed")) {
-        navigate("/dashboard/inbox");
-      }
-    }
-  }, [actionFetcher.state, actionFetcher.data, navigate]);
+  // Optimistic archive/trash with toast + undo, mirroring the list (Part 0.2).
+  // The action fires immediately; an Undo toast replays the inverse through the
+  // write-back-aware /email/undo before we leave the page.
+  function doUndo(intent: "archive" | "trash") {
+    if (navTimer.current) clearTimeout(navTimer.current);
+    setActioned(false);
+    const fd = new FormData();
+    fd.set("action", intent);
+    fd.set("email_ids", JSON.stringify([email.id]));
+    undoFetcher.submit(fd, { method: "post", action: "/dashboard/inbox/undo" });
+  }
+  function doAction(intent: "archive" | "trash") {
+    if (actioned) return;
+    setActioned(true);
+    const fd = new FormData();
+    fd.set("intent", intent);
+    actionFetcher.submit(fd, { method: "post" });
+    pushToast({
+      message: intent === "archive" ? "Archived" : "Trashed",
+      actionLabel: "Undo",
+      duration: 6000,
+      onAction: () => doUndo(intent),
+    });
+    navTimer.current = setTimeout(() => navigate("/dashboard/inbox"), 6000);
+  }
+  useEffect(() => () => { if (navTimer.current) clearTimeout(navTimer.current); }, []);
+
+  // Keyboard shortcuts on the detail route (Part 0.2) — single-message context.
+  useEmailKeyboardShortcuts({
+    emails: [{ id: email.id, is_starred: !!email.is_starred }],
+    focusIndex: 0,
+    setFocusIndex: () => {},
+    activeEmail: { id: email.id },
+    onOpenFocused: () => {},
+    onClose: () => navigate("/dashboard/inbox"),
+    onBulkAction: (action) => {
+      if (action === "archive") doAction("archive");
+      else if (action === "trash") doAction("trash");
+    },
+    onToggleSelect: () => {},
+    onCompose: () => navigate("/dashboard/inbox?compose=1"),
+    onReply: () => navigate(`/dashboard/inbox?reply=${email.id}`),
+    onReplyAll: () => navigate(`/dashboard/inbox?reply=${email.id}`),
+    onForward: () => navigate(`/dashboard/inbox?reply=${email.id}`),
+    onSearch: () => navigate("/dashboard/inbox"),
+    onShowHelp: () => {},
+    onUndo: () => { if (actioned) doUndo("archive"); },
+    enabled: !snoozeOpen,
+  });
 
   const isActioning = actionFetcher.state !== "idle";
 
@@ -115,30 +163,28 @@ export default function EmailDetail() {
         </Link>
         <div className="ml-auto flex items-center gap-2">
           {/* Archive */}
-          <actionFetcher.Form method="post">
-            <input type="hidden" name="intent" value="archive" />
-            <button
-              type="submit"
-              disabled={isActioning}
-              className="p-1.5 text-zinc-500 transition-colors hover:text-zinc-200 hover:bg-zinc-800 rounded disabled:opacity-50"
-              title="Archive"
-            >
-              <Archive className="h-4 w-4" />
-            </button>
-          </actionFetcher.Form>
+          <button
+            type="button"
+            onClick={() => doAction("archive")}
+            disabled={isActioning || actioned}
+            className="p-1.5 text-zinc-500 transition-colors hover:text-zinc-200 hover:bg-zinc-800 rounded disabled:opacity-50"
+            title="Archive (e)"
+            aria-label="Archive"
+          >
+            <Archive className="h-4 w-4" />
+          </button>
 
           {/* Trash */}
-          <actionFetcher.Form method="post">
-            <input type="hidden" name="intent" value="trash" />
-            <button
-              type="submit"
-              disabled={isActioning}
-              className="p-1.5 text-zinc-500 transition-colors hover:text-red-400 hover:bg-zinc-800 rounded disabled:opacity-50"
-              title="Delete"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </actionFetcher.Form>
+          <button
+            type="button"
+            onClick={() => doAction("trash")}
+            disabled={isActioning || actioned}
+            className="p-1.5 text-zinc-500 transition-colors hover:text-red-400 hover:bg-zinc-800 rounded disabled:opacity-50"
+            title="Delete (#)"
+            aria-label="Delete"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
 
           {/* Snooze */}
           <div className="relative">
@@ -296,6 +342,7 @@ export default function EmailDetail() {
           </div>
         )}
       </div>
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

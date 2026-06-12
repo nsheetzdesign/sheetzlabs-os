@@ -20,13 +20,14 @@ test.use({ storageState: { cookies: [], origins: [] } });
 
 const GUEST = `e2e-guest@${ENV.GUEST_DOMAIN}`;
 
-function dateLabel(ymd: string): string {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "numeric",
-  });
+/** Select a date in the month-grid picker (BK-18), navigating months if needed. */
+async function selectDate(page: import("@playwright/test").Page, ymd: string) {
+  const cell = page.locator(`[data-date="${ymd}"]`);
+  for (let i = 0; i < 4; i++) {
+    if ((await cell.count()) > 0 && (await cell.isEnabled())) break;
+    await page.getByRole("button", { name: "Next month" }).click();
+  }
+  await cell.click();
 }
 
 test.describe("booking", () => {
@@ -51,7 +52,7 @@ test.describe("booking", () => {
     await expect(page.getByRole("heading", { name: link.title })).toBeVisible();
 
     // Pick the free date → time step renders slots + the timezone label.
-    await page.getByRole("button", { name: new RegExp(dateLabel(free.date)) }).first().click();
+    await selectDate(page, free.date);
     await expect(page.getByTestId("timezone-label")).toContainText(/America\/Chicago/);
     await expect(
       page.getByRole("button", { name: /\d{1,2}:\d{2}\s*(AM|PM)/ }).first()
@@ -62,7 +63,7 @@ test.describe("booking", () => {
     const free = await findFreeSlot(link.slug, 3);
     await page.goto(`/book/${link.slug}`, { waitUntil: "networkidle" });
 
-    await page.getByRole("button", { name: new RegExp(dateLabel(free.date)) }).first().click();
+    await selectDate(page, free.date);
     await page.getByRole("button", { name: /\d{1,2}:\d{2}\s*(AM|PM)/ }).first().click();
 
     await page.getByPlaceholder("Your name").fill("[E2E] Guest");

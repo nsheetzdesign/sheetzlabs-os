@@ -8,22 +8,15 @@
  * the public slot-display endpoint and the confirmation-time validation.
  */
 
-export interface DayWindow {
-  start: string; // "HH:MM"
-  end: string; // "HH:MM"
-}
-
-export interface DayRule {
-  enabled: boolean;
-  slots: DayWindow[];
-}
-
-export interface AvailabilityRules {
-  timezone: string;
-  days?: Record<string, DayRule | undefined>;
-  buffer_after_minutes?: number;
-  minimum_notice_hours?: number;
-}
+// AvailabilityRules / DayRule / DayWindow now live in @sheetzlabs/shared so the
+// web editor, API, and slot engine share one definition (Prompt 54B, XC-4).
+// Re-exported here for back-compat with existing API importers.
+import type {
+  AvailabilityRules,
+  DayRule,
+  DayWindow,
+} from "@sheetzlabs/shared";
+export type { AvailabilityRules, DayRule, DayWindow };
 
 export interface BusyInterval {
   start: Date;
@@ -96,10 +89,29 @@ export function zonedWeekday(dateStr: string, tz: string): string {
   return WEEKDAYS[idx];
 }
 
+/** True when `date` (YYYY-MM-DD, host tz) is within [today, today + window] in `tz`. */
+export function isWithinRollingWindow(
+  rules: AvailabilityRules,
+  date: string,
+  tz: string,
+  now: Date,
+): boolean {
+  const windowDays = rules.date_range_days;
+  const todayStr = utcToZonedDateStr(now, tz);
+  if (date < todayStr) return false; // past
+  if (windowDays == null) return true;
+  const maxInstant = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
+  const maxStr = utcToZonedDateStr(maxInstant, tz);
+  // ISO date strings compare lexicographically === chronologically.
+  return date <= maxStr;
+}
+
 /**
  * Compute the available start instants (ISO UTC strings) for a single date.
- * Enforces day windows, minimum notice, buffer-after stride, and busy conflicts.
- * `now` is injectable for testing; defaults to the current instant.
+ * Enforces day windows, minimum notice, the rolling booking window, the daily
+ * cap, a fixed slot increment (stride decoupled from duration), both buffers
+ * (before + after, applied to the candidate's busy footprint), and busy
+ * conflicts. `now` is injectable for testing; defaults to the current instant.
  */
 export function computeSlotsForDate(params: {
   rules: AvailabilityRules;
@@ -107,19 +119,31 @@ export function computeSlotsForDate(params: {
   durationMinutes: number;
   busy: BusyInterval[];
   now?: Date;
+  /** Non-cancelled bookings already taken on this date (for the daily cap). */
+  bookedToday?: number;
 }): string[] {
   const { rules, date, durationMinutes, busy } = params;
   const tz = rules.timezone || "America/Chicago";
   const now = params.now ?? new Date();
 
+  // Rolling window: a date outside [today, today + N] offers nothing.
+  if (!isWithinRollingWindow(rules, date, tz, now)) return [];
+
+  // Daily cap: a date already at capacity offers nothing.
+  const cap = rules.max_bookings_per_day;
+  if (cap != null && (params.bookedToday ?? 0) >= cap) return [];
+
   const dayName = zonedWeekday(date, tz);
   const dayRule = rules.days?.[dayName];
   if (!dayRule?.enabled) return [];
 
-  const bufferAfter = rules.buffer_after_minutes ?? 15;
+  const bufferBeforeMs = (rules.buffer_before_minutes ?? 0) * 60000;
+  const bufferAfterMs = (rules.buffer_after_minutes ?? 15) * 60000;
   const minNoticeMs = (rules.minimum_notice_hours ?? 24) * 60 * 60 * 1000;
   const durationMs = durationMinutes * 60000;
-  const strideMs = (durationMinutes + bufferAfter) * 60000;
+  // Stride is the slot increment (defaults to the duration), NOT duration+buffer.
+  const incrementMin = rules.slot_increment_minutes ?? durationMinutes;
+  const strideMs = Math.max(1, incrementMin) * 60000;
 
   const slots: string[] = [];
   for (const window of dayRule.slots ?? []) {
@@ -131,7 +155,10 @@ export function computeSlotsForDate(params: {
       const slotStart = new Date(current);
       const slotEnd = new Date(current + durationMs);
 
-      const hasConflict = busy.some((b) => slotStart < b.end && slotEnd > b.start);
+      // The candidate's footprint (incl. buffers) must not touch any busy block.
+      const bufStart = current - bufferBeforeMs;
+      const bufEnd = slotEnd.getTime() + bufferAfterMs;
+      const hasConflict = busy.some((b) => bufStart < b.end.getTime() && bufEnd > b.start.getTime());
       const hasNotice = current - now.getTime() >= minNoticeMs;
 
       if (!hasConflict && hasNotice) {
@@ -142,4 +169,73 @@ export function computeSlotsForDate(params: {
   }
 
   return slots;
+}
+
+export type ValidationResult =
+  | { ok: true }
+  | { ok: false; code: 409 | 422; error: string };
+
+/**
+ * Server-side gate run at confirmation time (create + reschedule). Rejects any
+ * request the public slot grid would never have offered — the year-2099 POST,
+ * an off-increment time, a slot past the rolling window, a day over its cap, or
+ * a freshly-taken slot. Returns 422 for malformed/out-of-policy requests and
+ * 409 for capacity/conflict races. This is the authority; the UI is advisory.
+ */
+export function validateBookingRequest(params: {
+  rules: AvailabilityRules;
+  durationMinutes: number;
+  startUtc: Date;
+  busy: BusyInterval[];
+  bookedToday: number;
+  now?: Date;
+}): ValidationResult {
+  const { rules, durationMinutes, startUtc, busy, bookedToday } = params;
+  const tz = rules.timezone || "America/Chicago";
+  const now = params.now ?? new Date();
+
+  if (isNaN(startUtc.getTime())) {
+    return { ok: false, code: 422, error: "Invalid start time." };
+  }
+
+  const date = utcToZonedDateStr(startUtc, tz);
+
+  // Rolling window + past — kills the year-2099 POST and any stale slot.
+  if (!isWithinRollingWindow(rules, date, tz, now)) {
+    return { ok: false, code: 422, error: "That time is outside the booking window." };
+  }
+
+  // Daily cap (capacity → 409 so the guest is told to pick another day).
+  const cap = rules.max_bookings_per_day;
+  if (cap != null && bookedToday >= cap) {
+    return { ok: false, code: 409, error: "That day is fully booked." };
+  }
+
+  // On-grid check: recompute the grid for this date IGNORING busy, and require
+  // the requested instant to be one of the offered starts (enforces day-enabled,
+  // within-window, on-increment, and minimum-notice). Off-grid → 422.
+  const grid = computeSlotsForDate({
+    rules,
+    date,
+    durationMinutes,
+    busy: [],
+    now,
+    bookedToday: 0,
+  });
+  if (!grid.includes(startUtc.toISOString())) {
+    return { ok: false, code: 422, error: "That time isn't an available slot." };
+  }
+
+  // Finally, the conflict race against current busy (409).
+  const durationMs = durationMinutes * 60000;
+  const bufBefore = (rules.buffer_before_minutes ?? 0) * 60000;
+  const bufAfter = (rules.buffer_after_minutes ?? 15) * 60000;
+  const bufStart = startUtc.getTime() - bufBefore;
+  const bufEnd = startUtc.getTime() + durationMs + bufAfter;
+  const conflict = busy.some((b) => bufStart < b.end.getTime() && bufEnd > b.start.getTime());
+  if (conflict) {
+    return { ok: false, code: 409, error: "That time was just taken." };
+  }
+
+  return { ok: true };
 }

@@ -340,6 +340,19 @@ calendar.post("/events", async (c) => {
     meeting_link?: string;
   }>();
 
+  // Server-side validation (CS-15): end must be after start; attendees must be
+  // syntactically valid emails. The UI checks too, but the API is the authority.
+  const startMs = new Date(body.start_at).getTime();
+  const endMs = new Date(body.end_at).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs <= startMs) {
+    return c.json({ error: "End time must be after start time." }, 422);
+  }
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const badEmail = (body.attendees ?? []).find((a) => !EMAIL_RE.test(a.email));
+  if (badEmail) {
+    return c.json({ error: `Invalid attendee email: ${badEmail.email}` }, 422);
+  }
+
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
   const { data: account } = await supabase
@@ -458,6 +471,14 @@ calendar.patch("/events/:id", async (c) => {
     .single();
 
   if (!event) return c.json({ error: "Event not found" }, 404);
+
+  // Validate the resulting interval: end must stay after start (CS-15). Use the
+  // incoming value where provided, else the event's current value.
+  const effStart = new Date((body.start_at ?? (event.start_at as string)) as string).getTime();
+  const effEnd = new Date((body.end_at ?? (event.end_at as string)) as string).getTime();
+  if (Number.isNaN(effStart) || Number.isNaN(effEnd) || effEnd <= effStart) {
+    return c.json({ error: "End time must be after start time." }, 422);
+  }
 
   const updates: Record<string, unknown> = {};
   if (body.title !== undefined) updates.title = body.title;

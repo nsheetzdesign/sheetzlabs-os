@@ -5,16 +5,13 @@ import { AlertTriangle, Check } from "lucide-react";
 
 export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 
-type Booking = {
-  id: string;
-  guest_name: string;
-  guest_email: string;
-  scheduled_at: string;
-  duration_minutes: number;
-  timezone: string;
-  status: string;
-  booking_links: { title: string };
-};
+import type { Booking } from "@sheetzlabs/shared";
+
+// View projection of the cancel payload, built from the shared Booking row.
+type CancelBooking = Pick<
+  Booking,
+  "id" | "guest_name" | "guest_email" | "scheduled_at" | "duration_minutes" | "timezone" | "status"
+> & { booking_links: { title: string } };
 
 export async function loader({ params, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
@@ -26,7 +23,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
     throw new Response("Booking not found", { status: 404 });
   }
 
-  const data = (await response.json()) as { booking: Booking };
+  const data = (await response.json()) as { booking: CancelBooking };
   return { booking: data.booking, apiUrl: env.API_URL ?? "https://api.sheetzlabs.com" };
 }
 

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator, Form } from 'react-router';
+import { useLoaderData, useFetcher, useSearchParams, useNavigate, useNavigation, useRevalidator, Form } from 'react-router';
 import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell, AlertTriangle, X } from 'lucide-react';
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
@@ -11,6 +11,7 @@ import { ComposeModal } from '~/components/inbox/ComposeModal';
 import { ThreadView } from '~/components/inbox/ThreadView';
 import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
 import { useToasts, ToastContainer } from '~/components/ui/Toast';
+import { EmailListSkeleton } from '~/components/ui/Skeleton';
 import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
 import { useEmailPolling } from '~/hooks/useEmailPolling';
 
@@ -180,7 +181,24 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     };
   }
 
+  // Scheduled sends (Prompt 54B Part 0.1) live in `email_drafts`, NOT the `emails`
+  // table the Drafts folder reads — so they were invisible and uncancellable once
+  // the undo toast expired. Surface them with their send time + a Cancel action.
+  let scheduledDrafts: Array<{ id: string; subject: string | null; to_emails: unknown; send_at: string | null }> = [];
+  if (!search && folder === 'drafts') {
+    let dq: any = supabase
+      .from('email_drafts')
+      .select('id, subject, to_emails, send_at, account_id')
+      .eq('status', 'scheduled')
+      .not('send_at', 'is', null)
+      .order('send_at', { ascending: true });
+    if (account_id) dq = dq.eq('account_id', account_id);
+    const { data: sd } = await dq;
+    scheduledDrafts = (sd ?? []) as any;
+  }
+
   return {
+    scheduledDrafts,
     emails: (emails ?? []).map(e => ({
       ...e,
       has_attachments: e.has_attachments ?? false,
@@ -210,7 +228,11 @@ const TRIAGE_TABS = [
 ] as const;
 
 export default function Inbox() {
-  const { emails, accounts, reauthAccounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
+  const { emails, scheduledDrafts, accounts, reauthAccounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData<typeof loader>();
+  const cancelSendFetcher = useFetcher();
+  const navigation = useNavigation();
+  // Skeleton while navigating between folders/searches (Part 0.4).
+  const listLoading = navigation.state === 'loading' && (navigation.location?.pathname ?? '') === '/dashboard/inbox';
   const [dismissedReauth, setDismissedReauth] = useState<Set<string>>(new Set());
   const visibleReauth = reauthAccounts.filter(a => !dismissedReauth.has(a.id));
   const [searchParams, setSearchParams] = useSearchParams();
@@ -704,19 +726,64 @@ export default function Inbox() {
             })}
           </div>
 
-          <EmailList
-            emails={visibleEmails as Email[]}
-            selectedIds={selectedIds}
-            activeEmailId={activeEmail?.id ?? null}
-            focusedIndex={focusIndex}
-            onSelect={toggleSelect}
-            onSelectAll={() => setSelectedIds(new Set(visibleEmails.map((e: any) => e.id)))}
-            onClearSelection={() => setSelectedIds(new Set())}
-            onOpen={(email) => handleOpenEmail(email as PreviewEmail)}
-            onDragStart={handleDragStart}
-            onAction={(action, emailId) => handleBulkAction(action, emailId)}
-            onSelectRange={(ids) => setSelectedIds((prev) => new Set([...prev, ...ids]))}
-          />
+          {/* Scheduled sends (Part 0.1): visible + cancellable in Drafts. */}
+          {folder === 'drafts' && scheduledDrafts && scheduledDrafts.length > 0 && (
+            <div className="border-b border-zinc-800 bg-zinc-900/40" data-testid="scheduled-drafts">
+              <div className="px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Scheduled</div>
+              {scheduledDrafts.map((d) => {
+                const to = Array.isArray(d.to_emails) ? d.to_emails.join(', ') : String(d.to_emails ?? '');
+                const cancelling =
+                  cancelSendFetcher.state !== 'idle' &&
+                  cancelSendFetcher.formData?.get('draft_id') === d.id;
+                return (
+                  <div key={d.id} className="flex items-center gap-3 px-4 py-2 text-sm hover:bg-zinc-800/30" data-testid="scheduled-draft-row">
+                    <Bell className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-zinc-200">{d.subject || '(no subject)'}</div>
+                      <div className="truncate text-xs text-zinc-500">
+                        To {to || '—'}
+                        {d.send_at && <> · sends {new Date(d.send_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</>}
+                      </div>
+                    </div>
+                    <cancelSendFetcher.Form method="post" action="/dashboard/inbox/cancel-send">
+                      <input type="hidden" name="draft_id" value={d.id} />
+                      <button
+                        type="submit"
+                        disabled={cancelling}
+                        className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                      >
+                        {cancelling ? 'Cancelling…' : 'Cancel'}
+                      </button>
+                    </cancelSendFetcher.Form>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {listLoading ? (
+            <EmailListSkeleton />
+          ) : search && visibleEmails.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-center" data-testid="search-no-results">
+              <Mail className="h-6 w-6 text-zinc-600" />
+              <p className="text-sm text-zinc-400">No results for “{search}”</p>
+              <p className="text-xs text-zinc-600">Try a different search or check another folder.</p>
+            </div>
+          ) : (
+            <EmailList
+              emails={visibleEmails as Email[]}
+              selectedIds={selectedIds}
+              activeEmailId={activeEmail?.id ?? null}
+              focusedIndex={focusIndex}
+              onSelect={toggleSelect}
+              onSelectAll={() => setSelectedIds(new Set(visibleEmails.map((e: any) => e.id)))}
+              onClearSelection={() => setSelectedIds(new Set())}
+              onOpen={(email) => handleOpenEmail(email as PreviewEmail)}
+              onDragStart={handleDragStart}
+              onAction={(action, emailId) => handleBulkAction(action, emailId)}
+              onSelectRange={(ids) => setSelectedIds((prev) => new Set([...prev, ...ids]))}
+            />
+          )}
         </div>
 
         {/* Preview / Thread Pane */}

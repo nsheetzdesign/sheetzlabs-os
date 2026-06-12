@@ -1,29 +1,22 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
 import { useLoaderData, useFetcher, Link } from "react-router";
 import { useState } from "react";
-import { Calendar, Clock, User, Video, X, ChevronDown, AlertTriangle } from "lucide-react";
+import { Calendar, Clock, User, Video, X, ChevronDown, AlertTriangle, CalendarClock } from "lucide-react";
 import { apiFetch } from "~/lib/api";
+import type { Booking } from "@sheetzlabs/shared";
 
 export const meta: MetaFunction = () => [{ title: "Bookings — Sheetz Labs OS" }];
 
-type Booking = {
-  id: string;
-  guest_name: string;
-  guest_email: string;
-  guest_notes?: string;
-  scheduled_at: string;
-  duration_minutes: number;
-  timezone: string;
-  status: string;
-  meet_link?: string;
-  calendar_sync_failed?: boolean;
-  booking_links?: { title: string; slug: string };
+// Shared Booking row + the joined link title/slug and the local sync flag.
+type BookingRow = Booking & {
+  calendar_sync_failed?: boolean | null;
+  booking_links?: { title: string; slug: string } | null;
 };
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env as Record<string, string>;
   const res = await apiFetch(request, env, `/booking/bookings`);
-  const data = (await res.json()) as { bookings: Booking[] };
+  const data = (await res.json()) as { bookings: BookingRow[] };
   return { bookings: data.bookings ?? [] };
 }
 
@@ -37,20 +30,40 @@ export async function action({ request, context }: ActionFunctionArgs) {
     await apiFetch(request, env, `/booking/bookings/${bookingId}`, { method: "DELETE" });
   }
 
+  if (intent === "reschedule" && bookingId) {
+    await apiFetch(request, env, `/booking/bookings/${bookingId}/reschedule`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheduled_at: fd.get("scheduled_at"),
+        timezone: fd.get("timezone"),
+      }),
+    });
+  }
+
   return null;
 }
+
+const PAGE_SIZE = 10;
 
 function BookingCard({
   booking,
   onCancel,
+  onReschedule,
   showCancel,
 }: {
-  booking: Booking;
+  booking: BookingRow;
   onCancel: () => void;
+  onReschedule: (scheduledAtUtc: string) => void;
   showCancel: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [rescheduleAt, setRescheduleAt] = useState("");
   const date = new Date(booking.scheduled_at);
+  // Render in the booking's own timezone, with the year + a friendly tz label.
+  const tz = booking.timezone || undefined;
+  const dateLabel = date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: tz });
+  const timeLabel = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short", timeZone: tz });
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
@@ -81,11 +94,11 @@ function BookingCard({
               </span>
               <span className="flex items-center gap-1">
                 <Calendar className="w-3.5 h-3.5" />
-                {date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                {dateLabel}
               </span>
               <span className="flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5" />
-                {date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                {timeLabel}
               </span>
             </div>
           </div>
@@ -132,8 +145,12 @@ function BookingCard({
             </div>
             <div>
               <p className="text-zinc-500 mb-1">Status</p>
-              <p className={booking.status === "confirmed" ? "text-emerald-400" : "text-red-400"}>
-                {booking.status.charAt(0).toUpperCase() + booking.status.slice(1)}
+              <p className={
+                booking.status === "confirmed" ? "text-emerald-400"
+                : booking.status === "completed" ? "text-zinc-400"
+                : "text-red-400"
+              }>
+                {(booking.status ?? "").charAt(0).toUpperCase() + (booking.status ?? "").slice(1)}
               </p>
             </div>
           </div>
@@ -158,16 +175,45 @@ function BookingCard({
           )}
 
           {showCancel && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onCancel();
-              }}
-              className="flex items-center justify-center gap-2 w-full py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg text-sm"
-            >
-              <X className="w-4 h-4" />
-              Cancel Booking
-            </button>
+            <div className="space-y-2">
+              <div>
+                <p className="text-zinc-500 text-sm mb-1 flex items-center gap-1.5">
+                  <CalendarClock className="w-3.5 h-3.5" /> Reschedule
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="datetime-local"
+                    value={rescheduleAt}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setRescheduleAt(e.target.value)}
+                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
+                    aria-label="New date and time"
+                  />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!rescheduleAt) return;
+                      // datetime-local is in the host's browser tz → convert to UTC ISO.
+                      onReschedule(new Date(rescheduleAt).toISOString());
+                    }}
+                    disabled={!rescheduleAt}
+                    className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-sm text-white"
+                  >
+                    Move
+                  </button>
+                </div>
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCancel();
+                }}
+                className="flex items-center justify-center gap-2 w-full py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg text-sm"
+              >
+                <X className="w-4 h-4" />
+                Cancel Booking
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -179,20 +225,35 @@ export default function BookingsPage() {
   const { bookings } = useLoaderData<typeof loader>();
   const fetcher = useFetcher();
   const [filter, setFilter] = useState<"upcoming" | "past" | "cancelled">("upcoming");
+  const [visible, setVisible] = useState(PAGE_SIZE);
 
   const now = new Date();
 
   const filteredBookings = bookings.filter((booking) => {
     const bookingDate = new Date(booking.scheduled_at);
     if (filter === "upcoming") return booking.status === "confirmed" && bookingDate > now;
-    if (filter === "past") return booking.status === "confirmed" && bookingDate <= now;
+    // Past = anything completed, or a still-confirmed booking whose time has passed.
+    if (filter === "past")
+      return booking.status === "completed" || (booking.status === "confirmed" && bookingDate <= now);
     return booking.status === "cancelled";
   });
+
+  // Loader pagination: page through the filtered set in PAGE_SIZE chunks.
+  const paged = filteredBookings.slice(0, visible);
 
   function handleCancel(bookingId: string) {
     if (confirm("Are you sure you want to cancel this booking?")) {
       fetcher.submit({ intent: "cancel", bookingId }, { method: "post" });
     }
+  }
+
+  function handleReschedule(bookingId: string, scheduledAtUtc: string) {
+    let tz = "America/Chicago";
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* default */ }
+    fetcher.submit(
+      { intent: "reschedule", bookingId, scheduled_at: scheduledAtUtc, timezone: tz },
+      { method: "post" }
+    );
   }
 
   return (
@@ -214,7 +275,7 @@ export default function BookingsPage() {
         {(["upcoming", "past", "cancelled"] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => setFilter(tab)}
+            onClick={() => { setFilter(tab); setVisible(PAGE_SIZE); }}
             className={`px-4 py-1.5 text-sm rounded-md transition-colors ${
               filter === tab ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"
             }`}
@@ -234,14 +295,23 @@ export default function BookingsPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {filteredBookings.map((booking) => (
+          {paged.map((booking) => (
             <BookingCard
               key={booking.id}
               booking={booking}
               onCancel={() => handleCancel(booking.id)}
+              onReschedule={(scheduledAtUtc) => handleReschedule(booking.id, scheduledAtUtc)}
               showCancel={filter === "upcoming"}
             />
           ))}
+          {filteredBookings.length > visible && (
+            <button
+              onClick={() => setVisible((v) => v + PAGE_SIZE)}
+              className="w-full py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-800 rounded-lg"
+            >
+              Show more ({filteredBookings.length - visible} more)
+            </button>
+          )}
         </div>
       )}
     </div>
