@@ -60,22 +60,47 @@ export async function getValidAccessToken(
 
   // --- Refresh mutex -------------------------------------------------------
   // Claim the refresh by writing refreshing_until, but only if nobody else holds
-  // an unexpired claim. PostgREST returns the updated rows via .select(); empty
-  // means we lost the race.
+  // an unexpired claim. PostgREST returns the updated rows via .select(); a
+  // non-empty result means we won.
+  //
+  // The claim condition is "refreshing_until IS NULL OR refreshing_until < now".
+  // It used to be a single `.or(...)` filter, but PostgREST rejects the
+  // combination of `.update()` + `.or()` + `.select()` with a misleading
+  // "column ... does not exist" error (Prompt 55 — verified against prod; the
+  // same op without `.select()` or with a single-column filter works). So we
+  // split it into two disjoint single-filter UPDATEs: a row is either NULL or
+  // non-NULL, so it matches exactly one, and each UPDATE is atomic per row.
   const nowIso = new Date().toISOString();
   const claimUntil = new Date(Date.now() + REFRESH_CLAIM_MS).toISOString();
-  const { data: claimed, error: claimError } = await supabase
+
+  // 1) Claim if currently free (no prior claim).
+  let won = false;
+  const { data: claimedFree, error: claimErrorFree } = await supabase
     .from(table)
     .update({ refreshing_until: claimUntil })
     .eq("id", id)
-    .or(`refreshing_until.is.null,refreshing_until.lt.${nowIso}`)
+    .is("refreshing_until", null)
     .select("id");
-
-  if (claimError) {
-    console.error(`[google-auth] claim error for ${email}:`, claimError.message);
+  if (claimErrorFree) {
+    console.error(`[google-auth] claim error for ${email}:`, claimErrorFree.message);
+  }
+  if (claimedFree?.length) {
+    won = true;
+  } else {
+    // 2) Otherwise steal an expired claim (covers a crashed refresher).
+    const { data: claimedExpired, error: claimErrorExpired } = await supabase
+      .from(table)
+      .update({ refreshing_until: claimUntil })
+      .eq("id", id)
+      .lt("refreshing_until", nowIso)
+      .select("id");
+    if (claimErrorExpired) {
+      console.error(`[google-auth] claim error for ${email}:`, claimErrorExpired.message);
+    }
+    if (claimedExpired?.length) won = true;
   }
 
-  if (!claimed?.length) {
+  if (!won) {
     // Another caller is (or just finished) refreshing — re-read and reuse.
     const { data: fresh } = await supabase
       .from(table)

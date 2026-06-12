@@ -1116,66 +1116,94 @@ email.get("/search", async (c) => {
  * fullSync, syncViaHistory); moving those out would be a large refactor beyond the
  * scope of this security pass.
  */
+export interface AccountSyncResult {
+  account_id: string;
+  email: string;
+  new_messages?: number;
+  labelSync?: LabelSyncResult;
+  needs_reauth?: boolean;
+  skipped?: string;
+  error?: string;
+}
+
+/**
+ * Sync exactly one account: flip status → syncing, refresh labels, run the
+ * history-delta or full-sync path, then status → idle. Returns a structured
+ * result (never throws) so callers can aggregate. Shared by `runEmailSync`
+ * (the loop) and the per-account `POST /accounts/:id/sync` route — the latter
+ * needs `labelSync` for the inbox debug panel, which is why this returns the
+ * label counts rather than discarding them (Prompt 55: the route the web has
+ * always called was dropped in the 52A `runEmailSync` refactor, leaving every
+ * manual "Sync All Inboxes" to 404 → "completed with errors").
+ */
+export async function syncOneAccount(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  account: any,
+  env: Bindings,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any
+): Promise<AccountSyncResult> {
+  // Skip accounts already flagged for reconnection — don't burn a refresh attempt.
+  if (account.needs_reauth) {
+    return { account_id: account.id, email: account.email, skipped: "needs_reauth", needs_reauth: true };
+  }
+  try {
+    await supabase
+      .from("email_accounts")
+      .update({ sync_status: "syncing", sync_error: null })
+      .eq("id", account.id);
+
+    const accessToken = await getValidAccessToken(account, env, supabase);
+
+    // Sync labels first so email-label assignments can be created.
+    const labelSync = await syncLabelsForAccount(account.id, accessToken, supabase);
+
+    // fullSync now manages full_sync_completed (it may span multiple cron runs
+    // via sync_page_token), so we no longer force it true here (ES-7).
+    let newMessages = 0;
+    if (account.last_history_id && account.full_sync_completed) {
+      newMessages = await syncViaHistory(account, accessToken, supabase);
+    } else {
+      newMessages = await fullSync(account, accessToken, supabase);
+    }
+
+    await supabase
+      .from("email_accounts")
+      .update({ sync_status: "idle", last_sync_at: new Date().toISOString() })
+      .eq("id", account.id);
+
+    return { account_id: account.id, email: account.email, new_messages: newMessages, labelSync };
+  } catch (error: unknown) {
+    // ReauthRequiredError already flagged the account row (needs_reauth + sync_error).
+    if (error instanceof ReauthRequiredError) {
+      await supabase.from("email_accounts").update({ sync_status: "error" }).eq("id", account.id);
+      return { account_id: account.id, email: account.email, needs_reauth: true };
+    }
+    const msg = error instanceof Error ? error.message : "Unknown error";
+    await supabase
+      .from("email_accounts")
+      .update({ sync_status: "error", sync_error: msg })
+      .eq("id", account.id);
+    return { account_id: account.id, email: account.email, error: msg };
+  }
+}
+
 export async function runEmailSync(
   env: Bindings,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   supabase: any,
   accountId?: string
-): Promise<Array<Record<string, unknown>>> {
+): Promise<AccountSyncResult[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let query: any = supabase.from("email_accounts").select("*").eq("sync_enabled", true);
   if (accountId) query = query.eq("id", accountId);
 
   const { data: accounts } = await query;
-  const results: Array<Record<string, unknown>> = [];
+  const results: AccountSyncResult[] = [];
 
+  // Sequential — never abort the loop on a single account's failure.
   for (const account of accounts ?? []) {
-    // Skip accounts already flagged for reconnection — don't burn a refresh attempt.
-    if (account.needs_reauth) {
-      results.push({ account_id: account.id, email: account.email, skipped: "needs_reauth" });
-      continue;
-    }
-    try {
-      await supabase
-        .from("email_accounts")
-        .update({ sync_status: "syncing", sync_error: null })
-        .eq("id", account.id);
-
-      const accessToken = await getValidAccessToken(account, env, supabase);
-
-      // Sync labels first so email-label assignments can be created
-      await syncLabelsForAccount(account.id, accessToken, supabase);
-
-      // fullSync now manages full_sync_completed (it may span multiple cron runs
-      // via sync_page_token), so we no longer force it true here (ES-7).
-      let newMessages = 0;
-      if (account.last_history_id && account.full_sync_completed) {
-        newMessages = await syncViaHistory(account, accessToken, supabase);
-      } else {
-        newMessages = await fullSync(account, accessToken, supabase);
-      }
-
-      await supabase
-        .from("email_accounts")
-        .update({ sync_status: "idle", last_sync_at: new Date().toISOString() })
-        .eq("id", account.id);
-
-      results.push({ account_id: account.id, email: account.email, new_messages: newMessages });
-    } catch (error: unknown) {
-      // ReauthRequiredError already flagged the account row (needs_reauth + sync_error);
-      // just record and continue with the other accounts — never abort the loop.
-      if (error instanceof ReauthRequiredError) {
-        await supabase.from("email_accounts").update({ sync_status: "error" }).eq("id", account.id);
-        results.push({ account_id: account.id, email: account.email, needs_reauth: true });
-        continue;
-      }
-      const msg = error instanceof Error ? error.message : "Unknown error";
-      await supabase
-        .from("email_accounts")
-        .update({ sync_status: "error", sync_error: msg })
-        .eq("id", account.id);
-      results.push({ account_id: account.id, email: account.email, error: msg });
-    }
+    results.push(await syncOneAccount(account, env, supabase));
   }
 
   return results;
@@ -1186,6 +1214,47 @@ email.post("/sync", async (c) => {
   const account_id = c.req.query("account_id") || undefined;
   const results = await runEmailSync(c.env, supabase, account_id);
   return c.json({ synced: results });
+});
+
+/**
+ * Per-account sync (the inbox sidebar's "Sync All Inboxes" calls this once per
+ * account). Restored in Prompt 55 — the 52A refactor deleted it in favour of the
+ * bulk `/sync` but the web action was never repointed, so it had been 404-ing.
+ * Returns the rich `{ labelSync, emailSync }` shape the debug panel renders.
+ */
+email.post("/accounts/:id/sync", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: account } = await supabase
+    .from("email_accounts")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (!account) return c.json({ error: "Account not found" }, 404);
+
+  const result = await syncOneAccount(account, c.env, supabase);
+
+  if (result.needs_reauth) {
+    return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+  }
+  if (result.error) {
+    return c.json({ error: result.error }, 500);
+  }
+
+  return c.json({
+    success: true,
+    labelSync: result.labelSync
+      ? {
+          total: result.labelSync.total,
+          system: result.labelSync.system,
+          user: result.labelSync.user,
+          userLabelNames: result.labelSync.userLabelNames,
+        }
+      : { total: 0, system: 0, user: 0, userLabelNames: [] },
+    emailSync: { synced: result.new_messages ?? 0 },
+  });
 });
 
 // ============================================
