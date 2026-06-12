@@ -234,7 +234,7 @@ export function EmailList({
 
                 {/* Content */}
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span className={`text-sm truncate ${email.is_read ? 'text-zinc-400' : 'font-semibold text-white'}`}>
                       {email.from_name || email.from_email}
                     </span>
@@ -242,11 +242,11 @@ export function EmailList({
                       <Paperclip size={14} className="text-zinc-500 flex-shrink-0" />
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-sm truncate ${email.is_read ? 'text-zinc-500' : 'text-zinc-300'}`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={`text-sm truncate flex-shrink-0 max-w-[60%] ${email.is_read ? 'text-zinc-500' : 'text-zinc-300'}`}>
                       {email.subject || '(no subject)'}
                     </span>
-                    <span className="text-sm text-zinc-600 truncate">
+                    <span className="text-sm text-zinc-600 truncate min-w-0">
                       — {email.snippet}
                     </span>
                   </div>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useLoaderData, useFetcher, useSearchParams, useNavigate, useNavigation, useRevalidator, Form } from 'react-router';
-import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell, AlertTriangle, X } from 'lucide-react';
+import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell, AlertTriangle, X, Menu } from 'lucide-react';
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
 import { apiFetch } from '~/lib/api';
@@ -13,6 +13,8 @@ import { SyncStatusIndicator } from '~/components/inbox/SyncStatusIndicator';
 import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
 import { useToasts, ToastContainer } from '~/components/ui/Toast';
 import { EmailListSkeleton } from '~/components/ui/Skeleton';
+import { Drawer } from '~/components/ui/Drawer';
+import { useListWidth } from '~/hooks/useListWidth';
 import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
 import { useEmailPolling } from '~/hooks/useEmailPolling';
 import { useSyncStatus, looksLikeAuthError } from '~/hooks/useSyncStatus';
@@ -259,6 +261,11 @@ export default function Inbox() {
   const [draggedEmailIds, setDraggedEmailIds] = useState<string[]>([]);
   const [showCompose, setShowCompose] = useState(false);
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+  // Hamburger-triggered inbox-nav drawer (<1024px). At ≥lg the nav is inline and
+  // this stays closed; a resize past lg force-closes it (see effect below).
+  const [navDrawerOpen, setNavDrawerOpen] = useState(false);
+  // Draggable list/preview divider width for the ≥xl three-pane layout.
+  const listPane = useListWidth();
   const [triageFilter, setTriageFilter] = useState<string>('all');
   const [composeProps, setComposeProps] = useState<{
     replyTo?: any;
@@ -422,6 +429,17 @@ export default function Inbox() {
     onSyncSuccess: sync.reportSuccess,
   });
 
+  // The nav drawer is a <lg affordance; if the viewport grows past lg while it's
+  // open the inline nav takes over, so drop the overlay to avoid a stuck scrim.
+  useEffect(() => {
+    if (!navDrawerOpen) return;
+    const onResize = () => {
+      if (window.innerWidth >= 1024) setNavDrawerOpen(false);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [navDrawerOpen]);
+
   const handleOpenEmail = async (email: PreviewEmail) => {
     setActiveEmail(email);
     if (!email.is_read) markAsRead(email.id); // skip already-read (Part 5, EU-14)
@@ -531,6 +549,7 @@ export default function Inbox() {
     setActiveEmail(null);
     setThreadEmails(null);
     setSelectedIds(new Set());
+    setNavDrawerOpen(false);
   };
 
   const handleLabelSelect = (lid: string, aid: string) => {
@@ -540,6 +559,7 @@ export default function Inbox() {
     setSearchParams(params);
     setActiveEmail(null);
     setThreadEmails(null);
+    setNavDrawerOpen(false);
   };
 
   const handleDragStart = (_e: React.DragEvent, emailIds: string[]) => {
@@ -610,6 +630,14 @@ export default function Inbox() {
     setSelectedIds(new Set());
   }, []);
 
+  // Open compose from a helper that also dismisses the nav drawer — on small
+  // screens the Compose button lives inside the drawer.
+  const openCompose = useCallback((props: typeof composeProps = null) => {
+    setComposeProps(props);
+    setShowCompose(true);
+    setNavDrawerOpen(false);
+  }, []);
+
   const handleReply = useCallback(() => {
     if (activeEmail) {
       setComposeProps({ replyTo: activeEmail });
@@ -647,7 +675,7 @@ export default function Inbox() {
     onToggleSelect: () => {
       if (visibleEmails[focusIndex]) toggleSelect(visibleEmails[focusIndex].id);
     },
-    onCompose: () => { setShowCompose(true); setComposeProps(null); },
+    onCompose: () => openCompose(null),
     onReply: handleReply,
     onReplyAll: handleReplyAll,
     onForward: handleForward,
@@ -656,9 +684,27 @@ export default function Inbox() {
     onUndo: handleUndoLast,
     onMarkUnread: () => handleBulkAction('unread'),
     onGoInbox: () => handleFolderSelect('inbox'),
-    // A modal owns the keyboard while open (consistent close stack, Part 5/7).
-    enabled: !showCompose && !showShortcutsHelp,
+    // A modal/overlay owns the keyboard while open (consistent close stack,
+    // Part 5/7). The nav drawer runs its own focus-trapped Esc handler, so the
+    // list shortcuts stand down while it's up.
+    enabled: !showCompose && !showShortcutsHelp && !navDrawerOpen,
   });
+
+  // Shared props for the inbox nav (rendered inline ≥lg and inside the drawer
+  // below it).
+  const navProps = {
+    accounts,
+    counts,
+    globalCounts,
+    activeFolder: folder,
+    activeAccountId: accountId,
+    activeLabel: labelId,
+    onSelectFolder: handleFolderSelect,
+    onSelectLabel: handleLabelSelect,
+    onCompose: () => openCompose(null),
+    onDragOver: handleDragOver,
+    onDrop: handleDrop,
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -689,27 +735,40 @@ export default function Inbox() {
           </button>
         </div>
       ))}
-      <div className="flex flex-1 overflow-hidden">
-      <InboxSidebar
-        accounts={accounts}
-        counts={counts}
-        globalCounts={globalCounts}
-        activeFolder={folder}
-        activeAccountId={accountId}
-        activeLabel={labelId}
-        onSelectFolder={handleFolderSelect}
-        onSelectLabel={handleLabelSelect}
-        onCompose={() => { setComposeProps(null); setShowCompose(true); }}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      />
+      <div className="flex flex-1 overflow-hidden min-w-0">
+      {/* Inbox nav — inline at ≥lg, hamburger-drawer below. The same props feed
+          both; only one is visible at a time so the duplicate mount is cheap. */}
+      <div className="hidden lg:flex shrink-0" style={{ width: 'clamp(200px, 16vw, 256px)' }}>
+        <InboxSidebar {...navProps} />
+      </div>
+      <Drawer
+        open={navDrawerOpen}
+        onClose={() => setNavDrawerOpen(false)}
+        ariaLabel="Mailboxes and folders"
+        panelClassName="w-72"
+      >
+        <InboxSidebar {...navProps} />
+      </Drawer>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden min-w-0 relative">
         {/* Email List */}
-        <div className={`${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`}>
+        <div
+          data-testid="inbox-list-pane"
+          style={{ width: `${listPane.width}px` }}
+          className="flex flex-1 xl:flex-none flex-col border-r border-zinc-800 xl:border-r-0 min-w-0"
+        >
           {/* Search Bar */}
           <div className="p-3 border-b border-zinc-800 flex gap-2">
-            <form onSubmit={handleSearch} className="flex-1">
+            {/* Hamburger — opens the nav drawer below lg. */}
+            <button
+              type="button"
+              onClick={() => setNavDrawerOpen(true)}
+              aria-label="Open mailboxes"
+              className="lg:hidden flex items-center justify-center px-2 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 shrink-0"
+            >
+              <Menu size={18} />
+            </button>
+            <form onSubmit={handleSearch} className="flex-1 min-w-0">
               <input
                 id="inbox-search"
                 type="text"
@@ -830,8 +889,31 @@ export default function Inbox() {
           )}
         </div>
 
-        {/* Preview / Thread Pane */}
-        <div className={`${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`}>
+        {/* Draggable divider — ≥xl only; the panes collapse to a single column
+            below that so there's nothing to resize. Double-click resets. */}
+        <div
+          data-testid="inbox-divider"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize email list"
+          onPointerDown={listPane.startDrag}
+          onDoubleClick={listPane.reset}
+          className={`hidden xl:block w-1 shrink-0 cursor-col-resize transition-colors ${
+            listPane.dragging ? 'bg-emerald-500' : 'bg-zinc-800 hover:bg-emerald-500/60'
+          }`}
+        />
+
+        {/* Preview / Thread Pane — at ≥xl it's the third column; below xl it
+            overlays the list once an email is selected, with an in-pane back
+            control (no separate route, so thread/compose/keyboard state stays in
+            one place). */}
+        <div
+          className={
+            activeEmail
+              ? 'absolute inset-0 z-20 flex bg-zinc-950 min-w-0 xl:static xl:inset-auto xl:z-auto xl:bg-transparent xl:flex-1'
+              : 'hidden min-w-0 xl:flex xl:flex-1'
+          }
+        >
           {threadEmails && threadEmails.length > 1 ? (
             <ThreadView
               emails={threadEmails}

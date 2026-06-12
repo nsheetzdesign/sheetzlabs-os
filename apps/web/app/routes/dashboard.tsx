@@ -73,7 +73,7 @@ export default function DashboardLayout() {
         onToggle={toggleSidebar}
       />
       <div
-        className={`flex flex-1 flex-col overflow-auto transition-all duration-200 ${
+        className={`flex flex-1 flex-col overflow-auto min-w-0 transition-all duration-200 ${
           sidebarCollapsed ? "ml-16" : "ml-64"
         }`}
       >

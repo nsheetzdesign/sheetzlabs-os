@@ -733,9 +733,11 @@ export function ComposeModal({
     );
   }
 
+  // Below md the compose surface is full-screen (single-pane stack, Prompt 60);
+  // at md+ it's the familiar bottom-right floating card (or inset-4 fullscreen).
   const modalClasses = isFullscreen
     ? 'fixed inset-4 z-50'
-    : 'fixed bottom-0 right-4 z-50 w-[560px] max-h-[80vh]';
+    : 'fixed inset-0 z-50 w-full max-h-full md:inset-auto md:bottom-0 md:right-4 md:w-[560px] md:max-h-[80vh]';
 
   return (
     <div className={modalClasses} role="dialog" aria-modal="true" aria-label={replyTo ? (forward ? 'Forward email' : 'Reply to email') : 'New message'}>

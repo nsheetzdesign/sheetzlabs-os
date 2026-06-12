@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useFetcher } from 'react-router';
-import { ChevronDown, ChevronUp, Reply, ReplyAll, Forward, Star, Archive, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Reply, ReplyAll, Forward, Star, Archive, Trash2, ArrowLeft } from 'lucide-react';
 import { EmailHtmlFrame } from './EmailHtmlFrame';
 import type { Email as EmailRow } from '@sheetzlabs/shared';
 
@@ -82,9 +82,18 @@ export function ThreadView({ emails, onReply, onReplyAll, onForward, onClose }: 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
-        <div>
-          <h1 className="text-xl font-semibold">{subject}</h1>
+      <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-4 border-b border-zinc-800 min-w-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            onClick={onClose}
+            aria-label="Back to list"
+            title="Back"
+            className="flex items-center p-1.5 hover:bg-zinc-800 rounded xl:hidden shrink-0"
+          >
+            <ArrowLeft size={18} />
+          </button>
+          <div className="min-w-0">
+          <h1 className="text-xl font-semibold truncate">{subject}</h1>
           <div className="flex items-center gap-2 mt-1 text-sm text-zinc-500">
             <span>{emails.length} messages</span>
             <span>·</span>
@@ -96,9 +105,10 @@ export function ThreadView({ emails, onReply, onReplyAll, onForward, onClose }: 
               Collapse all
             </button>
           </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={() => {
               fetcher.submit(

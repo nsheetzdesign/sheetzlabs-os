@@ -1504,7 +1504,7 @@ export default function CalendarPage() {
       </aside>
 
       {/* Calendar grid */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Toolbar */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 shrink-0">
           <div className="flex items-center gap-3">
@@ -1538,7 +1538,7 @@ export default function CalendarPage() {
         <div ref={scrollRef} className="flex-1 overflow-auto">
           {/* Day headers — sticky. Dates derive from the actual computed days (CS-5). */}
           <div className="grid border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10"
-            style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)` }}>
+            style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)`, minWidth: dayList.length > 1 ? 640 : undefined }}>
             <div className="border-r border-zinc-800" />
             {dayList.map((d, i) => {
               const dayStart = dayBoundaries[i];
@@ -1559,7 +1559,7 @@ export default function CalendarPage() {
             if (allDay.length === 0) return null;
             return (
               <div className="grid border-b border-zinc-800 bg-zinc-950/80"
-                style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)` }}>
+                style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)`, minWidth: dayList.length > 1 ? 640 : undefined }}>
                 <div className="pr-1.5 py-1 text-right text-[10px] text-zinc-600 border-r border-zinc-800">all-day</div>
                 <div style={{ gridColumn: `2 / span ${dayList.length}` }} className="py-1 px-0.5">
                   <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${dayList.length}, 1fr)` }}>
@@ -1589,7 +1589,7 @@ export default function CalendarPage() {
           })()}
 
           {/* Grid body */}
-          <div className="flex" style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}>
+          <div className="flex" style={{ height: VISIBLE_HOURS * HOUR_HEIGHT, minWidth: dayList.length > 1 ? 640 : undefined }}>
             {/* Time labels */}
             <div className="w-11 shrink-0 relative border-r border-zinc-800" style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}>
               {HOURS.map((hour, i) => (

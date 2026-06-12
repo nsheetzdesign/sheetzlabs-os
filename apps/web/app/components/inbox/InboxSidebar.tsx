@@ -42,7 +42,7 @@ interface Props {
   onDrop: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
 }
 
-const systemIcons: Record<string, React.ComponentType<{ size?: number }>> = {
+const systemIcons: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
   Inbox,
   Star,
   Clock,
@@ -129,7 +129,7 @@ export function InboxSidebar({
   const isAllInboxesActive = activeFolder === 'inbox' && activeAccountId === null;
 
   return (
-    <div className="w-56 border-r border-zinc-800 flex flex-col h-full overflow-hidden">
+    <div className="w-full border-r border-zinc-800 flex flex-col h-full overflow-hidden">
       {/* Compose Button — opens the ComposeModal (the only real send path, EC-2) */}
       <div className="p-3">
         <button
@@ -218,8 +218,8 @@ export function InboxSidebar({
                               : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'
                         }`}
                       >
-                        <Icon size={14} />
-                        <span className="flex-1 text-left">{label.name}</span>
+                        <Icon size={14} className="shrink-0" />
+                        <span className="flex-1 text-left truncate min-w-0">{label.name}</span>
                         {count > 0 && (
                           <span className={`text-xs ${isActive ? 'text-zinc-300' : 'text-zinc-500'}`}>
                             {count}

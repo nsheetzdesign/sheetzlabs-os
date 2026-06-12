@@ -6,7 +6,7 @@ import { SnoozePicker } from './SnoozePicker';
 import type { Email as EmailRow, EmailLabelView } from '@sheetzlabs/shared';
 import {
   Star, Archive, Trash2, Clock, Reply, ReplyAll, Forward,
-  ChevronDown, ChevronUp, MoreHorizontal, X,
+  ChevronDown, ChevronUp, MoreHorizontal, ArrowLeft,
 } from 'lucide-react';
 
 // View model derived from the canonical shared Email row (Part 7, XC-4).
@@ -102,8 +102,8 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward, o
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-zinc-800">
-        <button onClick={onClose} className="p-1.5 hover:bg-zinc-800 rounded md:hidden">
-          <X size={18} />
+        <button onClick={onClose} aria-label="Back to list" title="Back" className="flex items-center gap-1 p-1.5 hover:bg-zinc-800 rounded xl:hidden">
+          <ArrowLeft size={18} />
         </button>
         <div className="flex-1" />
         <button
@@ -201,9 +201,9 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward, o
               {senderInitial}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{email.from_name || email.from_email}</span>
-                <span className="text-sm text-zinc-500">&lt;{email.from_email}&gt;</span>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-medium truncate">{email.from_name || email.from_email}</span>
+                <span className="text-sm text-zinc-500 truncate hidden sm:inline">&lt;{email.from_email}&gt;</span>
               </div>
               <button
                 onClick={() => setShowDetails(!showDetails)}
