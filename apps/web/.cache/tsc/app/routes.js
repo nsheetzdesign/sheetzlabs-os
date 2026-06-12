@@ -90,6 +90,7 @@ export default [
             route("drafts", "routes/dashboard.inbox.drafts.tsx"),
             route("labels", "routes/dashboard.inbox.labels.tsx"),
             route("bulk", "routes/dashboard.inbox.bulk.tsx"),
+            route("undo", "routes/dashboard.inbox.undo.tsx"),
             route("snippets", "routes/dashboard.inbox.snippets.tsx"),
             route("templates", "routes/dashboard.inbox.templates.tsx"),
             route(":id", "routes/dashboard.inbox.$id.tsx", [

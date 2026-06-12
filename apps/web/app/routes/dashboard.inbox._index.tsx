@@ -10,8 +10,17 @@ import { EmailPreview, type PreviewEmail } from '~/components/inbox/EmailPreview
 import { ComposeModal } from '~/components/inbox/ComposeModal';
 import { ThreadView } from '~/components/inbox/ThreadView';
 import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
+import { useToasts, ToastContainer } from '~/components/ui/Toast';
 import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
 import { useEmailPolling } from '~/hooks/useEmailPolling';
+
+// Human-readable past-tense labels for the undo toast, keyed by action.
+const UNDO_LABELS: Record<string, string> = {
+  archive: 'Archived',
+  trash: 'Trashed',
+  spam: 'Marked as spam',
+  snooze: 'Snoozed',
+};
 
 export const meta: MetaFunction = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 
@@ -38,7 +47,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       snoozed_until, has_attachments, attachment_count,
       ai_summary, ai_category,
       triage_category,
-      email_label_assignments(label_id, email_labels(id, name, color))
+      email_label_assignments(label_id, email_labels(id, name, color)),
+      email_attachments(id, filename, mime_type, size_bytes, gmail_attachment_id, content_id, is_inline)
     `)
     .eq('is_deleted', false)
     .order('received_at', { ascending: false })
@@ -127,53 +137,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     return acc;
   }, {});
 
-  // For any account with no labels, seed system labels one by one
-  for (const account of accounts ?? []) {
-    if (!labelsByAccount[account.id]?.length) {
-      console.log(`[Inbox] Seeding labels for account ${account.email} (${account.id})...`);
-
-      const systemLabels = [
-        { name: 'Inbox',    icon: 'Inbox',         sort_order: 1,  external_id: 'INBOX' },
-        { name: 'Starred',  icon: 'Star',          sort_order: 2,  external_id: 'STARRED' },
-        { name: 'Snoozed',  icon: 'Clock',         sort_order: 3,  external_id: 'SNOOZED' },
-        { name: 'Sent',     icon: 'Send',          sort_order: 4,  external_id: 'SENT' },
-        { name: 'Drafts',   icon: 'File',          sort_order: 5,  external_id: 'DRAFT' },
-        { name: 'Spam',     icon: 'AlertTriangle', sort_order: 90, external_id: 'SPAM' },
-        { name: 'Trash',    icon: 'Trash2',        sort_order: 91, external_id: 'TRASH' },
-        { name: 'All Mail', icon: 'Mail',          sort_order: 92, external_id: 'ALL_MAIL' },
-      ];
-
-      const seededLabels: any[] = [];
-      for (const label of systemLabels) {
-        const { data: inserted, error: upsertError } = await supabase
-          .from('email_labels')
-          .upsert(
-            {
-              account_id: account.id,
-              name: label.name,
-              type: 'system',
-              icon: label.icon,
-              sort_order: label.sort_order,
-              external_id: label.external_id,
-            },
-            { onConflict: 'account_id,external_id', ignoreDuplicates: false }
-          )
-          .select('*')
-          .single();
-
-        if (upsertError) {
-          console.error(`[Inbox] Failed to upsert label ${label.name} for ${account.email}:`, upsertError.message);
-        } else if (inserted) {
-          seededLabels.push(inserted);
-        }
-      }
-
-      labelsByAccount[account.id] = seededLabels.length > 0
-        ? seededLabels
-        : systemLabels.map(l => ({ ...l, account_id: account.id, type: 'system' }));
-      console.log(`[Inbox] Seeded ${seededLabels.length} labels for ${account.email}`);
-    }
-  }
+  // Labels come from Gmail sync (syncLabelsForAccount) — the old per-request
+  // seeding loop + console logging is gone (Prompt 54A Part 7, XC-6).
 
   // Build accounts with their real labels
   const accountsWithLabels = (accounts ?? []).map(account => ({
@@ -182,13 +147,17 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     labels: labelsByAccount[account.id] ?? [],
   }));
 
-  // Global counts (across all accounts) — single round trip via get_email_counts
-  // (Prompt 52A Part 7). Excludes deleted everywhere; snoozed excludes expired.
-  const { data: countsRow, error: countsError } = await supabase
-    .rpc('get_email_counts', { p_account_id: null })
-    .single<{ inbox: number; starred: number; snoozed: number; drafts: number; spam: number; trash: number }>();
-  if (countsError) console.error('[Inbox] get_email_counts failed:', countsError.message);
+  // Counts in two RPCs (global totals + per-account rows) — both indexed, both
+  // exclude deleted; snoozed excludes expired (Prompt 54A Part 6, EU-7).
+  type CountRow = { inbox: number; starred: number; snoozed: number; drafts: number; spam: number; trash: number };
+  const [globalRes, perAccountRes] = await Promise.all([
+    supabase.rpc('get_email_counts', { p_account_id: null }).single<CountRow>(),
+    supabase.rpc('get_email_counts_by_account'),
+  ]);
+  if (globalRes.error) console.error('[Inbox] get_email_counts failed:', globalRes.error.message);
+  if (perAccountRes.error) console.error('[Inbox] get_email_counts_by_account failed:', perAccountRes.error.message);
 
+  const countsRow = globalRes.data;
   const globalCounts = {
     inbox: Number(countsRow?.inbox ?? 0),
     starred: Number(countsRow?.starred ?? 0),
@@ -198,17 +167,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     drafts: Number(countsRow?.drafts ?? 0),
   };
 
-  // Per-account counts (simple: just unread inbox for each)
-  const counts: Record<string, { inbox: number; starred: number; snoozed: number; drafts: number; spam: number; trash: number }> = {};
-  for (const account of accounts ?? []) {
-    const accountEmails = (emails ?? []).filter(e => e.account_id === account.id);
-    counts[account.id] = {
-      inbox: accountEmails.filter(e => !e.is_read).length,
-      starred: 0,
-      snoozed: 0,
-      drafts: 0,
-      spam: 0,
-      trash: 0,
+  // Real per-account folder counts (the visible-page hack + hardcoded zeros die).
+  const counts: Record<string, CountRow> = {};
+  for (const row of (perAccountRes.data ?? []) as Array<CountRow & { account_id: string }>) {
+    counts[row.account_id] = {
+      inbox: Number(row.inbox ?? 0),
+      starred: Number(row.starred ?? 0),
+      snoozed: Number(row.snoozed ?? 0),
+      drafts: Number(row.drafts ?? 0),
+      spam: Number(row.spam ?? 0),
+      trash: Number(row.trash ?? 0),
     };
   }
 
@@ -219,6 +187,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       triage_category: e.triage_category ?? 'other',
       // Flatten label assignments to array of label objects
       labels: (e.email_label_assignments ?? []).map((a: any) => a.email_labels).filter(Boolean),
+      // Non-inline attachments surface as chips; inline ones resolve cid: images.
+      attachments: e.email_attachments ?? [],
     })),
     accounts: accountsWithLabels,
     reauthAccounts,
@@ -245,8 +215,18 @@ export default function Inbox() {
   const visibleReauth = reauthAccounts.filter(a => !dismissedReauth.has(a.id));
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const fetcher = useFetcher();
+  // Dedicated fetchers per concern (Part 1) — a single shared fetcher lets a
+  // concurrent submission (e.g. mark-read on open) cancel an in-flight archive.
+  const actionFetcher = useFetcher();
+  const readFetcher = useFetcher();
+  const undoFetcher = useFetcher();
   const revalidator = useRevalidator();
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+  // Optimistic removal: ids hidden from the list the instant an action fires, kept
+  // hidden until the revalidated loader confirms they're actually gone. On failure
+  // they're un-hidden + an error toast is shown.
+  const [pendingRemoved, setPendingRemoved] = useState<Set<string>>(new Set());
+  const lastActionRef = useRef<{ action: string; ids: string[] } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activeEmail, setActiveEmail] = useState<PreviewEmail | null>(null);
@@ -268,6 +248,38 @@ export default function Inbox() {
     if (triageFilter === 'all') return emails;
     return emails.filter((e: any) => (e.triage_category ?? 'other') === triageFilter);
   }, [emails, triageFilter]);
+
+  // What the list actually renders: triage-filtered minus the optimistically removed.
+  const visibleEmails = useMemo(
+    () => (filteredEmails as any[]).filter((e) => !pendingRemoved.has(e.id)),
+    [filteredEmails, pendingRemoved],
+  );
+
+  // Prune the optimistic set once the loader has genuinely dropped an id (no flash:
+  // the id stays hidden while still in `emails`, and leaves the set only once gone).
+  useEffect(() => {
+    const present = new Set((emails as any[]).map((e) => e.id));
+    setPendingRemoved((prev) => {
+      const next = new Set([...prev].filter((id) => present.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [emails]);
+
+  // Reconcile a completed action: on failure, un-hide the rows + error toast.
+  useEffect(() => {
+    if (actionFetcher.state !== 'idle' || !actionFetcher.data) return;
+    const data = actionFetcher.data as { error?: string; failed?: unknown[] };
+    const last = lastActionRef.current;
+    if ((data.error || (data.failed && data.failed.length)) && last) {
+      setPendingRemoved((prev) => {
+        const next = new Set(prev);
+        last.ids.forEach((id) => next.delete(id));
+        return next;
+      });
+      pushToast({ message: `Couldn't ${last.action} — please retry`, variant: 'error' });
+      lastActionRef.current = null;
+    }
+  }, [actionFetcher.state, actionFetcher.data, pushToast]);
 
   const triageCounts = useMemo(() => {
     const c: Record<string, number> = { all: emails.length };
@@ -324,9 +336,14 @@ export default function Inbox() {
     }
   };
 
-  // Auto-sync on window focus
+  // Auto-sync on window focus — throttled to once per 2 minutes (Part 5, EU-14)
+  // so tab-flipping doesn't hammer the sync endpoint.
+  const lastFocusSync = useRef(0);
   useEffect(() => {
     const onFocus = async () => {
+      const now = Date.now();
+      if (now - lastFocusSync.current < 120_000) return;
+      lastFocusSync.current = now;
       try {
         await fetch('/dashboard/inbox/sync', { method: 'POST' });
         revalidator.revalidate();
@@ -346,7 +363,7 @@ export default function Inbox() {
 
   const handleOpenEmail = async (email: PreviewEmail) => {
     setActiveEmail(email);
-    markAsRead(email.id);
+    if (!email.is_read) markAsRead(email.id); // skip already-read (Part 5, EU-14)
 
     if (email.thread_id) {
       try {
@@ -374,34 +391,72 @@ export default function Inbox() {
     });
   };
 
+  // Replay the inverse of an action (write-back makes archive/trash/spam/snooze
+  // reversible). Un-hides instantly; the revalidated loader brings the rows back.
+  const handleUndo = useCallback((action: string, ids: string[]) => {
+    setPendingRemoved((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.delete(id));
+      return next;
+    });
+    undoFetcher.submit(
+      { action, email_ids: JSON.stringify(ids) },
+      { method: 'post', action: '/dashboard/inbox/undo' },
+    );
+  }, [undoFetcher]);
+
+  // `z` — undo the most recent undoable action (server resolves "last").
+  const handleUndoLast = useCallback(() => {
+    undoFetcher.submit({}, { method: 'post', action: '/dashboard/inbox/undo' });
+  }, [undoFetcher]);
+
   const handleBulkAction = useCallback((action: string, overrideEmailId?: string) => {
     const ids = overrideEmailId
       ? [overrideEmailId]
       : selectedIds.size > 0
         ? Array.from(selectedIds)
-        : filteredEmails[focusIndex] ? [filteredEmails[focusIndex].id] : [];
+        : visibleEmails[focusIndex] ? [visibleEmails[focusIndex].id] : [];
     if (ids.length === 0) return;
-    fetcher.submit(
+
+    const removesFromView = ['trash', 'archive', 'spam', 'delete'].includes(action);
+
+    // Optimistic: hide the rows instantly (<100ms perceived). Reconciled by the
+    // revalidated loader; reverted by the error effect if the write-back fails.
+    if (removesFromView) {
+      setPendingRemoved((prev) => new Set([...prev, ...ids]));
+      lastActionRef.current = { action, ids };
+    }
+
+    actionFetcher.submit(
       { action, email_ids: JSON.stringify(ids) },
       { method: 'post', action: '/dashboard/inbox/bulk' }
     );
     setSelectedIds(new Set());
 
-    // If the active email is being removed from the current view, advance or close
-    const removesFromView = ['trash', 'archive', 'spam', 'delete'].includes(action);
+    // Undo toast for reversible folder moves (single + bulk).
+    if (UNDO_LABELS[action]) {
+      const label = UNDO_LABELS[action];
+      pushToast({
+        message: ids.length > 1 ? `${label} ${ids.length} emails` : label,
+        actionLabel: 'Undo',
+        onAction: () => handleUndo(action, ids),
+      });
+    }
+
+    // If the active email is being removed from the current view, advance or close.
     if (removesFromView && activeEmail && ids.includes(activeEmail.id)) {
-      const currentIndex = filteredEmails.findIndex((e: any) => e.id === activeEmail.id);
-      const nextEmail = filteredEmails[currentIndex + 1] ?? filteredEmails[currentIndex - 1] ?? null;
+      const currentIndex = visibleEmails.findIndex((e: any) => e.id === activeEmail.id);
+      const nextEmail =
+        visibleEmails.find((e: any, i: number) => i > currentIndex && !ids.includes(e.id)) ??
+        visibleEmails.find((e: any, i: number) => i < currentIndex && !ids.includes(e.id)) ??
+        null;
       setActiveEmail(nextEmail as PreviewEmail | null);
       setThreadEmails(null);
-      if (nextEmail) {
-        setFocusIndex(currentIndex + 1 < filteredEmails.length - 1 ? currentIndex + 1 : Math.max(0, currentIndex - 1));
-      }
     }
-  }, [selectedIds, filteredEmails, focusIndex, fetcher, activeEmail]);
+  }, [selectedIds, visibleEmails, focusIndex, actionFetcher, activeEmail, pushToast, handleUndo]);
 
   const markAsRead = (id: string) => {
-    fetcher.submit(
+    readFetcher.submit(
       { action: 'read', email_ids: JSON.stringify([id]) },
       { method: 'post', action: '/dashboard/inbox/bulk' }
     );
@@ -446,13 +501,13 @@ export default function Inbox() {
       };
       const action = actionMap[target.id];
       if (action) {
-        fetcher.submit(
+        actionFetcher.submit(
           { action, email_ids: JSON.stringify(draggedEmailIds) },
           { method: 'post', action: '/dashboard/inbox/bulk' }
         );
       }
     } else if (target.type === 'label') {
-      fetcher.submit(
+      actionFetcher.submit(
         { action: 'add_label', email_ids: JSON.stringify(draggedEmailIds), label_id: target.id },
         { method: 'post', action: '/dashboard/inbox/bulk' }
       );
@@ -517,19 +572,19 @@ export default function Inbox() {
 
   // Wire up keyboard shortcuts
   useEmailKeyboardShortcuts({
-    emails: filteredEmails as Array<{ id: string; is_starred?: boolean }>,
+    emails: visibleEmails as Array<{ id: string; is_starred?: boolean }>,
     focusIndex,
     setFocusIndex,
     activeEmail,
     onOpenFocused: () => {
-      if (filteredEmails[focusIndex]) {
-        handleOpenEmail(filteredEmails[focusIndex] as PreviewEmail);
+      if (visibleEmails[focusIndex]) {
+        handleOpenEmail(visibleEmails[focusIndex] as PreviewEmail);
       }
     },
     onClose: handleClose,
     onBulkAction: handleBulkAction,
     onToggleSelect: () => {
-      if (filteredEmails[focusIndex]) toggleSelect(filteredEmails[focusIndex].id);
+      if (visibleEmails[focusIndex]) toggleSelect(visibleEmails[focusIndex].id);
     },
     onCompose: () => { setShowCompose(true); setComposeProps(null); },
     onReply: handleReply,
@@ -537,6 +592,11 @@ export default function Inbox() {
     onForward: handleForward,
     onSearch: () => document.getElementById('inbox-search')?.focus(),
     onShowHelp: () => setShowShortcutsHelp(true),
+    onUndo: handleUndoLast,
+    onMarkUnread: () => handleBulkAction('unread'),
+    onGoInbox: () => handleFolderSelect('inbox'),
+    // A modal owns the keyboard while open (consistent close stack, Part 5/7).
+    enabled: !showCompose && !showShortcutsHelp,
   });
 
   return (
@@ -645,15 +705,17 @@ export default function Inbox() {
           </div>
 
           <EmailList
-            emails={filteredEmails as Email[]}
+            emails={visibleEmails as Email[]}
             selectedIds={selectedIds}
             activeEmailId={activeEmail?.id ?? null}
             focusedIndex={focusIndex}
             onSelect={toggleSelect}
-            onSelectAll={() => setSelectedIds(new Set(filteredEmails.map(e => e.id)))}
+            onSelectAll={() => setSelectedIds(new Set(visibleEmails.map((e: any) => e.id)))}
             onClearSelection={() => setSelectedIds(new Set())}
             onOpen={(email) => handleOpenEmail(email as PreviewEmail)}
             onDragStart={handleDragStart}
+            onAction={(action, emailId) => handleBulkAction(action, emailId)}
+            onSelectRange={(ids) => setSelectedIds((prev) => new Set([...prev, ...ids]))}
           />
         </div>
 
@@ -719,6 +781,8 @@ export default function Inbox() {
         isOpen={showShortcutsHelp}
         onClose={() => setShowShortcutsHelp(false)}
       />
+
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

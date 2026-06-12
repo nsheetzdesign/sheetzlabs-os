@@ -9,6 +9,9 @@ ENVIRONMENT = "production"
 ALLOWED_ORIGINS = "https://app.sheetzlabs.com"
 # Public web app origin — used for OAuth callback redirects.
 APP_URL = "https://app.sheetzlabs.com"
+# Single-tenant allowlist (Prompt 54A Part 0). A valid Supabase JWT is not enough —
+# the user's email must be on this list or the request is rejected (API 403 / web sign-out).
+ALLOWED_USER_EMAILS = "nick@sheetzlabs.com,e2e@sheetzlabs.com"
 
 # Custom domain — Cloudflare provisions DNS + TLS automatically
 [[routes]]

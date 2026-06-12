@@ -1,7 +1,8 @@
-import type { Database } from "@sheetzlabs/shared";
+import { type Database } from "@sheetzlabs/shared";
 type Env = {
     SUPABASE_URL: string;
     SUPABASE_ANON_KEY: string;
+    ALLOWED_USER_EMAILS?: string;
 };
 export declare function createSupabaseServerClient(request: Request, env: Env): {
     supabase: import("@supabase/supabase-js").SupabaseClient<Database, "public" extends Exclude<keyof Database, "__InternalSupabase"> ? "public" : string & Exclude<keyof Database, "__InternalSupabase">, ("public" extends Exclude<keyof Database, "__InternalSupabase"> ? "public" : string & Exclude<keyof Database, "__InternalSupabase">) extends infer T ? T extends ("public" extends Exclude<keyof Database, "__InternalSupabase"> ? "public" : string & Exclude<keyof Database, "__InternalSupabase">) ? T extends "public" ? T : "public" : never : never, Omit<Database, "__InternalSupabase">[("public" extends Exclude<keyof Database, "__InternalSupabase"> ? "public" : string & Exclude<keyof Database, "__InternalSupabase">) extends infer T_1 ? T_1 extends ("public" extends Exclude<keyof Database, "__InternalSupabase"> ? "public" : string & Exclude<keyof Database, "__InternalSupabase">) ? T_1 extends "public" ? T_1 : "public" : never : never] extends {

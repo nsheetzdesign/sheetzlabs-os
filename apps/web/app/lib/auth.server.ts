@@ -3,12 +3,13 @@ import {
   parseCookieHeader,
   serializeCookieHeader,
 } from "@supabase/ssr";
-import type { Database } from "@sheetzlabs/shared";
+import { type Database, isAllowedUser } from "@sheetzlabs/shared";
 import { redirect } from "react-router";
 
 type Env = {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
+  ALLOWED_USER_EMAILS?: string;
 };
 
 export function createSupabaseServerClient(request: Request, env: Env) {
@@ -45,6 +46,14 @@ export async function requireAuth(request: Request, env: Env) {
 
   if (!user) {
     throw redirect("/auth/login", { headers });
+  }
+
+  // Single-tenant gate (Prompt 54A Part 0). Web loaders read Supabase directly
+  // with the service key, so the API's allowlist check is not enough on its own —
+  // a non-allowlisted but otherwise-valid session must be signed out here.
+  if (!isAllowedUser(user.email, env)) {
+    await supabase.auth.signOut(); // emits Set-Cookie clears onto `headers`
+    throw redirect("/auth/login?error=not_authorized", { headers });
   }
 
   return { user, headers };

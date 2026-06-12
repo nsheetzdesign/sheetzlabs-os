@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, redirect, useActionData, data } from "react-router";
+import { Form, redirect, useActionData, useLoaderData, data } from "react-router";
 import { createSupabaseServerClient } from "~/lib/auth.server";
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
@@ -11,7 +11,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     data: { user },
   } = await supabase.auth.getUser();
   if (user) throw redirect("/dashboard", { headers });
-  return {};
+  const notice =
+    new URL(request.url).searchParams.get("error") === "not_authorized"
+      ? "This account is not authorized for this workspace."
+      : null;
+  return { notice };
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -34,6 +38,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 export default function Login() {
   const actionData = useActionData<typeof action>();
+  const { notice } = useLoaderData<typeof loader>();
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-surface-0 px-4">
@@ -48,9 +53,9 @@ export default function Login() {
         </div>
 
         {/* Error */}
-        {actionData?.error && (
+        {(actionData?.error || notice) && (
           <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-            {actionData.error}
+            {actionData?.error || notice}
           </div>
         )}
 

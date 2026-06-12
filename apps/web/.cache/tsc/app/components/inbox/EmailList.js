@@ -47,7 +47,7 @@ export function EmailList({ emails, selectedIds, activeEmailId, focusedIndex, on
                     const isActive = activeEmailId === email.id;
                     const isHovered = hoveredId === email.id;
                     const isFocused = focusedIndex === index;
-                    return (_jsxs("div", { draggable: true, onDragStart: (e) => handleDragStart(e, email), onClick: () => onOpen(email), onMouseEnter: () => setHoveredId(email.id), onMouseLeave: () => setHoveredId(null), className: `flex items-center gap-3 px-4 py-2 border-b border-zinc-800/50 cursor-pointer transition-colors ${isActive
+                    return (_jsxs("div", { "data-testid": "email-row", draggable: true, onDragStart: (e) => handleDragStart(e, email), onClick: () => onOpen(email), onMouseEnter: () => setHoveredId(email.id), onMouseLeave: () => setHoveredId(null), className: `flex items-center gap-3 px-4 py-2 border-b border-zinc-800/50 cursor-pointer transition-colors ${isActive
                             ? 'bg-zinc-800'
                             : isSelected
                                 ? 'bg-zinc-800/50'
@@ -61,7 +61,7 @@ export function EmailList({ emails, selectedIds, activeEmailId, focusedIndex, on
                                             const rect = e.currentTarget.getBoundingClientRect();
                                             setSnoozePosition({ x: rect.right, y: rect.bottom });
                                             setSnoozeEmailId(email.id);
-                                        }, className: "p-1.5 hover:bg-zinc-700 rounded", title: "Snooze", children: _jsx(Clock, { size: 16 }) })] })), !isHovered && (_jsx("span", { className: `text-xs flex-shrink-0 ${email.is_read ? 'text-zinc-500' : 'text-zinc-400'}`, children: formatDate(email.received_at) }))] }, email.id));
+                                        }, className: "p-1.5 hover:bg-zinc-700 rounded", title: "Snooze", children: _jsx(Clock, { size: 16 }) })] })), !isHovered && (_jsx("span", { suppressHydrationWarning: true, className: `text-xs flex-shrink-0 ${email.is_read ? 'text-zinc-500' : 'text-zinc-400'}`, children: formatDate(email.received_at) }))] }, email.id));
                 })) }), snoozeEmailId && (_jsx(SnoozePicker, { emailId: snoozeEmailId, isOpen: true, onClose: () => {
                     setSnoozeEmailId(null);
                     setSnoozePosition(null);

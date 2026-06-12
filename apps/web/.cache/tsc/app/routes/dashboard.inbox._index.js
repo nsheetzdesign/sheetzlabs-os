@@ -10,8 +10,16 @@ import { EmailPreview } from '~/components/inbox/EmailPreview';
 import { ComposeModal } from '~/components/inbox/ComposeModal';
 import { ThreadView } from '~/components/inbox/ThreadView';
 import { KeyboardShortcutsHelp } from '~/components/email/KeyboardShortcutsHelp';
+import { useToasts, ToastContainer } from '~/components/ui/Toast';
 import { useEmailKeyboardShortcuts } from '~/hooks/useEmailKeyboardShortcuts';
 import { useEmailPolling } from '~/hooks/useEmailPolling';
+// Human-readable past-tense labels for the undo toast, keyed by action.
+const UNDO_LABELS = {
+    archive: 'Archived',
+    trash: 'Trashed',
+    spam: 'Marked as spam',
+    snooze: 'Snoozed',
+};
 export const meta = () => [{ title: 'Inbox — Sheetz Labs OS' }];
 export async function loader({ request, context }) {
     const env = context.cloudflare.env;
@@ -231,8 +239,18 @@ export default function Inbox() {
     const visibleReauth = reauthAccounts.filter(a => !dismissedReauth.has(a.id));
     const [searchParams, setSearchParams] = useSearchParams();
     const navigate = useNavigate();
-    const fetcher = useFetcher();
+    // Dedicated fetchers per concern (Part 1) — a single shared fetcher lets a
+    // concurrent submission (e.g. mark-read on open) cancel an in-flight archive.
+    const actionFetcher = useFetcher();
+    const readFetcher = useFetcher();
+    const undoFetcher = useFetcher();
     const revalidator = useRevalidator();
+    const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
+    // Optimistic removal: ids hidden from the list the instant an action fires, kept
+    // hidden until the revalidated loader confirms they're actually gone. On failure
+    // they're un-hidden + an error toast is shown.
+    const [pendingRemoved, setPendingRemoved] = useState(new Set());
+    const lastActionRef = useRef(null);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [selectedIds, setSelectedIds] = useState(new Set());
     const [activeEmail, setActiveEmail] = useState(null);
@@ -250,6 +268,33 @@ export default function Inbox() {
             return emails;
         return emails.filter((e) => (e.triage_category ?? 'other') === triageFilter);
     }, [emails, triageFilter]);
+    // What the list actually renders: triage-filtered minus the optimistically removed.
+    const visibleEmails = useMemo(() => filteredEmails.filter((e) => !pendingRemoved.has(e.id)), [filteredEmails, pendingRemoved]);
+    // Prune the optimistic set once the loader has genuinely dropped an id (no flash:
+    // the id stays hidden while still in `emails`, and leaves the set only once gone).
+    useEffect(() => {
+        const present = new Set(emails.map((e) => e.id));
+        setPendingRemoved((prev) => {
+            const next = new Set([...prev].filter((id) => present.has(id)));
+            return next.size === prev.size ? prev : next;
+        });
+    }, [emails]);
+    // Reconcile a completed action: on failure, un-hide the rows + error toast.
+    useEffect(() => {
+        if (actionFetcher.state !== 'idle' || !actionFetcher.data)
+            return;
+        const data = actionFetcher.data;
+        const last = lastActionRef.current;
+        if ((data.error || (data.failed && data.failed.length)) && last) {
+            setPendingRemoved((prev) => {
+                const next = new Set(prev);
+                last.ids.forEach((id) => next.delete(id));
+                return next;
+            });
+            pushToast({ message: `Couldn't ${last.action} — please retry`, variant: 'error' });
+            lastActionRef.current = null;
+        }
+    }, [actionFetcher.state, actionFetcher.data, pushToast]);
     const triageCounts = useMemo(() => {
         const c = { all: emails.length };
         for (const e of emails) {
@@ -351,30 +396,58 @@ export default function Inbox() {
             return next;
         });
     };
+    // Replay the inverse of an action (write-back makes archive/trash/spam/snooze
+    // reversible). Un-hides instantly; the revalidated loader brings the rows back.
+    const handleUndo = useCallback((action, ids) => {
+        setPendingRemoved((prev) => {
+            const next = new Set(prev);
+            ids.forEach((id) => next.delete(id));
+            return next;
+        });
+        undoFetcher.submit({ action, email_ids: JSON.stringify(ids) }, { method: 'post', action: '/dashboard/inbox/undo' });
+    }, [undoFetcher]);
+    // `z` — undo the most recent undoable action (server resolves "last").
+    const handleUndoLast = useCallback(() => {
+        undoFetcher.submit({}, { method: 'post', action: '/dashboard/inbox/undo' });
+    }, [undoFetcher]);
     const handleBulkAction = useCallback((action, overrideEmailId) => {
         const ids = overrideEmailId
             ? [overrideEmailId]
             : selectedIds.size > 0
                 ? Array.from(selectedIds)
-                : filteredEmails[focusIndex] ? [filteredEmails[focusIndex].id] : [];
+                : visibleEmails[focusIndex] ? [visibleEmails[focusIndex].id] : [];
         if (ids.length === 0)
             return;
-        fetcher.submit({ action, email_ids: JSON.stringify(ids) }, { method: 'post', action: '/dashboard/inbox/bulk' });
-        setSelectedIds(new Set());
-        // If the active email is being removed from the current view, advance or close
         const removesFromView = ['trash', 'archive', 'spam', 'delete'].includes(action);
+        // Optimistic: hide the rows instantly (<100ms perceived). Reconciled by the
+        // revalidated loader; reverted by the error effect if the write-back fails.
+        if (removesFromView) {
+            setPendingRemoved((prev) => new Set([...prev, ...ids]));
+            lastActionRef.current = { action, ids };
+        }
+        actionFetcher.submit({ action, email_ids: JSON.stringify(ids) }, { method: 'post', action: '/dashboard/inbox/bulk' });
+        setSelectedIds(new Set());
+        // Undo toast for reversible folder moves (single + bulk).
+        if (UNDO_LABELS[action]) {
+            const label = UNDO_LABELS[action];
+            pushToast({
+                message: ids.length > 1 ? `${label} ${ids.length} emails` : label,
+                actionLabel: 'Undo',
+                onAction: () => handleUndo(action, ids),
+            });
+        }
+        // If the active email is being removed from the current view, advance or close.
         if (removesFromView && activeEmail && ids.includes(activeEmail.id)) {
-            const currentIndex = filteredEmails.findIndex((e) => e.id === activeEmail.id);
-            const nextEmail = filteredEmails[currentIndex + 1] ?? filteredEmails[currentIndex - 1] ?? null;
+            const currentIndex = visibleEmails.findIndex((e) => e.id === activeEmail.id);
+            const nextEmail = visibleEmails.find((e, i) => i > currentIndex && !ids.includes(e.id)) ??
+                visibleEmails.find((e, i) => i < currentIndex && !ids.includes(e.id)) ??
+                null;
             setActiveEmail(nextEmail);
             setThreadEmails(null);
-            if (nextEmail) {
-                setFocusIndex(currentIndex + 1 < filteredEmails.length - 1 ? currentIndex + 1 : Math.max(0, currentIndex - 1));
-            }
         }
-    }, [selectedIds, filteredEmails, focusIndex, fetcher, activeEmail]);
+    }, [selectedIds, visibleEmails, focusIndex, actionFetcher, activeEmail, pushToast, handleUndo]);
     const markAsRead = (id) => {
-        fetcher.submit({ action: 'read', email_ids: JSON.stringify([id]) }, { method: 'post', action: '/dashboard/inbox/bulk' });
+        readFetcher.submit({ action: 'read', email_ids: JSON.stringify([id]) }, { method: 'post', action: '/dashboard/inbox/bulk' });
     };
     const handleFolderSelect = (newFolder, newAccountId) => {
         const params = new URLSearchParams();
@@ -413,11 +486,11 @@ export default function Inbox() {
             };
             const action = actionMap[target.id];
             if (action) {
-                fetcher.submit({ action, email_ids: JSON.stringify(draggedEmailIds) }, { method: 'post', action: '/dashboard/inbox/bulk' });
+                actionFetcher.submit({ action, email_ids: JSON.stringify(draggedEmailIds) }, { method: 'post', action: '/dashboard/inbox/bulk' });
             }
         }
         else if (target.type === 'label') {
-            fetcher.submit({ action: 'add_label', email_ids: JSON.stringify(draggedEmailIds), label_id: target.id }, { method: 'post', action: '/dashboard/inbox/bulk' });
+            actionFetcher.submit({ action: 'add_label', email_ids: JSON.stringify(draggedEmailIds), label_id: target.id }, { method: 'post', action: '/dashboard/inbox/bulk' });
         }
         setDraggedEmailIds([]);
     };
@@ -473,20 +546,20 @@ export default function Inbox() {
     }, [activeEmail]);
     // Wire up keyboard shortcuts
     useEmailKeyboardShortcuts({
-        emails: filteredEmails,
+        emails: visibleEmails,
         focusIndex,
         setFocusIndex,
         activeEmail,
         onOpenFocused: () => {
-            if (filteredEmails[focusIndex]) {
-                handleOpenEmail(filteredEmails[focusIndex]);
+            if (visibleEmails[focusIndex]) {
+                handleOpenEmail(visibleEmails[focusIndex]);
             }
         },
         onClose: handleClose,
         onBulkAction: handleBulkAction,
         onToggleSelect: () => {
-            if (filteredEmails[focusIndex])
-                toggleSelect(filteredEmails[focusIndex].id);
+            if (visibleEmails[focusIndex])
+                toggleSelect(visibleEmails[focusIndex].id);
         },
         onCompose: () => { setShowCompose(true); setComposeProps(null); },
         onReply: handleReply,
@@ -494,6 +567,9 @@ export default function Inbox() {
         onForward: handleForward,
         onSearch: () => document.getElementById('inbox-search')?.focus(),
         onShowHelp: () => setShowShortcutsHelp(true),
+        onUndo: handleUndoLast,
+        onMarkUnread: () => handleBulkAction('unread'),
+        onGoInbox: () => handleFolderSelect('inbox'),
     });
     return (_jsxs("div", { className: "flex flex-col h-full", children: [visibleReauth.map((acct) => (_jsxs("div", { className: "flex items-center gap-3 px-4 py-2 bg-amber-950/40 border-b border-amber-800/50 text-sm text-amber-200", children: [_jsx(AlertTriangle, { size: 16, className: "shrink-0 text-amber-400" }), _jsxs("span", { className: "flex-1", children: ["Gmail access for ", _jsx("strong", { children: acct.email }), " was revoked \u2014 sync is paused until you reconnect."] }), _jsx(Form, { method: "post", action: "/dashboard/inbox/connect-gmail", children: _jsxs("button", { type: "submit", className: "px-3 py-1 rounded bg-amber-500 text-amber-950 font-medium hover:bg-amber-400 transition-colors", children: ["Reconnect ", acct.email] }) }), _jsx("button", { type: "button", onClick: () => setDismissedReauth((prev) => new Set(prev).add(acct.id)), title: "Dismiss", className: "text-amber-400 hover:text-amber-200", children: _jsx(X, { size: 16 }) })] }, acct.id))), _jsxs("div", { className: "flex flex-1 overflow-hidden", children: [_jsx(InboxSidebar, { accounts: accounts, counts: counts, globalCounts: globalCounts, activeFolder: folder, activeAccountId: accountId, activeLabel: labelId, onSelectFolder: handleFolderSelect, onSelectLabel: handleLabelSelect, onCompose: () => { setComposeProps(null); setShowCompose(true); }, onDragOver: handleDragOver, onDrop: handleDrop }), _jsxs("div", { className: "flex-1 flex overflow-hidden", children: [_jsxs("div", { className: `${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`, children: [_jsxs("div", { className: "p-3 border-b border-zinc-800 flex gap-2", children: [_jsx("form", { onSubmit: handleSearch, className: "flex-1", children: _jsx("input", { id: "inbox-search", type: "text", name: "q", defaultValue: search || '', onChange: handleSearchChange, placeholder: "Search emails\u2026 (try from:alice is:unread)", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500" }) }), _jsx("button", { onClick: handleRefresh, disabled: isRefreshing || revalidator.state === 'loading', title: "Sync emails", className: "flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors", children: _jsx(RefreshCw, { size: 14, className: isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : '' }) })] }), _jsx("div", { className: "flex border-b border-zinc-800 overflow-x-auto scrollbar-none", children: TRIAGE_TABS.map(({ id, label }) => {
                                             const count = triageCounts[id] ?? 0;
@@ -503,7 +579,7 @@ export default function Inbox() {
                                             return (_jsxs("button", { onClick: () => setTriageFilter(id), className: `flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap border-b-2 transition-colors ${isActive
                                                     ? 'border-emerald-500 text-emerald-400'
                                                     : 'border-transparent text-zinc-500 hover:text-zinc-300'}`, children: [_jsx("span", { children: label }), count > 0 && id !== 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count })), id === 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count }))] }, id));
-                                        }) }), _jsx(EmailList, { emails: filteredEmails, selectedIds: selectedIds, activeEmailId: activeEmail?.id ?? null, focusedIndex: focusIndex, onSelect: toggleSelect, onSelectAll: () => setSelectedIds(new Set(filteredEmails.map(e => e.id))), onClearSelection: () => setSelectedIds(new Set()), onOpen: (email) => handleOpenEmail(email), onDragStart: handleDragStart })] }), _jsx("div", { className: `${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`, children: threadEmails && threadEmails.length > 1 ? (_jsx(ThreadView, { emails: threadEmails, onReply: (email) => {
+                                        }) }), _jsx(EmailList, { emails: visibleEmails, selectedIds: selectedIds, activeEmailId: activeEmail?.id ?? null, focusedIndex: focusIndex, onSelect: toggleSelect, onSelectAll: () => setSelectedIds(new Set(visibleEmails.map((e) => e.id))), onClearSelection: () => setSelectedIds(new Set()), onOpen: (email) => handleOpenEmail(email), onDragStart: handleDragStart })] }), _jsx("div", { className: `${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`, children: threadEmails && threadEmails.length > 1 ? (_jsx(ThreadView, { emails: threadEmails, onReply: (email) => {
                                         setComposeProps({ replyTo: email });
                                         setShowCompose(true);
                                     }, onReplyAll: (email) => {
@@ -527,5 +603,5 @@ export default function Inbox() {
                                     }, onForward: () => {
                                         setComposeProps({ replyTo: activeEmail, forward: true });
                                         setShowCompose(true);
-                                    }, onBulkAction: (action) => handleBulkAction(action, activeEmail?.id) })) })] })] }), _jsx(ComposeModal, { isOpen: showCompose, onClose: closeCompose, replyTo: composeProps?.replyTo, replyAll: composeProps?.replyAll, forward: composeProps?.forward, accountId: composeReplyAccount?.id || accounts[0]?.id || '', accountEmail: composeReplyAccount?.email || accounts[0]?.email || '' }), _jsx(KeyboardShortcutsHelp, { isOpen: showShortcutsHelp, onClose: () => setShowShortcutsHelp(false) })] }));
+                                    }, onBulkAction: (action) => handleBulkAction(action, activeEmail?.id) })) })] })] }), _jsx(ComposeModal, { isOpen: showCompose, onClose: closeCompose, replyTo: composeProps?.replyTo, replyAll: composeProps?.replyAll, forward: composeProps?.forward, accountId: composeReplyAccount?.id || accounts[0]?.id || '', accountEmail: composeReplyAccount?.email || accounts[0]?.email || '' }), _jsx(KeyboardShortcutsHelp, { isOpen: showShortcutsHelp, onClose: () => setShowShortcutsHelp(false) }), _jsx(ToastContainer, { toasts: toasts, onDismiss: dismissToast })] }));
 }

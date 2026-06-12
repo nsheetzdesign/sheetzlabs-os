@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Context, Next } from "hono";
+import { isAllowedUser } from "@sheetzlabs/shared";
 
 /**
  * Authentication middleware for the API worker.
@@ -26,6 +27,9 @@ type Bindings = {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
   CRON_SECRET?: string;
+  // Comma-separated single-tenant allowlist (Prompt 54A Part 0). A valid JWT is
+  // not sufficient — the user's email must also be on this list.
+  ALLOWED_USER_EMAILS?: string;
 };
 
 // Exact-path allowlist (no auth required). The OAuth callbacks are exact paths so
@@ -83,6 +87,13 @@ export async function authMiddleware(
 
   if (error || !user) {
     return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  // Single-tenant gate (Prompt 54A Part 0): a valid Supabase JWT is not enough —
+  // the user's email must be on the allowlist, otherwise a self-registered
+  // account could read the founder's data.
+  if (!isAllowedUser(user.email, c.env)) {
+    return c.json({ error: "Forbidden" }, 403);
   }
 
   c.set("userId", user.id);

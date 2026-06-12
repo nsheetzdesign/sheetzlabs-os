@@ -6,6 +6,10 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ENVIRONMENT = "production"
 API_URL = "https://api.sheetzlabs.com"
+# Single-tenant allowlist (Prompt 54A Part 0) — must match the API worker. Web loaders
+# hit Supabase directly with the service key, so the API's check alone is insufficient;
+# non-allowlisted sessions are signed out in requireAuth.
+ALLOWED_USER_EMAILS = "nick@sheetzlabs.com,e2e@sheetzlabs.com"
 
 # Custom domains — Cloudflare provisions DNS + TLS automatically
 [[routes]]

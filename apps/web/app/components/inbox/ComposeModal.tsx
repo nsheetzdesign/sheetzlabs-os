@@ -58,6 +58,26 @@ function dedupeAddresses(addrs: string[]): string[] {
   return out;
 }
 
+// ── Schedule-send presets (Part 2) ───────────────────────────────────────────
+/** Format a Date as a `datetime-local` value (local wall time, no timezone). */
+function toLocalInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function presetTomorrow8am(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(8, 0, 0, 0);
+  return toLocalInput(d);
+}
+function presetMonday8am(): string {
+  const d = new Date();
+  const add = ((8 - d.getDay()) % 7) || 7; // next Monday (never today)
+  d.setDate(d.getDate() + add);
+  d.setHours(8, 0, 0, 0);
+  return toLocalInput(d);
+}
+
 // ── Snippet expansion hook ───────────────────────────────────────────────────
 function useSnippetExpansion(
   textareaRef: React.RefObject<HTMLTextAreaElement>,
@@ -384,9 +404,21 @@ export function ComposeModal({
   accountId,
   accountEmail,
 }: Props) {
-  const fetcher = useFetcher<{ success?: boolean; error?: string; scheduled?: boolean }>();
+  const fetcher = useFetcher<{
+    success?: boolean;
+    error?: string;
+    scheduled?: boolean;
+    undoable?: boolean;
+    draftId?: string;
+    undoMs?: number;
+  }>();
   const draftFetcher = useFetcher<{ draft?: { id: string }; error?: string }>();
+  const cancelFetcher = useFetcher<{ cancelled?: boolean }>();
   const sendingRef = useRef(false);
+  // The in-flight undo-send window (Part 2): the modal stays mounted (content
+  // preserved) showing "Sending — Undo" until the 10s timer closes it.
+  const [pendingSend, setPendingSend] = useState<{ draftId: string } | null>(null);
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [draftId, setDraftId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [savedState, setSavedState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
@@ -397,6 +429,14 @@ export function ComposeModal({
   const [showSchedule, setShowSchedule] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [snippets, setSnippets] = useState<Snippet[]>([]);
+  // Attachments (Part 3): read client-side as base64, 25 MB total cap (Gmail's).
+  const attachFetcher = useFetcher<{ success?: boolean; error?: string }>();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<
+    { name: string; type: string; size: number; dataB64: string }[]
+  >([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
   const [form, setForm] = useState({
     to: '',
     cc: '',
@@ -419,6 +459,9 @@ export function ComposeModal({
     setDraftId(null);
     setSendError(null);
     setSavedState('idle');
+    setPendingSend(null);
+    setAttachments([]);
+    setAttachError(null);
     if (replyTo) {
       if (forward) {
         setForm({
@@ -501,20 +544,126 @@ export function ComposeModal({
     }
   }, [draftFetcher.state, draftFetcher.data]);
 
-  // Close only on a confirmed successful send; keep open with an inline error otherwise.
+  // Reconcile a send (Part 2). A scheduled send closes immediately; a normal send
+  // enters the 10s undo window (modal stays mounted); a failure keeps it open.
   useEffect(() => {
-    if (fetcher.state === 'idle' && sendingRef.current && fetcher.data) {
-      sendingRef.current = false;
-      if (fetcher.data.success) {
+    if (fetcher.state !== 'idle' || !sendingRef.current || !fetcher.data) return;
+    sendingRef.current = false;
+    const data = fetcher.data;
+    if (data.error || !data.success) {
+      setSendError(data.error ?? 'Failed to send. Please try again.');
+      return;
+    }
+    if (data.scheduled) {
+      onClose();
+      return;
+    }
+    if (data.undoable && data.draftId) {
+      setPendingSend({ draftId: data.draftId });
+      if (undoTimer.current) clearTimeout(undoTimer.current);
+      // Hand off to the cron after the window — the modal closes, the draft sends.
+      undoTimer.current = setTimeout(() => {
+        setPendingSend(null);
         onClose();
-      } else {
-        setSendError(fetcher.data.error ?? 'Failed to send. Please try again.');
-      }
+      }, data.undoMs ?? 10_000);
+    } else {
+      onClose();
     }
   }, [fetcher.state, fetcher.data, onClose]);
 
+  // Undo the in-flight send: flip the scheduled draft back to editable and stay open.
+  const handleUndoSend = useCallback(() => {
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    if (pendingSend) {
+      cancelFetcher.submit(
+        { draft_id: pendingSend.draftId },
+        { method: 'post', action: '/dashboard/inbox/cancel-send' },
+      );
+    }
+    setPendingSend(null);
+  }, [pendingSend, cancelFetcher]);
+
+  // Clear the timer on unmount.
+  useEffect(() => () => { if (undoTimer.current) clearTimeout(undoTimer.current); }, []);
+
+  // Escape closes the compose modal (Part 7 a11y). The global inbox shortcuts are
+  // disabled while it's open, so this is the topmost handler.
+  useEffect(() => {
+    if (!isOpen || isMinimized) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !pendingSend) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        // Let a focused field blur first; a second Escape closes.
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, isMinimized, pendingSend, onClose]);
+
+  // Read picked files to base64; enforce the 25 MB total cap.
+  const handleFiles = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setAttachError(null);
+    const read = await Promise.all(
+      Array.from(files).map(
+        (f) =>
+          new Promise<{ name: string; type: string; size: number; dataB64: string }>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const res = String(reader.result);
+              resolve({ name: f.name, type: f.type || 'application/octet-stream', size: f.size, dataB64: res.slice(res.indexOf(',') + 1) });
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(f);
+          }),
+      ),
+    );
+    setAttachments((prev) => {
+      const next = [...prev, ...read];
+      if (next.reduce((s, a) => s + a.size, 0) > MAX_ATTACH_BYTES) {
+        setAttachError('Attachments exceed 25 MB');
+        return prev;
+      }
+      return next;
+    });
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removeAttachment = (i: number) =>
+    setAttachments((prev) => prev.filter((_, idx) => idx !== i));
+
+  // Reconcile a with-attachments (immediate) send.
+  useEffect(() => {
+    if (attachFetcher.state !== 'idle' || !attachFetcher.data) return;
+    if (attachFetcher.data.success) onClose();
+    else if (attachFetcher.data.error) setSendError(attachFetcher.data.error);
+  }, [attachFetcher.state, attachFetcher.data, onClose]);
+
+  const splitAddrs = (v: string) => v.split(',').map((s) => s.trim()).filter(Boolean);
+
   const handleSend = () => {
     setSendError(null);
+
+    // Attachments → immediate multipart/mixed send (no undo window).
+    if (attachments.length) {
+      attachFetcher.submit(
+        {
+          account_id: accountId,
+          to_emails: splitAddrs(form.to),
+          cc_emails: splitAddrs(form.cc),
+          subject: form.subject,
+          body_text: form.body,
+          reply_to_email_id: replyTo?.id ?? null,
+          attachments: attachments.map((a) => ({ filename: a.name, mimeType: a.type, dataB64: a.dataB64 })),
+        },
+        { method: 'post', action: '/dashboard/inbox/send-attachments', encType: 'application/json' },
+      );
+      return;
+    }
+
     sendingRef.current = true;
     fetcher.submit(
       {
@@ -589,7 +738,7 @@ export function ComposeModal({
     : 'fixed bottom-0 right-4 z-50 w-[560px] max-h-[80vh]';
 
   return (
-    <div className={modalClasses}>
+    <div className={modalClasses} role="dialog" aria-modal="true" aria-label={replyTo ? (forward ? 'Forward email' : 'Reply to email') : 'New message'}>
       <div className="flex h-full flex-col rounded-t-lg border border-zinc-700 bg-zinc-900 shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between rounded-t-lg bg-zinc-800 px-4 py-2">
@@ -668,11 +817,49 @@ export function ComposeModal({
             )}
           </div>
 
-          {/* Schedule picker */}
+          {/* Attachment chips (Part 3) */}
+          {(attachments.length > 0 || attachError) && (
+            <div className="border-t border-zinc-800 px-4 py-2">
+              {attachError && <p className="mb-1 text-xs text-red-400">{attachError}</p>}
+              <div className="flex flex-wrap gap-2">
+                {attachments.map((a, i) => (
+                  <span
+                    key={`${a.name}-${i}`}
+                    className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-2 py-1 text-xs text-zinc-200"
+                  >
+                    <Paperclip size={12} className="text-zinc-400" />
+                    <span className="max-w-[160px] truncate">{a.name}</span>
+                    <span className="text-zinc-500">{Math.max(1, Math.round(a.size / 1024))} KB</span>
+                    <button
+                      onClick={() => removeAttachment(i)}
+                      aria-label={`Remove ${a.name}`}
+                      className="text-zinc-500 hover:text-red-400"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Schedule picker (Part 2) — quick presets + custom */}
           {showSchedule && (
             <div className="border-t border-zinc-800 bg-zinc-800/50 px-4 py-2">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-zinc-400">Schedule for:</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm text-zinc-400">Schedule:</span>
+                <button
+                  onClick={() => setForm((f) => ({ ...f, scheduled_for: presetTomorrow8am() }))}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs hover:border-emerald-600"
+                >
+                  Tomorrow 8 AM
+                </button>
+                <button
+                  onClick={() => setForm((f) => ({ ...f, scheduled_for: presetMonday8am() }))}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs hover:border-emerald-600"
+                >
+                  Monday 8 AM
+                </button>
                 <input
                   type="datetime-local"
                   value={form.scheduled_for}
@@ -686,6 +873,24 @@ export function ComposeModal({
                   Cancel
                 </button>
               </div>
+              {form.scheduled_for && (
+                <p className="mt-1 text-xs text-emerald-400">
+                  Will send {new Date(form.scheduled_for).toLocaleString()}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Sending — Undo (Part 2): 10s window before the cron sends it. */}
+          {pendingSend && (
+            <div className="flex items-center justify-between border-t border-emerald-900/50 bg-emerald-950/40 px-4 py-2 text-sm text-emerald-200">
+              <span>Sending…</span>
+              <button
+                onClick={handleUndoSend}
+                className="font-semibold text-emerald-300 hover:text-emerald-100"
+              >
+                Undo
+              </button>
             </div>
           )}
 
@@ -701,11 +906,11 @@ export function ComposeModal({
             <div className="flex items-center gap-2">
               <button
                 onClick={handleSend}
-                disabled={!form.to || fetcher.state !== 'idle'}
+                disabled={!form.to || fetcher.state !== 'idle' || attachFetcher.state !== 'idle' || !!pendingSend}
                 className="flex items-center gap-2 rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
               >
                 <Send size={14} />
-                {fetcher.state !== 'idle'
+                {pendingSend || fetcher.state !== 'idle' || attachFetcher.state !== 'idle'
                   ? 'Sending…'
                   : form.scheduled_for
                     ? 'Schedule'
@@ -735,7 +940,19 @@ export function ComposeModal({
                 }}
               />
               <SaveAsTemplateButton subject={form.subject} body={form.body} />
-              <button className="rounded p-1.5 hover:bg-zinc-800" title="Attach files">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => handleFiles(e.target.files)}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded p-1.5 hover:bg-zinc-800"
+                title="Attach files"
+                aria-label="Attach files"
+              >
                 <Paperclip size={16} />
               </button>
               <button

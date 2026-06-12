@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { executeAgent, postToLinkedIn } from "./lib/agent-engine";
 import { reminderEmail } from "./lib/booking-emails";
 import { sendBookingEmail } from "./lib/send-booking-email";
-import { runEmailSync } from "./routes/email";
+import { runEmailSync, processScheduledSends } from "./routes/email";
 import { getValidAccessToken as getGoogleAccessToken, ReauthRequiredError } from "./lib/google-auth";
 import { syncCalendarAccount } from "./lib/calendar-sync";
 
@@ -89,6 +89,10 @@ export default {
     // Unsnooze emails every minute — in TS so each restore writes back to Gmail
     // and returns the message to its original folder (ES-9).
     ctx.waitUntil(unsnoozeEmails(env, supabase));
+
+    // Send due scheduled drafts + undo-send (+10s) drafts every minute, and
+    // crash-recover any stuck "sending" rows (Prompt 54A Part 2).
+    ctx.waitUntil(processScheduledSends(env, supabase).then(() => undefined));
 
     // Sweep expired OAuth state nonces every minute (Prompt 51B).
     ctx.waitUntil(

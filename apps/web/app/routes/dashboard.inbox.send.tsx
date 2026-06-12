@@ -20,11 +20,21 @@ export async function action({ request, context }: ActionFunctionArgs) {
   const subject = (form.get('subject') as string) ?? '';
   const body = (form.get('body') as string) ?? '';
   const reply_to_id = (form.get('reply_to_id') as string) || '';
-  const scheduled_for = (form.get('scheduled_for') as string) || '';
+  const send_at_input = (form.get('scheduled_for') as string) || '';
   const mode = (form.get('action') as string) || 'send';
 
   if (!account_id) return Response.json({ error: 'No account selected' }, { status: 400 });
   if (!to_emails.length) return Response.json({ error: 'Add at least one recipient' }, { status: 400 });
+
+  // Undo-send (Prompt 54A Part 2): every send is persisted as a `scheduled` draft.
+  // A normal send is scheduled 10s out so the user can undo; an explicit schedule
+  // uses the chosen time. The every-minute cron claims due drafts and sends them
+  // through the real send path — no separate "fake sent" insert.
+  const UNDO_WINDOW_MS = 10_000;
+  const send_at =
+    mode === 'schedule' && send_at_input
+      ? new Date(send_at_input).toISOString()
+      : new Date(Date.now() + UNDO_WINDOW_MS).toISOString();
 
   const draftPayload: Record<string, unknown> = {
     account_id,
@@ -32,52 +42,28 @@ export async function action({ request, context }: ActionFunctionArgs) {
     cc_emails,
     subject,
     body_text: body,
-    status: 'draft',
+    status: 'scheduled',
+    send_at,
+    last_auto_saved_at: new Date().toISOString(),
   };
   if (reply_to_id) draftPayload.reply_to_email_id = reply_to_id;
 
-  // Scheduled send is not yet wired to a cron (EC-4 → Prompt 54). Persist the draft
-  // with its target time so it isn't lost, and tell the user it's queued.
-  if (mode === 'schedule' && scheduled_for) {
-    draftPayload.status = 'scheduled';
-    draftPayload.scheduled_for = scheduled_for;
-    const res = await apiFetch(request, env, '/email/drafts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(draftPayload),
-    });
-    if (!res.ok) return Response.json({ error: 'Failed to schedule email' }, { status: 502 });
-    return Response.json({ success: true, scheduled: true });
-  }
-
-  // 1. Create the draft.
-  const createRes = await apiFetch(request, env, '/email/drafts', {
+  const res = await apiFetch(request, env, '/email/drafts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(draftPayload),
   });
-  if (!createRes.ok) {
-    return Response.json({ error: 'Could not create the message' }, { status: 502 });
+  if (!res.ok) {
+    return Response.json({ error: 'Could not queue the message' }, { status: 502 });
   }
-  const { draft } = (await createRes.json()) as { draft?: { id: string } };
+  const { draft } = (await res.json()) as { draft?: { id: string } };
   if (!draft?.id) {
-    return Response.json({ error: 'Could not create the message' }, { status: 502 });
+    return Response.json({ error: 'Could not queue the message' }, { status: 502 });
   }
 
-  // 2. Send it.
-  const sendRes = await apiFetch(request, env, `/email/drafts/${draft.id}/send`, {
-    method: 'POST',
-  });
-  if (!sendRes.ok) {
-    const data = (await sendRes.json().catch(() => ({}))) as { error?: string; needs_reauth?: boolean };
-    if (data.needs_reauth) {
-      return Response.json(
-        { error: 'This account needs to be reconnected before you can send.' },
-        { status: 409 }
-      );
-    }
-    return Response.json({ error: data.error ?? 'Failed to send. Please try again.' }, { status: 502 });
+  if (mode === 'schedule' && send_at_input) {
+    return Response.json({ success: true, scheduled: true, draftId: draft.id, sendAt: send_at });
   }
-
-  return Response.json({ success: true });
+  // Normal send: client shows a 10s "Sending — Undo" affordance keyed on draftId.
+  return Response.json({ success: true, undoable: true, draftId: draft.id, undoMs: UNDO_WINDOW_MS });
 }

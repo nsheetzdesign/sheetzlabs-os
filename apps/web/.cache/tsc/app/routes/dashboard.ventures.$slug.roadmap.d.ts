@@ -18,7 +18,7 @@ export declare function loader({ params, context }: LoaderFunctionArgs): Promise
         title: string;
         status: "backlog" | "todo" | "in-progress" | "review" | "done" | "blocked" | null;
         milestone_id: string | null;
-        priority: "medium" | "urgent" | "high" | "low" | null;
+        priority: "urgent" | "high" | "medium" | "low" | null;
     }[];
 }>;
 export declare function action({ request, params, context }: ActionFunctionArgs): Promise<import("react-router").UNSAFE_DataWithResponseInit<{

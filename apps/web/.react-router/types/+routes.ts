@@ -230,6 +230,9 @@ type Pages = {
   "/dashboard/inbox/bulk": {
     params: {};
   };
+  "/dashboard/inbox/undo": {
+    params: {};
+  };
   "/dashboard/inbox/snippets": {
     params: {};
   };
@@ -293,7 +296,7 @@ type Pages = {
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/api/*" | "/book/:slug" | "/book/cancel/:bookingId" | "/book/reschedule/:bookingId" | "/auth/login" | "/auth/logout" | "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/pipeline" | "/dashboard/ventures/pipeline/new" | "/dashboard/ventures/pipeline/:id" | "/dashboard/ventures/pipeline/:id/evaluation" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/captures" | "/dashboard/knowledge/feeds" | "/dashboard/knowledge/content" | "/dashboard/knowledge/content/new" | "/dashboard/knowledge/content/:id" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/performance" | "/dashboard/agents/:slug" | "/dashboard/calendar" | "/dashboard/calendar/booking-links" | "/dashboard/calendar/bookings" | "/dashboard/calendar/:id" | "/dashboard/inbox" | "/dashboard/inbox/connect-gmail" | "/dashboard/inbox/sync" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/send" | "/dashboard/inbox/drafts" | "/dashboard/inbox/labels" | "/dashboard/inbox/bulk" | "/dashboard/inbox/snippets" | "/dashboard/inbox/templates" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/inbox/:id/snooze" | "/dashboard/learning" | "/dashboard/learning/progress" | "/dashboard/learning/tutor" | "/dashboard/learning/generate" | "/dashboard/learning/path/:slug" | "/dashboard/learning/lesson/:id" | "/dashboard/chat" | "/dashboard/analytics" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
+    page: "/" | "/api/*" | "/book/:slug" | "/book/cancel/:bookingId" | "/book/reschedule/:bookingId" | "/auth/login" | "/auth/logout" | "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/pipeline" | "/dashboard/ventures/pipeline/new" | "/dashboard/ventures/pipeline/:id" | "/dashboard/ventures/pipeline/:id/evaluation" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/captures" | "/dashboard/knowledge/feeds" | "/dashboard/knowledge/content" | "/dashboard/knowledge/content/new" | "/dashboard/knowledge/content/:id" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/performance" | "/dashboard/agents/:slug" | "/dashboard/calendar" | "/dashboard/calendar/booking-links" | "/dashboard/calendar/bookings" | "/dashboard/calendar/:id" | "/dashboard/inbox" | "/dashboard/inbox/connect-gmail" | "/dashboard/inbox/sync" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/send" | "/dashboard/inbox/drafts" | "/dashboard/inbox/labels" | "/dashboard/inbox/bulk" | "/dashboard/inbox/undo" | "/dashboard/inbox/snippets" | "/dashboard/inbox/templates" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/inbox/:id/snooze" | "/dashboard/learning" | "/dashboard/learning/progress" | "/dashboard/learning/tutor" | "/dashboard/learning/generate" | "/dashboard/learning/path/:slug" | "/dashboard/learning/lesson/:id" | "/dashboard/chat" | "/dashboard/analytics" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
   };
   "routes/_marketing.tsx": {
     id: "routes/_marketing";
@@ -329,7 +332,7 @@ type RouteFiles = {
   };
   "routes/dashboard.tsx": {
     id: "routes/dashboard";
-    page: "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/pipeline" | "/dashboard/ventures/pipeline/new" | "/dashboard/ventures/pipeline/:id" | "/dashboard/ventures/pipeline/:id/evaluation" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/captures" | "/dashboard/knowledge/feeds" | "/dashboard/knowledge/content" | "/dashboard/knowledge/content/new" | "/dashboard/knowledge/content/:id" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/performance" | "/dashboard/agents/:slug" | "/dashboard/calendar" | "/dashboard/calendar/booking-links" | "/dashboard/calendar/bookings" | "/dashboard/calendar/:id" | "/dashboard/inbox" | "/dashboard/inbox/connect-gmail" | "/dashboard/inbox/sync" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/send" | "/dashboard/inbox/drafts" | "/dashboard/inbox/labels" | "/dashboard/inbox/bulk" | "/dashboard/inbox/snippets" | "/dashboard/inbox/templates" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/inbox/:id/snooze" | "/dashboard/learning" | "/dashboard/learning/progress" | "/dashboard/learning/tutor" | "/dashboard/learning/generate" | "/dashboard/learning/path/:slug" | "/dashboard/learning/lesson/:id" | "/dashboard/chat" | "/dashboard/analytics" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
+    page: "/dashboard" | "/dashboard/ventures" | "/dashboard/ventures/new" | "/dashboard/ventures/pipeline" | "/dashboard/ventures/pipeline/new" | "/dashboard/ventures/pipeline/:id" | "/dashboard/ventures/pipeline/:id/evaluation" | "/dashboard/ventures/:slug" | "/dashboard/ventures/:slug/stack" | "/dashboard/ventures/:slug/links" | "/dashboard/ventures/:slug/roadmap" | "/dashboard/ventures/:slug/tickets" | "/dashboard/ventures/:slug/tasks" | "/dashboard/ventures/:slug/docs" | "/dashboard/revenue" | "/dashboard/revenue/new" | "/dashboard/expenses" | "/dashboard/expenses/new" | "/dashboard/expenses/:id" | "/dashboard/tickets" | "/dashboard/relationships" | "/dashboard/relationships/new" | "/dashboard/relationships/:id" | "/dashboard/tasks" | "/dashboard/tasks/new" | "/dashboard/tasks/:id" | "/dashboard/knowledge" | "/dashboard/knowledge/new" | "/dashboard/knowledge/captures" | "/dashboard/knowledge/feeds" | "/dashboard/knowledge/content" | "/dashboard/knowledge/content/new" | "/dashboard/knowledge/content/:id" | "/dashboard/knowledge/:slug" | "/dashboard/agents" | "/dashboard/agents/runs" | "/dashboard/agents/runs/:id" | "/dashboard/agents/content" | "/dashboard/agents/performance" | "/dashboard/agents/:slug" | "/dashboard/calendar" | "/dashboard/calendar/booking-links" | "/dashboard/calendar/bookings" | "/dashboard/calendar/:id" | "/dashboard/inbox" | "/dashboard/inbox/connect-gmail" | "/dashboard/inbox/sync" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/send" | "/dashboard/inbox/drafts" | "/dashboard/inbox/labels" | "/dashboard/inbox/bulk" | "/dashboard/inbox/undo" | "/dashboard/inbox/snippets" | "/dashboard/inbox/templates" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/inbox/:id/snooze" | "/dashboard/learning" | "/dashboard/learning/progress" | "/dashboard/learning/tutor" | "/dashboard/learning/generate" | "/dashboard/learning/path/:slug" | "/dashboard/learning/lesson/:id" | "/dashboard/chat" | "/dashboard/analytics" | "/dashboard/settings" | "/dashboard/settings/stripe" | "/dashboard/settings/expenses";
   };
   "routes/dashboard._index.tsx": {
     id: "routes/dashboard._index";
@@ -561,7 +564,7 @@ type RouteFiles = {
   };
   "routes/dashboard.inbox.tsx": {
     id: "routes/dashboard.inbox";
-    page: "/dashboard/inbox" | "/dashboard/inbox/connect-gmail" | "/dashboard/inbox/sync" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/send" | "/dashboard/inbox/drafts" | "/dashboard/inbox/labels" | "/dashboard/inbox/bulk" | "/dashboard/inbox/snippets" | "/dashboard/inbox/templates" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/inbox/:id/snooze";
+    page: "/dashboard/inbox" | "/dashboard/inbox/connect-gmail" | "/dashboard/inbox/sync" | "/dashboard/inbox/draft-ai" | "/dashboard/inbox/send" | "/dashboard/inbox/drafts" | "/dashboard/inbox/labels" | "/dashboard/inbox/bulk" | "/dashboard/inbox/undo" | "/dashboard/inbox/snippets" | "/dashboard/inbox/templates" | "/dashboard/inbox/:id" | "/dashboard/inbox/:id/star" | "/dashboard/inbox/:id/snooze";
   };
   "routes/dashboard.inbox._index.tsx": {
     id: "routes/dashboard.inbox._index";
@@ -594,6 +597,10 @@ type RouteFiles = {
   "routes/dashboard.inbox.bulk.tsx": {
     id: "routes/dashboard.inbox.bulk";
     page: "/dashboard/inbox/bulk";
+  };
+  "routes/dashboard.inbox.undo.tsx": {
+    id: "routes/dashboard.inbox.undo";
+    page: "/dashboard/inbox/undo";
   };
   "routes/dashboard.inbox.snippets.tsx": {
     id: "routes/dashboard.inbox.snippets";
@@ -742,6 +749,7 @@ type RouteModules = {
   "routes/dashboard.inbox.drafts": typeof import("./app/routes/dashboard.inbox.drafts.tsx");
   "routes/dashboard.inbox.labels": typeof import("./app/routes/dashboard.inbox.labels.tsx");
   "routes/dashboard.inbox.bulk": typeof import("./app/routes/dashboard.inbox.bulk.tsx");
+  "routes/dashboard.inbox.undo": typeof import("./app/routes/dashboard.inbox.undo.tsx");
   "routes/dashboard.inbox.snippets": typeof import("./app/routes/dashboard.inbox.snippets.tsx");
   "routes/dashboard.inbox.templates": typeof import("./app/routes/dashboard.inbox.templates.tsx");
   "routes/dashboard.inbox.$id": typeof import("./app/routes/dashboard.inbox.$id.tsx");

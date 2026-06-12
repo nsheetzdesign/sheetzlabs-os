@@ -1,24 +1,19 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useFetcher } from 'react-router';
 import {
   Star, Archive, Trash2, Clock, MoreHorizontal,
   CheckSquare, Square, Paperclip, RefreshCw,
 } from 'lucide-react';
 import { SnoozePicker } from './SnoozePicker';
+import type { Email as EmailRow, EmailLabelView } from '@sheetzlabs/shared';
 
-export interface Email {
-  id: string;
-  subject: string | null;
-  from_name: string | null;
-  from_email: string | null;
-  snippet: string | null;
-  received_at: string | null;
-  is_read: boolean;
-  is_starred: boolean;
-  has_attachments: boolean;
-  thread_id: string | null;
-  labels?: { id: string; name: string; color: string }[];
-}
+// View model derived from the canonical shared Email row (Part 7, XC-4) — the
+// previously-divergent local interface is gone.
+export type Email = Pick<
+  EmailRow,
+  'id' | 'subject' | 'from_name' | 'from_email' | 'snippet' | 'received_at'
+  | 'is_read' | 'is_starred' | 'has_attachments' | 'thread_id'
+> & { labels?: EmailLabelView[] };
 
 interface Props {
   emails: Email[];
@@ -30,6 +25,10 @@ interface Props {
   onClearSelection: () => void;
   onOpen: (email: Email) => void;
   onDragStart: (e: React.DragEvent, emailIds: string[]) => void;
+  /** Route actions through the parent's optimistic path (Part 1). */
+  onAction?: (action: string, emailId?: string) => void;
+  /** Select an explicit range of ids (shift-click). */
+  onSelectRange?: (ids: string[]) => void;
 }
 
 export function EmailList({
@@ -42,15 +41,29 @@ export function EmailList({
   onClearSelection,
   onOpen,
   onDragStart,
+  onAction,
+  onSelectRange,
 }: Props) {
   const fetcher = useFetcher();
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [snoozeEmailId, setSnoozeEmailId] = useState<string | null>(null);
   const [snoozePosition, setSnoozePosition] = useState<{ x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const focusedRef = useRef<HTMLDivElement>(null);
+  // Anchor index for shift-click range selection.
+  const anchorIndex = useRef<number | null>(null);
+
+  // Keep the keyboard-focused row visible while j/k scrolls (Part 5, EU-12/14).
+  useEffect(() => {
+    focusedRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [focusedIndex]);
 
   const handleBulkAction = (action: string) => {
     if (selectedIds.size === 0) return;
+    if (onAction) {
+      onAction(action);
+      return;
+    }
     fetcher.submit(
       { action, email_ids: JSON.stringify(Array.from(selectedIds)) },
       { method: 'post', action: '/dashboard/inbox/bulk' }
@@ -60,10 +73,26 @@ export function EmailList({
 
   const handleQuickAction = (e: React.MouseEvent, emailId: string, action: string) => {
     e.stopPropagation();
+    if (onAction) {
+      onAction(action, emailId);
+      return;
+    }
     fetcher.submit(
       { action, email_ids: JSON.stringify([emailId]) },
       { method: 'post', action: '/dashboard/inbox/bulk' }
     );
+  };
+
+  // Checkbox click: shift extends from the anchor; plain click toggles + re-anchors.
+  const handleCheckbox = (e: React.MouseEvent, index: number, id: string) => {
+    e.stopPropagation();
+    if (e.shiftKey && anchorIndex.current !== null && onSelectRange) {
+      const [lo, hi] = [anchorIndex.current, index].sort((a, b) => a - b);
+      onSelectRange(emails.slice(lo, hi + 1).map((em) => em.id));
+    } else {
+      anchorIndex.current = index;
+      onSelect(id, e.shiftKey);
+    }
   };
 
   const handleDragStart = (e: React.DragEvent, email: Email) => {
@@ -159,7 +188,11 @@ export function EmailList({
             return (
               <div
                 key={email.id}
+                ref={isFocused ? focusedRef : undefined}
                 data-testid="email-row"
+                role="button"
+                tabIndex={-1}
+                aria-label={`${email.is_read ? '' : 'Unread, '}${email.from_name || email.from_email}: ${email.subject || '(no subject)'}`}
                 draggable
                 onDragStart={(e) => handleDragStart(e, email)}
                 onClick={() => onOpen(email)}
@@ -177,11 +210,9 @@ export function EmailList({
               >
                 {/* Checkbox */}
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSelect(email.id, e.shiftKey);
-                  }}
+                  onClick={(e) => handleCheckbox(e, index, email.id)}
                   className="p-0.5"
+                  aria-label={isSelected ? 'Deselect' : 'Select'}
                 >
                   {isSelected ? (
                     <CheckSquare size={16} className="text-emerald-400" />

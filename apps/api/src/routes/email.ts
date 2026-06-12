@@ -415,20 +415,37 @@ async function fetchRfcHeaders(
   return { messageId: get("Message-ID"), references: get("References") };
 }
 
-email.post("/drafts/:id/send", async (c) => {
-  const { id } = c.req.param();
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+type SendResult = { status: number; body: Record<string, unknown> };
+type SendAttachment = { filename: string; mimeType: string; dataB64: string };
 
+/** Wrap a base64 string at 76-char lines (RFC 2045). */
+function wrapBase64(b64: string): string {
+  return b64.replace(/[\r\n]/g, "").replace(/.{1,76}/g, "$&\r\n").trimEnd();
+}
+
+/**
+ * Send a single draft (Prompt 54A Part 2 extraction). Shared by POST
+ * /drafts/:id/send, the scheduled-send cron, and the with-attachments path.
+ * Marks the draft `sending`, writes to Gmail, then records the sent message +
+ * interaction. Leaves the draft recoverable (`draft`/`failed`) on any failure so
+ * it's never stuck `sending` (EC-7).
+ */
+async function sendDraftById(
+  supabase: any, // loose like the rest of this file (typed client resolves tables to never)
+  env: Bindings,
+  id: string,
+  attachments?: SendAttachment[],
+): Promise<SendResult> {
   const { data: draft } = await supabase
     .from("email_drafts")
     .select("*, email_accounts(*)")
     .eq("id", id)
     .single();
 
-  if (!draft) return c.json({ error: "Draft not found" }, 404);
+  if (!draft) return { status: 404, body: { error: "Draft not found" } };
 
   if (!(draft.to_emails ?? []).length) {
-    return c.json({ error: "At least one recipient is required" }, 400);
+    return { status: 400, body: { error: "At least one recipient is required" } };
   }
 
   await supabase.from("email_drafts").update({ status: "sending" }).eq("id", id);
@@ -438,13 +455,13 @@ email.post("/drafts/:id/send", async (c) => {
 
   let accessToken: string;
   try {
-    accessToken = await getValidAccessToken(account, c.env, supabase);
+    accessToken = await getValidAccessToken(account, env, supabase);
   } catch (err) {
     // Leave the draft recoverable rather than stuck "sending" (EC-7).
     await supabase.from("email_drafts").update({ status: "draft" }).eq("id", id);
     if (err instanceof ReauthRequiredError)
-      return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
-    return c.json({ error: err instanceof Error ? err.message : "Authentication failed" }, 502);
+      return { status: 409, body: { error: "Account needs reconnection", needs_reauth: true } };
+    return { status: 502, body: { error: err instanceof Error ? err.message : "Authentication failed" } };
   }
 
   // ── Reply threading (EC-1) ──────────────────────────────────────────────
@@ -500,33 +517,59 @@ email.post("/drafts/:id/send", async (c) => {
     references ? `References: ${references}` : "",
   ].filter(Boolean);
 
-  let rawMessage: string;
+  const safeId = id.replace(/[^a-z0-9]/gi, "");
+
+  // The body content (without the top RFC822 headers): either a multipart/alternative
+  // block (HTML + text) or a single text/plain part.
+  let bodyContentType: string;
+  let bodyBlock: string;
   if (bodyHtml && bodyHtml.trim()) {
-    // HTML multipart/alternative (EC-6). Body parts carry raw UTF-8; the whole
-    // message is base64url-encoded for transport, so no inner CTE is needed.
-    const boundary = `sl_boundary_${id.replace(/[^a-z0-9]/gi, "")}`;
-    rawMessage = [
-      ...headerLines,
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      "",
-      `--${boundary}`,
+    const altBoundary = `sl_alt_${safeId}`;
+    bodyContentType = `multipart/alternative; boundary="${altBoundary}"`;
+    bodyBlock = [
+      `--${altBoundary}`,
       "Content-Type: text/plain; charset=utf-8",
       "",
       bodyText,
-      `--${boundary}`,
+      `--${altBoundary}`,
       "Content-Type: text/html; charset=utf-8",
       "",
       bodyHtml,
-      `--${boundary}--`,
-      "",
+      `--${altBoundary}--`,
     ].join("\r\n");
   } else {
-    rawMessage = [
+    bodyContentType = "text/plain; charset=utf-8";
+    bodyBlock = bodyText;
+  }
+
+  let rawMessage: string;
+  if (attachments && attachments.length) {
+    // multipart/mixed: the body block, then each attachment as a base64 part (EC-5).
+    const mixBoundary = `sl_mix_${safeId}`;
+    const parts: string[] = [
       ...headerLines,
-      "Content-Type: text/plain; charset=utf-8",
+      `Content-Type: multipart/mixed; boundary="${mixBoundary}"`,
       "",
-      bodyText,
-    ].join("\r\n");
+      `--${mixBoundary}`,
+      `Content-Type: ${bodyContentType}`,
+      "",
+      bodyBlock,
+    ];
+    for (const att of attachments) {
+      const name = att.filename.replace(/["\r\n]/g, "");
+      parts.push(
+        `--${mixBoundary}`,
+        `Content-Type: ${att.mimeType || "application/octet-stream"}; name="${name}"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: attachment; filename="${name}"`,
+        "",
+        wrapBase64(att.dataB64),
+      );
+    }
+    parts.push(`--${mixBoundary}--`, "");
+    rawMessage = parts.join("\r\n");
+  } else {
+    rawMessage = [...headerLines, `Content-Type: ${bodyContentType}`, "", bodyBlock].join("\r\n");
   }
 
   const encoded = base64UrlEncode(rawMessage);
@@ -543,7 +586,7 @@ email.post("/drafts/:id/send", async (c) => {
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     await supabase.from("email_drafts").update({ status: "failed" }).eq("id", id);
-    return c.json({ error: `Failed to send (${response.status})`, detail }, 502);
+    return { status: 502, body: { error: `Failed to send (${response.status})`, detail } };
   }
 
   const sent = (await response.json()) as { id?: string; threadId?: string };
@@ -593,8 +636,126 @@ email.post("/drafts/:id/send", async (c) => {
     }
   }
 
-  return c.json({ success: true, id: sent.id, threadId: sent.threadId });
+  return { status: 200, body: { success: true, id: sent.id, threadId: sent.threadId } };
+}
+
+email.post("/drafts/:id/send", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const r = await sendDraftById(supabase, c.env, id);
+  return c.json(r.body, r.status as 200);
 });
+
+// Cancel an in-flight undo-send / scheduled draft (Prompt 54A Part 2). Only flips
+// back to an editable draft if it hasn't already been claimed/sent by the cron.
+email.post("/drafts/:id/cancel-send", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const { data } = await supabase
+    .from("email_drafts")
+    .update({ status: "draft", send_at: null })
+    .eq("id", id)
+    .eq("status", "scheduled")
+    .select("id")
+    .maybeSingle();
+  if (!data) return c.json({ error: "Already sent or not cancellable", cancelled: false }, 409);
+  return c.json({ success: true, cancelled: true });
+});
+
+// Send immediately WITH attachments (Prompt 54A Part 3). Attachment bytes aren't
+// persisted, so these can't ride the +10s scheduled-send path — they send now (no
+// undo window). 25 MB total cap, mirroring Gmail.
+email.post("/send-with-attachments", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const body = await c.req.json<{
+    account_id?: string;
+    to_emails?: string[];
+    cc_emails?: string[];
+    subject?: string;
+    body_text?: string;
+    reply_to_email_id?: string | null;
+    attachments?: SendAttachment[];
+  }>();
+
+  if (!body.account_id) return c.json({ error: "account_id required" }, 400);
+  if (!body.to_emails?.length) return c.json({ error: "At least one recipient is required" }, 400);
+
+  const totalBytes = (body.attachments ?? []).reduce(
+    (sum, a) => sum + Math.ceil(((a.dataB64?.length ?? 0) * 3) / 4),
+    0,
+  );
+  if (totalBytes > 25 * 1024 * 1024) return c.json({ error: "Attachments exceed 25 MB" }, 413);
+
+  const { data: draft } = await supabase
+    .from("email_drafts")
+    .insert({
+      account_id: body.account_id,
+      to_emails: body.to_emails,
+      cc_emails: body.cc_emails ?? [],
+      subject: body.subject ?? "",
+      body_text: body.body_text ?? "",
+      status: "draft",
+      reply_to_email_id: body.reply_to_email_id ?? null,
+    })
+    .select("id")
+    .single();
+  if (!draft) return c.json({ error: "Could not create draft" }, 502);
+
+  const r = await sendDraftById(supabase, c.env, draft.id as string, body.attachments);
+  return c.json(r.body, r.status as 200);
+});
+
+/**
+ * Scheduled-send cron (Prompt 54A Part 2). Every minute:
+ *  1. crash-recovery — reset drafts stuck `sending` > 5 min back to `draft` (EC-7);
+ *  2. claim each due `scheduled` draft atomically (status flip RETURNING) so two
+ *     concurrent ticks never double-send, then send via the shared path.
+ * Per-row try/catch; one bad draft never blocks the rest.
+ */
+export async function processScheduledSends(
+  env: Bindings,
+  supabase: any, // loose like the rest of this file (typed client resolves tables to never)
+): Promise<number> {
+  const nowIso = new Date().toISOString();
+  const staleIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+  // (1) Crash recovery: unstick drafts left "sending" by a crashed run.
+  await supabase
+    .from("email_drafts")
+    .update({ status: "draft" })
+    .eq("status", "sending")
+    .lt("last_auto_saved_at", staleIso);
+
+  const { data: due } = await supabase
+    .from("email_drafts")
+    .select("id")
+    .eq("status", "scheduled")
+    .lte("send_at", nowIso)
+    .limit(50);
+
+  let sent = 0;
+  for (const row of due ?? []) {
+    // Atomic claim: only one tick flips scheduled → sending.
+    const { data: claimed } = await supabase
+      .from("email_drafts")
+      .update({ status: "sending", last_auto_saved_at: nowIso })
+      .eq("id", row.id as string)
+      .eq("status", "scheduled")
+      .select("id")
+      .maybeSingle();
+    if (!claimed) continue; // another tick (or a cancel-send) got it first
+
+    try {
+      const r = await sendDraftById(supabase, env, row.id as string);
+      if (r.status === 200) sent++;
+      else console.error(`[scheduled-send] draft ${row.id} failed: ${JSON.stringify(r.body)}`);
+    } catch (err) {
+      await supabase.from("email_drafts").update({ status: "draft" }).eq("id", row.id as string);
+      console.error(`[scheduled-send] draft ${row.id} threw:`, err);
+    }
+  }
+  return sent;
+}
 
 // ============================================
 // AI FEATURES
@@ -848,19 +1009,39 @@ const BULK_LABEL_OPS: Record<
   untrash:   "untrash",
 };
 
-email.post("/bulk", async (c) => {
-  const { action, email_ids, label_id } = await c.req.json<{ action: string; email_ids: string[]; label_id?: string }>();
-  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+// Original actions that produce an undo breadcrumb (Prompt 54A Part 1). read/star/
+// label changes are excluded — only folder moves are surfaced with an Undo toast.
+const UNDOABLE_ACTIONS = new Set(["archive", "trash", "spam"]);
+// Inverse of each undoable folder action (snooze is reversed via unsnoozeIds).
+const INVERSE_ACTION: Record<string, string> = {
+  archive: "unarchive",
+  trash: "untrash",
+  delete: "untrash",
+  spam: "not_spam",
+};
 
-  if (!email_ids?.length) return c.json({ error: "No emails specified" }, 400);
+type BulkResult = { status: number; body: Record<string, unknown>; okIds: string[] };
 
-  // Resolve every target's Gmail id + owning account.
+/**
+ * Core flag/folder/label mutation shared by POST /bulk and POST /undo. Writes to
+ * Gmail FIRST (per account), then patches Supabase for the survivors (ES-1). Returns
+ * the HTTP status + body + the ids that actually changed (the undo set).
+ */
+async function applyBulk(
+  supabase: any, // loose like the rest of this file (typed client resolves tables to never)
+  env: Bindings,
+  action: string,
+  email_ids: string[],
+  label_id?: string,
+): Promise<BulkResult> {
+  if (!email_ids?.length) return { status: 400, body: { error: "No emails specified" }, okIds: [] };
+
   const { data: targets, error: loadErr } = await supabase
     .from("emails")
     .select("id, external_id, account_id, folder")
     .in("id", email_ids);
-  if (loadErr) return c.json({ error: loadErr.message }, 500);
-  if (!targets?.length) return c.json({ success: true, succeeded: 0, failed: [] });
+  if (loadErr) return { status: 500, body: { error: loadErr.message }, okIds: [] };
+  if (!targets?.length) return { status: 200, body: { success: true, succeeded: 0, failed: [] }, okIds: [] };
 
   type Target = { id: string; external_id: string; account_id: string; folder: string | null };
   const byAccount = new Map<string, Target[]>();
@@ -873,41 +1054,41 @@ email.post("/bulk", async (c) => {
 
   // --- Label actions (single account-scoped label across the selection) -----
   if (action === "add_label" || action === "remove_label") {
-    if (!label_id) return c.json({ error: "label_id required" }, 400);
+    if (!label_id) return { status: 400, body: { error: "label_id required" }, okIds: [] };
     const add = action === "add_label";
     const { data: label } = await supabase
       .from("email_labels")
       .select("external_id, account_id")
       .eq("id", label_id)
       .single();
-    if (!label) return c.json({ error: "Label not found" }, 404);
+    if (!label) return { status: 404, body: { error: "Label not found" }, okIds: [] };
 
     if (label.external_id) {
       const sameAcct = (targets as Target[]).filter((t) => t.account_id === label.account_id);
       if (sameAcct.length) {
         try {
           const { data: acct } = await supabase.from("email_accounts").select("*").eq("id", label.account_id).single();
-          const token = await getValidAccessToken(acct, c.env, supabase);
+          const token = await getValidAccessToken(acct, env, supabase);
           await gmailBatchModify(token, sameAcct.map((t) => t.external_id), add ? { addLabelIds: [label.external_id] } : { removeLabelIds: [label.external_id] });
         } catch (err) {
           const msg = err instanceof ReauthRequiredError ? "Account needs reconnection" : err instanceof Error ? err.message : "Gmail label write failed";
-          return c.json({ success: false, succeeded: 0, failed: sameAcct.map((t) => ({ id: t.id, error: msg })) }, err instanceof ReauthRequiredError ? 409 : 502);
+          return { status: err instanceof ReauthRequiredError ? 409 : 502, body: { success: false, succeeded: 0, failed: sameAcct.map((t) => ({ id: t.id, error: msg })) }, okIds: [] };
         }
       }
     }
 
     if (add) {
       const { error } = await supabase.from("email_label_assignments").upsert(email_ids.map((eid) => ({ email_id: eid, label_id })));
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return { status: 500, body: { error: error.message }, okIds: [] };
     } else {
       const { error } = await supabase.from("email_label_assignments").delete().in("email_id", email_ids).eq("label_id", label_id);
-      if (error) return c.json({ error: error.message }, 500);
+      if (error) return { status: 500, body: { error: error.message }, okIds: [] };
     }
-    return c.json({ success: true, succeeded: email_ids.length, failed: [] });
+    return { status: 200, body: { success: true, succeeded: email_ids.length, failed: [] }, okIds: email_ids };
   }
 
   const op = BULK_LABEL_OPS[action];
-  if (!op) return c.json({ error: "Unknown action" }, 400);
+  if (!op) return { status: 400, body: { error: "Unknown action" }, okIds: [] };
 
   // --- Flag/folder actions: Gmail FIRST (per account), then DB for survivors --
   const okIds: string[] = [];
@@ -915,7 +1096,7 @@ email.post("/bulk", async (c) => {
     let token: string;
     try {
       const { data: acct } = await supabase.from("email_accounts").select("*").eq("id", accountId).single();
-      token = await getValidAccessToken(acct, c.env, supabase);
+      token = await getValidAccessToken(acct, env, supabase);
     } catch (err) {
       const msg = err instanceof ReauthRequiredError ? "Account needs reconnection" : err instanceof Error ? err.message : "Token error";
       for (const it of items) failed.push({ id: it.id, error: msg });
@@ -947,10 +1128,300 @@ email.post("/bulk", async (c) => {
       : op === "untrash" ? { is_trashed: false, is_archived: false, folder: "INBOX" }
       : op.patch;
     const { error } = await supabase.from("emails").update(patch).in("id", okIds);
-    if (error) return c.json({ error: error.message }, 500);
+    if (error) return { status: 500, body: { error: error.message }, okIds: [] };
   }
 
-  return c.json({ success: failed.length === 0, succeeded: okIds.length, failed });
+  return { status: 200, body: { success: failed.length === 0, succeeded: okIds.length, failed }, okIds };
+}
+
+/** Reverse a snooze for each id: re-add INBOX (if it came from there) + restore folder. */
+async function unsnoozeIds(
+  supabase: any, // loose like the rest of this file (typed client resolves tables to never)
+  env: Bindings,
+  email_ids: string[],
+): Promise<BulkResult> {
+  const okIds: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const id of email_ids) {
+    const { data: row } = await supabase
+      .from("emails")
+      .select("external_id, snooze_return_folder, email_accounts(*)")
+      .eq("id", id)
+      .single();
+    if (!row) { failed.push({ id, error: "Email not found" }); continue; }
+    const returnFolder = (row.snooze_return_folder as string) || "INBOX";
+    try {
+      if (returnFolder === "INBOX") {
+        const token = await getValidAccessToken(row.email_accounts as unknown as Record<string, unknown>, env, supabase);
+        await gmailModify(token, row.external_id as string, { addLabelIds: ["INBOX"] });
+      }
+      await supabase
+        .from("emails")
+        .update({ snoozed_until: null, folder: returnFolder, snooze_return_folder: null })
+        .eq("id", id);
+      okIds.push(id);
+    } catch (err) {
+      failed.push({ id, error: err instanceof Error ? err.message : "Unsnooze failed" });
+    }
+  }
+  return { status: 200, body: { success: failed.length === 0, succeeded: okIds.length, failed }, okIds };
+}
+
+email.post("/bulk", async (c) => {
+  const { action, email_ids, label_id } = await c.req.json<{ action: string; email_ids: string[]; label_id?: string }>();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  if (!email_ids?.length) return c.json({ error: "No emails specified" }, 400);
+
+  const r = await applyBulk(supabase, c.env, action, email_ids, label_id);
+
+  // Record an undo breadcrumb for reversible folder moves (Part 1). Only the ids
+  // that actually changed are stored so a partial failure is replayed precisely.
+  if (UNDOABLE_ACTIONS.has(action) && r.okIds.length) {
+    await supabase.from("email_undo_actions").insert({
+      user_id: c.get("userId"),
+      action,
+      email_ids: r.okIds,
+    });
+  }
+
+  return c.json(r.body, r.status as 200);
+});
+
+// Reverse the most recent undoable action (empty body) or a specific one the UI
+// passes as { action, email_ids } (Prompt 54A Part 1).
+email.post("/undo", async (c) => {
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+  const userId = c.get("userId");
+  let req: { action?: string; email_ids?: string[] } = {};
+  try { req = await c.req.json(); } catch { /* empty body = undo last */ }
+
+  let action = req.action;
+  let emailIds = req.email_ids;
+  let logId: string | null = null;
+
+  if (!action || !emailIds?.length) {
+    const { data: last } = await supabase
+      .from("email_undo_actions")
+      .select("id, action, email_ids")
+      .eq("user_id", userId)
+      .is("undone_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!last) return c.json({ error: "Nothing to undo" }, 400);
+    action = last.action as string;
+    emailIds = last.email_ids as string[];
+    logId = last.id as string;
+  } else {
+    // Explicit undo from the toast — retire a matching pending breadcrumb if present.
+    const { data: match } = await supabase
+      .from("email_undo_actions")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("action", action)
+      .is("undone_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    logId = (match?.id as string) ?? null;
+  }
+
+  const result = action === "snooze"
+    ? await unsnoozeIds(supabase, c.env, emailIds!)
+    : INVERSE_ACTION[action!]
+      ? await applyBulk(supabase, c.env, INVERSE_ACTION[action!], emailIds!)
+      : null;
+
+  if (!result) return c.json({ error: "Action not undoable" }, 400);
+
+  if (logId) {
+    await supabase.from("email_undo_actions").update({ undone_at: new Date().toISOString() }).eq("id", logId);
+  }
+  return c.json(result.body, result.status as 200);
+});
+
+// ============================================
+// REMOTE IMAGE PROXY (Prompt 54A Part 4, EU-9)
+// ============================================
+// Fetches a remote email image server-side so tracking pixels see Cloudflare, not
+// the user's IP. SSRF-guarded: http(s) only, private/loopback/link-local hosts
+// blocked, no cookies, 10 MB cap, cached.
+const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024;
+
+function isPrivateHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const a = Number(v4[1]), b = Number(v4[2]);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;       // link-local + cloud metadata
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    return false;
+  }
+  // IPv6 loopback / unique-local / link-local
+  if (h === "::1" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80")) return true;
+  return false;
+}
+
+email.get("/image-proxy", async (c) => {
+  const raw = c.req.query("url");
+  if (!raw) return c.json({ error: "url required" }, 400);
+
+  let u: URL;
+  try { u = new URL(raw); } catch { return c.json({ error: "invalid url" }, 400); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return c.json({ error: "unsupported protocol" }, 400);
+  if (isPrivateHost(u.hostname)) return c.json({ error: "blocked host" }, 400);
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(u.toString(), {
+      // Workers fetch never attaches the user's cookies; we add none.
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SheetzLabsImageProxy/1.0)",
+        Accept: "image/*,*/*;q=0.8",
+      },
+      redirect: "follow",
+    });
+  } catch {
+    return c.json({ error: "fetch failed" }, 502);
+  }
+  if (!upstream.ok) return c.json({ error: `upstream ${upstream.status}` }, 502);
+
+  const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
+  if (!/^image\//i.test(contentType) && contentType !== "application/octet-stream") {
+    return c.json({ error: "not an image" }, 415);
+  }
+  const declaredLen = Number(upstream.headers.get("content-length") ?? "0");
+  if (declaredLen > IMAGE_PROXY_MAX_BYTES) return c.json({ error: "too large" }, 413);
+
+  const buf = await upstream.arrayBuffer();
+  if (buf.byteLength > IMAGE_PROXY_MAX_BYTES) return c.json({ error: "too large" }, 413);
+
+  return new Response(buf, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=86400",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+});
+
+// ============================================
+// ATTACHMENTS (Prompt 54A Part 3, EC-5)
+// ============================================
+function base64UrlToBytes(data: string): Uint8Array {
+  const standard = data.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(standard);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** Lazily fetch+persist attachment metadata for a single message (no mass backfill). */
+async function backfillAttachments(
+  emailId: string,
+  externalId: string,
+  accessToken: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+): Promise<void> {
+  const res = await fetch(`${GMAIL_API}/messages/${externalId}?format=full`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) return;
+  const msg = (await res.json()) as { payload?: unknown };
+  const atts = extractAttachments(msg.payload);
+  await persistAttachments([{ id: emailId, external_id: externalId }], new Map([[externalId, atts]]), supabase);
+}
+
+// List attachment metadata for a message; lazy-backfills if the message has
+// attachments but no rows yet (e.g. synced before this feature shipped).
+email.get("/messages/:id/attachments", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: email } = await supabase
+    .from("emails")
+    .select("id, external_id, has_attachments, email_accounts(*)")
+    .eq("id", id)
+    .single();
+  if (!email) return c.json({ error: "Email not found" }, 404);
+
+  let { data: rows } = await supabase.from("email_attachments").select("*").eq("email_id", id);
+
+  if ((!rows || rows.length === 0) && email.has_attachments) {
+    try {
+      const token = await getValidAccessToken(email.email_accounts as unknown as Record<string, unknown>, c.env, supabase);
+      await backfillAttachments(id, email.external_id as string, token, supabase);
+      ({ data: rows } = await supabase.from("email_attachments").select("*").eq("email_id", id));
+    } catch {
+      // Backfill is best-effort; return whatever we have.
+    }
+  }
+  return c.json({ attachments: rows ?? [] });
+});
+
+// Stream a single attachment's bytes from Gmail (auth-gated; web proxies it).
+email.get("/messages/:id/attachments/:attachmentId", async (c) => {
+  const { id, attachmentId } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: email } = await supabase
+    .from("emails")
+    .select("id, external_id, has_attachments, email_accounts(*)")
+    .eq("id", id)
+    .single();
+  if (!email) return c.json({ error: "Email not found" }, 404);
+
+  let token: string;
+  try {
+    token = await getValidAccessToken(email.email_accounts as unknown as Record<string, unknown>, c.env, supabase);
+  } catch (err) {
+    if (err instanceof ReauthRequiredError) return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+    return c.json({ error: err instanceof Error ? err.message : "Auth failed" }, 502);
+  }
+
+  let { data: att } = await supabase
+    .from("email_attachments")
+    .select("*")
+    .eq("email_id", id)
+    .eq("gmail_attachment_id", attachmentId)
+    .maybeSingle();
+  if (!att) {
+    await backfillAttachments(id, email.external_id as string, token, supabase);
+    ({ data: att } = await supabase
+      .from("email_attachments")
+      .select("*")
+      .eq("email_id", id)
+      .eq("gmail_attachment_id", attachmentId)
+      .maybeSingle());
+  }
+
+  const res = await fetch(
+    `${GMAIL_API}/messages/${email.external_id}/attachments/${attachmentId}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) return c.json({ error: `Gmail attachment fetch failed (${res.status})` }, 502);
+  const data = (await res.json()) as { data?: string };
+  if (!data.data) return c.json({ error: "No attachment data" }, 404);
+
+  const bytes = base64UrlToBytes(data.data);
+  const mime = (att?.mime_type as string) || "application/octet-stream";
+  const filename = ((att?.filename as string) || "attachment").replace(/["\r\n]/g, "");
+  const disposition = att?.is_inline ? "inline" : "attachment";
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "Content-Type": mime,
+      "Content-Disposition": `${disposition}; filename="${filename}"`,
+      "Cache-Control": "private, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
 });
 
 // ============================================
@@ -986,6 +1457,13 @@ email.post("/:id/snooze", async (c) => {
     .select()
     .single();
   if (error) return c.json({ error: error.message }, 500);
+
+  // Undo breadcrumb (Part 1) so `z` / the toast can un-snooze.
+  await supabase.from("email_undo_actions").insert({
+    user_id: c.get("userId"),
+    action: "snooze",
+    email_ids: [id],
+  });
 
   return c.json({ email: data });
 });
@@ -1793,6 +2271,7 @@ async function importMessages(messageIds: string[], accountId: string, accessTok
 
   const rows: Record<string, unknown>[] = [];
   const labelsByExternalId = new Map<string, string[]>();
+  const attachmentsByExternalId = new Map<string, ParsedAttachment[]>();
 
   for (const msgId of messageIds) {
     const res = await fetch(`${GMAIL_API}/messages/${msgId}?format=full`, {
@@ -1802,9 +2281,11 @@ async function importMessages(messageIds: string[], accountId: string, accessTok
       console.error(`[sync] message ${msgId} fetch failed: ${res.status}`);
       continue;
     }
-    const fullMsg = (await res.json()) as { id: string; labelIds?: string[]; [k: string]: unknown };
+    const fullMsg = (await res.json()) as { id: string; labelIds?: string[]; payload?: unknown; [k: string]: unknown };
     rows.push(parseGmailMessageFull(fullMsg, accountId));
     labelsByExternalId.set(fullMsg.id, fullMsg.labelIds ?? []);
+    const atts = extractAttachments(fullMsg.payload);
+    if (atts.length) attachmentsByExternalId.set(fullMsg.id, atts);
   }
 
   let written = 0;
@@ -1824,8 +2305,80 @@ async function importMessages(messageIds: string[], accountId: string, accessTok
       accountId,
       supabase
     );
+    await persistAttachments(
+      (data ?? []) as Array<{ id: string; external_id: string }>,
+      attachmentsByExternalId,
+      supabase
+    );
   }
   return written;
+}
+
+interface ParsedAttachment {
+  filename: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  gmailAttachmentId: string | null;
+  contentId: string | null;
+  partId: string | null;
+  isInline: boolean;
+}
+
+/** Walk a Gmail MIME payload collecting real + inline (cid) attachment metadata (Part 3). */
+function extractAttachments(payload: any): ParsedAttachment[] {
+  const out: ParsedAttachment[] = [];
+  const walk = (part: any) => {
+    if (!part) return;
+    const headers: Array<{ name: string; value: string }> = part.headers ?? [];
+    const getH = (n: string) => headers.find((h) => h.name.toLowerCase() === n.toLowerCase())?.value ?? "";
+    const filename: string = part.filename || "";
+    const cidRaw = getH("content-id");
+    const contentId = cidRaw ? cidRaw.replace(/^<|>$/g, "") : null;
+    const disposition = getH("content-disposition").toLowerCase();
+    const attachmentId: string | null = part.body?.attachmentId ?? null;
+    const isInline = /inline/.test(disposition) || (!!contentId && /^image\//i.test(part.mimeType ?? ""));
+    // An attachment is a named part, or an inline image addressable by cid + attachmentId.
+    if ((filename && filename.length > 0) || (contentId && attachmentId)) {
+      out.push({
+        filename: filename || null,
+        mimeType: part.mimeType ?? null,
+        sizeBytes: part.body?.size ?? null,
+        gmailAttachmentId: attachmentId,
+        contentId,
+        partId: part.partId ?? null,
+        isInline,
+      });
+    }
+    for (const child of part.parts ?? []) walk(child);
+  };
+  walk(payload);
+  return out;
+}
+
+/** Idempotently replace attachment rows for the freshly-upserted emails (Part 3). */
+async function persistAttachments(
+  emails: Array<{ id: string; external_id: string }>,
+  attachmentsByExternalId: Map<string, ParsedAttachment[]>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+): Promise<void> {
+  for (const e of emails) {
+    const atts = attachmentsByExternalId.get(e.external_id);
+    if (!atts?.length) continue;
+    await supabase.from("email_attachments").delete().eq("email_id", e.id);
+    await supabase.from("email_attachments").insert(
+      atts.map((a) => ({
+        email_id: e.id,
+        filename: a.filename,
+        mime_type: a.mimeType,
+        size_bytes: a.sizeBytes,
+        gmail_attachment_id: a.gmailAttachmentId,
+        content_id: a.contentId,
+        part_id: a.partId,
+        is_inline: a.isInline,
+      })),
+    );
+  }
 }
 
 /** Replace label assignments for a batch of emails in bulk (Prompt 52A Part 3). */

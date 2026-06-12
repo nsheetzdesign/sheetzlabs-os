@@ -2,20 +2,14 @@ import { useState } from 'react';
 import { useFetcher } from 'react-router';
 import { ChevronDown, ChevronUp, Reply, ReplyAll, Forward, Star, Archive, Trash2 } from 'lucide-react';
 import { EmailHtmlFrame } from './EmailHtmlFrame';
+import type { Email as EmailRow } from '@sheetzlabs/shared';
 
-interface Email {
-  id: string;
-  subject: string;
-  from_name: string;
-  from_email: string;
-  to_emails: string;
-  cc_emails?: string;
-  body_html?: string;
-  body_text?: string;
-  received_at: string;
-  is_read: boolean;
-  is_starred: boolean;
-}
+// View model derived from the canonical shared Email row (Part 7, XC-4).
+type Email = Pick<
+  EmailRow,
+  'id' | 'subject' | 'from_name' | 'from_email' | 'to_emails' | 'cc_emails'
+  | 'body_html' | 'body_text' | 'received_at' | 'is_read' | 'is_starred'
+>;
 
 interface Props {
   emails: Email[];
@@ -160,8 +154,8 @@ export function ThreadView({ emails, onReply, onReplyAll, onForward, onClose }: 
                   <div className="flex items-start gap-3 mb-4 pl-7">
                     <div className="flex-1 text-sm">
                       <div className="text-zinc-400">
-                        to {email.to_emails?.split(',')[0]}
-                        {email.cc_emails && `, cc: ${email.cc_emails.split(',')[0]}`}
+                        to {Array.isArray(email.to_emails) ? email.to_emails[0] : email.to_emails}
+                        {email.cc_emails?.length ? `, cc: ${Array.isArray(email.cc_emails) ? email.cc_emails[0] : email.cc_emails}` : ''}
                       </div>
                     </div>
                   </div>

@@ -1,7 +1,12 @@
-import { getSupabaseClient } from '~/lib/supabase.server';
+import { apiFetch } from '~/lib/api';
+/**
+ * Bulk inbox actions now route through the API worker (Prompt 52A — ES-1), which
+ * writes back to Gmail FIRST (messages.batchModify / trash) and only then updates
+ * Supabase. The old direct-Supabase path never reached Gmail, so every action
+ * silently reverted on the next sync.
+ */
 export async function action({ request, context }) {
     const env = context.cloudflare.env;
-    const supabase = getSupabaseClient(env);
     const formData = await request.formData();
     const actionType = formData.get('action');
     const emailIds = JSON.parse(formData.get('email_ids') || '[]');
@@ -9,73 +14,11 @@ export async function action({ request, context }) {
     if (!emailIds.length) {
         return Response.json({ error: 'No emails specified' }, { status: 400 });
     }
-    switch (actionType) {
-        case 'archive':
-            await supabase
-                .from('emails')
-                .update({ is_archived: true, folder: 'ARCHIVE' })
-                .in('id', emailIds);
-            break;
-        case 'unarchive':
-            await supabase
-                .from('emails')
-                .update({ is_archived: false, folder: 'INBOX' })
-                .in('id', emailIds);
-            break;
-        case 'trash':
-            await supabase
-                .from('emails')
-                .update({ is_trashed: true, folder: 'TRASH' })
-                .in('id', emailIds);
-            break;
-        case 'spam':
-            await supabase
-                .from('emails')
-                .update({ is_spam: true, folder: 'SPAM' })
-                .in('id', emailIds);
-            break;
-        case 'read':
-            await supabase
-                .from('emails')
-                .update({ is_read: true })
-                .in('id', emailIds);
-            break;
-        case 'unread':
-            await supabase
-                .from('emails')
-                .update({ is_read: false })
-                .in('id', emailIds);
-            break;
-        case 'star':
-            await supabase
-                .from('emails')
-                .update({ is_starred: true })
-                .in('id', emailIds);
-            break;
-        case 'unstar':
-            await supabase
-                .from('emails')
-                .update({ is_starred: false })
-                .in('id', emailIds);
-            break;
-        case 'add_label':
-            if (labelId) {
-                for (const emailId of emailIds) {
-                    await supabase
-                        .from('email_label_assignments')
-                        .upsert({ email_id: emailId, label_id: labelId });
-                }
-            }
-            break;
-        case 'remove_label':
-            if (labelId) {
-                await supabase
-                    .from('email_label_assignments')
-                    .delete()
-                    .in('email_id', emailIds)
-                    .eq('label_id', labelId);
-            }
-            break;
-    }
-    return Response.json({ success: true });
+    const res = await apiFetch(request, env, '/email/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: actionType, email_ids: emailIds, label_id: labelId ?? undefined }),
+    });
+    const data = await res.json().catch(() => ({ error: 'Bulk action failed' }));
+    return Response.json(data, { status: res.ok ? 200 : res.status });
 }

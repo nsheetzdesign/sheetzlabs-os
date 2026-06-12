@@ -88,9 +88,12 @@ export default [
       route("sync", "routes/dashboard.inbox.sync.tsx"),
       route("draft-ai", "routes/dashboard.inbox.draft-ai.tsx"),
       route("send", "routes/dashboard.inbox.send.tsx"),
+      route("send-attachments", "routes/dashboard.inbox.send-attachments.tsx"),
+      route("cancel-send", "routes/dashboard.inbox.cancel-send.tsx"),
       route("drafts", "routes/dashboard.inbox.drafts.tsx"),
       route("labels", "routes/dashboard.inbox.labels.tsx"),
       route("bulk", "routes/dashboard.inbox.bulk.tsx"),
+      route("undo", "routes/dashboard.inbox.undo.tsx"),
       route("snippets", "routes/dashboard.inbox.snippets.tsx"),
       route("templates", "routes/dashboard.inbox.templates.tsx"),
       route(":id", "routes/dashboard.inbox.$id.tsx", [
