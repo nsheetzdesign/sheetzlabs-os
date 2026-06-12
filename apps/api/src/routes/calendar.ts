@@ -534,6 +534,58 @@ calendar.patch("/events/:id", async (c) => {
   return c.json({ event: updated });
 });
 
+// Delete an event (and remove it from Google Calendar). Prompt 55: there was no
+// way to delete a non-time-block event — the detail page only offered "Remove time
+// block" and no DELETE route existed. DB is the source of truth (always removed);
+// the Google delete is best-effort (a 404/410 means it's already gone — treat as
+// success), mirroring the PATCH route's `local-`/`timeblock-` guard.
+calendar.delete("/events/:id", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: event } = await supabase
+    .from("calendar_events")
+    .select("*, calendar_accounts(*)")
+    .eq("id", id)
+    .single();
+
+  if (!event) return c.json({ error: "Event not found" }, 404);
+
+  const extId = event.external_id as string;
+  let googleDeleted: boolean | null = null; // null = not attempted (local-only event)
+
+  if (
+    event.calendar_accounts &&
+    !extId.startsWith("local-") &&
+    !extId.startsWith("timeblock-")
+  ) {
+    googleDeleted = false;
+    try {
+      const accessToken = await getValidAccessToken(event.calendar_accounts, c.env, supabase);
+      const calendarId = (event.google_calendar_id as string) ?? "primary";
+      const gcalRes = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
+          calendarId
+        )}/events/${encodeURIComponent(extId)}?sendUpdates=all`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      // 204 = deleted; 404/410 = already gone on Google's side — both are success.
+      googleDeleted = gcalRes.ok || gcalRes.status === 404 || gcalRes.status === 410;
+      if (!googleDeleted) {
+        const text = await gcalRes.text().catch(() => "");
+        console.error(`[calendar] event delete on Google failed (${gcalRes.status}) for ${id}: ${text}`);
+      }
+    } catch (err) {
+      console.error(`[calendar] event delete errored for ${id}:`, err);
+    }
+  }
+
+  const { error } = await supabase.from("calendar_events").delete().eq("id", id);
+  if (error) return c.json({ error: error.message }, 500);
+
+  return c.json({ success: true, googleDeleted });
+});
+
 // ============================================
 // TIME BLOCKING
 // ============================================

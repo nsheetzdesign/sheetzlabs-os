@@ -92,6 +92,15 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
     });
   }
 
+  if (intent === "delete") {
+    // Deletes the event locally and removes it from Google (Prompt 55).
+    await apiFetch(request, env, `/calendar/events/${params.id}`, { method: "DELETE" });
+    return new Response(null, {
+      status: 302,
+      headers: { Location: "/dashboard/calendar" },
+    });
+  }
+
   return null;
 }
 
@@ -463,6 +472,27 @@ export default function CalendarEventDetail() {
                 className="text-xs text-red-500 hover:text-red-400 transition-colors"
               >
                 Remove time block
+              </button>
+            </fetcher.Form>
+          )}
+
+          {/* Delete event (non-time-block) — removes locally and from Google */}
+          {!event.is_time_block && (
+            <fetcher.Form
+              method="post"
+              onSubmit={(e) => {
+                if (!window.confirm("Delete this event? It will also be removed from Google Calendar.")) {
+                  e.preventDefault();
+                }
+              }}
+            >
+              <input type="hidden" name="intent" value="delete" />
+              <button
+                type="submit"
+                aria-label="Delete event"
+                className="text-xs text-red-500 hover:text-red-400 transition-colors"
+              >
+                Delete event
               </button>
             </fetcher.Form>
           )}

@@ -352,6 +352,18 @@ export async function action({ request, context }: ActionFunctionArgs) {
     await apiFetch(request, env, `/calendar/time-blocks/${eventId}`, { method: "DELETE" });
   }
 
+  // Delete a regular event from the week-view modal (Prompt 55 — removes from
+  // Google too via the API). Redirect so the loader revalidates and the chip
+  // disappears (a bare null return raced the modal's unmount and left it onscreen).
+  if (intent === "delete_event") {
+    const eventId = fd.get("event_id") as string;
+    await apiFetch(request, env, `/calendar/events/${eventId}`, { method: "DELETE" });
+    return new Response(null, {
+      status: 302,
+      headers: { Location: "/dashboard/calendar" },
+    });
+  }
+
   if (intent === "update_sub_cal") {
     const subCalId = fd.get("sub_cal_id") as string;
     const updates: Record<string, unknown> = {};
@@ -783,6 +795,30 @@ function EventDetailModal({ event, tz, onClose }: { event: CalendarEvent; tz: st
                       <input type="hidden" name="event_id" value={event.id} />
                       <button type="submit" className="text-xs text-red-500 hover:text-red-400 transition-colors">
                         Remove time block
+                      </button>
+                    </actionFetcher.Form>
+                  )}
+
+                  {/* Delete a regular event (removes from Google too — Prompt 55) */}
+                  {!full.is_time_block && (
+                    <actionFetcher.Form
+                      method="post"
+                      onSubmit={(e) => {
+                        // Don't close here — unmounting the form aborts the submit.
+                        // The action redirects, which reloads the calendar without it.
+                        if (!window.confirm("Delete this event? It will also be removed from Google Calendar.")) {
+                          e.preventDefault();
+                        }
+                      }}
+                    >
+                      <input type="hidden" name="intent" value="delete_event" />
+                      <input type="hidden" name="event_id" value={event.id} />
+                      <button
+                        type="submit"
+                        aria-label="Delete event"
+                        className="text-xs text-red-500 hover:text-red-400 transition-colors"
+                      >
+                        Delete event
                       </button>
                     </actionFetcher.Form>
                   )}
