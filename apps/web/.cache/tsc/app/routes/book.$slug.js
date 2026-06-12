@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import { useLoaderData, useFetcher } from "react-router";
 import { useState, useEffect } from "react";
 import { Clock, User, Mail, MessageSquare, Check, ChevronLeft } from "lucide-react";
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 export const meta = ({ data }) => [
     { title: data ? `Book: ${data.link.title}` : "Book a Meeting" },
 ];

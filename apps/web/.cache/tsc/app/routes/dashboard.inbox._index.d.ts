@@ -1,11 +1,15 @@
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 export declare const meta: MetaFunction;
 export declare function loader({ request, context }: LoaderFunctionArgs): Promise<{
-    emails: any;
+    emails: any[];
     accounts: {
         id: string;
         email: string;
         labels: any[];
+    }[];
+    reauthAccounts: {
+        id: string;
+        email: string;
     }[];
     counts: Record<string, {
         inbox: number;

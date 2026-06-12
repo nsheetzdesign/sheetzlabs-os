@@ -1,18 +1,29 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
-import { useLoaderData, Link, Form, useFetcher, redirect } from "react-router";
-import { useState, useEffect, useRef } from "react";
+import { useLoaderData, Link, Form, useFetcher, useRevalidator, redirect } from "react-router";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   RefreshCw, Plus, X, Eye, EyeOff, Video, Clock, MapPin,
   Users, ExternalLink, Zap, CheckSquare, Edit2, Settings, Check, Link2, Calendar, AlertTriangle,
 } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { apiFetch } from "~/lib/api";
+import {
+  DEFAULT_TZ,
+  getWeekBounds,
+  getDayBounds,
+  dayStartUtc,
+  weekdayLabel,
+  formatTimeInTz,
+  formatDateTimeInTz,
+  localInputToUtcIso,
+  utcIsoToLocalInput,
+  type DayDescriptor,
+} from "~/lib/tz";
 
 export const meta: MetaFunction = () => [{ title: "Calendar — Sheetz Labs OS" }];
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const START_HOUR = 4;      // 4 am
 const HOUR_HEIGHT = 56;    // px per hour
 const VISIBLE_HOURS = 21;  // 4 am → midnight (hour indices 4..24)
@@ -39,9 +50,11 @@ type CalendarEvent = {
   end_at: string;
   is_time_block: boolean;
   all_day: boolean;
+  all_day_end_date: string | null;
   account_id: string;
   task_id: string | null;
   google_calendar_id: string | null;
+  sub_account_id: string | null;
 };
 
 type CalendarAccount = {
@@ -80,57 +93,119 @@ type FullEvent = {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+const DEFAULT_CAL_COLOR = "#2FE8B6";
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
 function formatHour(hour: number) {
   if (hour === 0 || hour === 24) return "12am";
   if (hour === 12) return "12pm";
   return hour > 12 ? `${hour - 12}pm` : `${hour}am`;
 }
 
-function formatDateTime(iso: string) {
-  return new Date(iso).toLocaleString(undefined, {
-    weekday: "short", month: "short", day: "numeric",
-    hour: "numeric", minute: "2-digit",
-  });
+/**
+ * Single source of truth for an event/swatch color (CS-10). Priority:
+ * session override → sub-calendar DB color → account color → default. Sub-cal
+ * first because that's what the sidebar picker persists.
+ */
+function resolveCalendarColor(
+  sub: SubCalendar | undefined,
+  account: CalendarAccount | null,
+  override?: string
+): string {
+  if (override) return override;
+  if (sub?.color) return sub.color;
+  if (account?.color) return account.color;
+  return DEFAULT_CAL_COLOR;
 }
 
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+// A timed event's vertical placement within a single day column, timezone-aware.
+// Multi-day events are clamped to the visible window of the day they touch (CS-12).
+type PlacedEvent = { event: CalendarEvent; top: number; height: number; col: number; colCount: number };
+
+function timedEventInDay(e: CalendarEvent, dayStart: number): { top: number; height: number } | null {
+  const dayEnd = dayStart + 86_400_000;
+  const evStart = new Date(e.start_at).getTime();
+  const evEnd = Math.max(new Date(e.end_at).getTime(), evStart + 60_000);
+  if (evStart >= dayEnd || evEnd <= dayStart) return null; // no overlap with this day
+
+  const segStartMin = Math.max(0, (Math.max(evStart, dayStart) - dayStart) / 60_000);
+  const segEndMin = Math.min(1440, (Math.min(evEnd, dayEnd) - dayStart) / 60_000);
+  const visibleStart = Math.max(segStartMin, START_HOUR * 60);
+  const visibleEnd = Math.min(segEndMin, 24 * 60);
+  if (visibleEnd <= visibleStart) return null;
+
+  const top = ((visibleStart - START_HOUR * 60) / 60) * HOUR_HEIGHT;
+  const height = Math.max(22, ((visibleEnd - visibleStart) / 60) * HOUR_HEIGHT);
+  return { top, height };
 }
 
-function getWeekStart(date: Date) {
-  const d = new Date(date);
-  d.setDate(d.getDate() - d.getDay());
-  d.setHours(0, 0, 0, 0);
-  return d;
+// Standard interval column-packing: events in the same overlap cluster get the
+// lowest free column; width = 1/clusterColumns (CS-7).
+function packDayColumns(
+  items: Array<{ event: CalendarEvent; top: number; height: number }>
+): PlacedEvent[] {
+  const sorted = [...items].sort((a, b) => a.top - b.top || a.top + a.height - (b.top + b.height));
+  const result: PlacedEvent[] = [];
+  let cluster: Array<{ item: (typeof items)[number]; col: number }> = [];
+  let clusterEnd = -Infinity;
+  const colEnds: number[] = [];
+
+  const flush = () => {
+    const colCount = colEnds.length || 1;
+    for (const { item, col } of cluster) {
+      result.push({ event: item.event, top: item.top, height: item.height, col, colCount });
+    }
+    cluster = [];
+    colEnds.length = 0;
+  };
+
+  for (const item of sorted) {
+    const start = item.top;
+    const end = item.top + item.height;
+    if (start >= clusterEnd && cluster.length) flush();
+    let col = colEnds.findIndex((e) => start >= e);
+    if (col === -1) {
+      col = colEnds.length;
+      colEnds.push(end);
+    } else {
+      colEnds[col] = end;
+    }
+    cluster.push({ item, col });
+    clusterEnd = Math.max(clusterEnd, end);
+  }
+  if (cluster.length) flush();
+  return result;
 }
 
-function toLocalDateTimeInput(iso: string) {
-  const d = new Date(iso);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function getEventsForDay(dayIndex: number, weekStart: Date, events: CalendarEvent[]) {
-  const day = new Date(weekStart);
-  day.setDate(weekStart.getDate() + dayIndex);
-  return events.filter((e) => {
-    if (e.all_day) return false;
-    const s = new Date(e.start_at);
-    return s.getFullYear() === day.getFullYear()
-      && s.getMonth() === day.getMonth()
-      && s.getDate() === day.getDate();
-  });
-}
-
-function eventPosition(e: CalendarEvent) {
-  const s = new Date(e.start_at);
-  const end = new Date(e.end_at);
-  const startFrac = Math.max(0, s.getHours() - START_HOUR + s.getMinutes() / 60);
-  const endFrac = Math.min(VISIBLE_HOURS, end.getHours() - START_HOUR + end.getMinutes() / 60);
-  return { top: startFrac * HOUR_HEIGHT, height: Math.max(22, (endFrac - startFrac) * HOUR_HEIGHT) };
+// All-day events overlapping a given day (uses all_day_end_date, inclusive — 52B).
+function allDayEventOnDay(e: CalendarEvent, day: DayDescriptor): boolean {
+  if (!e.all_day) return false;
+  const startDate = new Date(e.start_at);
+  const startY = startDate.getUTCFullYear();
+  const startKey = Date.UTC(startY, startDate.getUTCMonth(), startDate.getUTCDate());
+  const endKey = e.all_day_end_date
+    ? Date.UTC(
+        +e.all_day_end_date.slice(0, 4),
+        +e.all_day_end_date.slice(5, 7) - 1,
+        +e.all_day_end_date.slice(8, 10)
+      )
+    : startKey;
+  const dayKey = Date.UTC(day.year, day.month - 1, day.day);
+  return dayKey >= startKey && dayKey <= endKey;
 }
 
 // ── Loader ───────────────────────────────────────────────────────────────────
+
+function readTzCookie(request: Request): string | null {
+  const cookie = request.headers.get("cookie") ?? "";
+  const m = cookie.match(/(?:^|;\s*)tz=([^;]+)/);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
+}
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env;
@@ -138,28 +213,27 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
   const url = new URL(request.url);
   const view = url.searchParams.get("view") || "week";
-  const weekOffset = parseInt(url.searchParams.get("offset") || "0", 10);
+  const offset = parseInt(url.searchParams.get("offset") || "0", 10);
+
+  // IANA tz from the cookie (set client-side); default until the client reports it.
+  const tzCookie = readTzCookie(request);
+  const tz = tzCookie || DEFAULT_TZ;
+  const tzKnown = !!tzCookie;
 
   const now = new Date();
-  now.setDate(now.getDate() + weekOffset * 7);
-
-  let start: Date, end: Date;
-  if (view === "day") {
-    start = new Date(now); start.setHours(0, 0, 0, 0);
-    end = new Date(now); end.setHours(23, 59, 59, 999);
-  } else {
-    start = getWeekStart(now);
-    end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23, 59, 59, 999);
-  }
+  const { days, startUtc, windowEnd } =
+    view === "day" ? getDayBounds(now, tz, offset) : getWeekBounds(now, tz, offset);
 
   const [eventsRes, accountsRes, tasksRes] = await Promise.all([
     supabase
       .from("calendar_events")
-      .select("id, title, start_at, end_at, is_time_block, all_day, account_id, task_id, google_calendar_id")
-      .gte("start_at", start.toISOString())
-      .lte("start_at", end.toISOString())
+      // Window filter is overlap-based (start < windowEnd AND end > windowStart) so
+      // multi-day and still-ongoing events that started earlier still load (CS-12).
+      .select("id, title, start_at, end_at, is_time_block, all_day, all_day_end_date, account_id, task_id, google_calendar_id, sub_account_id")
+      .lt("start_at", windowEnd.toISOString())
+      .gt("end_at", startUtc.toISOString())
       .order("start_at"),
-    supabase.from("calendar_accounts").select("id, email, color, sync_enabled, last_sync_at, needs_reauth").order("email"),
+    supabase.from("calendar_accounts").select("id, email, color, display_name, sync_enabled, last_sync_at, needs_reauth").order("email"),
     supabase.from("tasks").select("id, title, due_date, priority, status").in("status", ["todo", "in_progress"]).order("due_date", { nullsFirst: false }),
   ]);
 
@@ -185,15 +259,28 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     .filter((a) => (a as { needs_reauth?: boolean }).needs_reauth)
     .map((a) => ({ id: a.id, email: a.email }));
 
+  // Server-side visibility filter (CS-11): drop events whose sub-calendar is
+  // hidden. Events with a null sub_account_id (pre-52B rows) stay visible.
+  const hiddenSubIds = new Set(
+    subCalendars.flatMap((entry) =>
+      entry.calendars.filter((cal) => cal.is_visible === false).map((cal) => cal.id)
+    )
+  );
+  const events = (eventsRes.data ?? []).filter(
+    (e) => !e.sub_account_id || !hiddenSubIds.has(e.sub_account_id as string)
+  );
+
   return {
-    events: eventsRes.data ?? [],
+    events,
     accounts: accountsRes.data ?? [],
     reauthAccounts,
     tasks: unscheduled,
     subCalendars,
     view,
-    weekOffset,
-    weekStart: start.toISOString(),
+    offset,
+    days,
+    tz,
+    tzKnown,
   };
 }
 
@@ -237,20 +324,26 @@ export async function action({ request, context }: ActionFunctionArgs) {
   if (intent === "create_event") {
     const attendees = ((fd.get("attendees") as string) || "")
       .split(",").map((e) => e.trim()).filter(Boolean).map((email) => ({ email }));
-    await apiFetch(request, env, `/calendar/events`, {
+    // start_at/end_at already arrive as UTC ISO (converted client-side, CS-6).
+    const res = await apiFetch(request, env, `/calendar/events`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         account_id: fd.get("account_id"),
         title: fd.get("title"),
         description: fd.get("description") || undefined,
         location: fd.get("location") || undefined,
-        start_at: new Date(fd.get("start_at") as string).toISOString(),
-        end_at: new Date(fd.get("end_at") as string).toISOString(),
+        start_at: fd.get("start_at"),
+        end_at: fd.get("end_at"),
         attendees,
         add_google_meet: fd.get("add_google_meet") === "true",
         meeting_link: fd.get("meeting_link") || undefined,
       }),
     });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      return Response.json({ ok: false, error: data.error ?? "Failed to create event" }, { status: res.status });
+    }
+    return Response.json({ ok: true });
   }
 
   // Delete time block called from the event modal on the index page
@@ -291,21 +384,50 @@ export async function action({ request, context }: ActionFunctionArgs) {
 // ── New Event Modal ───────────────────────────────────────────────────────────
 
 function NewEventModal({
-  accounts, defaultStart, defaultEnd, onClose,
+  accounts, defaultStart, defaultEnd, tz, onClose,
 }: {
   accounts: CalendarAccount[];
   defaultStart: string;
   defaultEnd: string;
+  tz: string;
   onClose: () => void;
 }) {
-  const fetcher = useFetcher();
+  const fetcher = useFetcher<{ ok?: boolean; error?: string }>();
   const [videoType, setVideoType] = useState<"none" | "meet" | "teams">("none");
+  const [error, setError] = useState<string | null>(null);
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", h);
     return () => document.removeEventListener("keydown", h);
   }, [onClose]);
+
+  // Close only on confirmed success; otherwise show an inline error.
+  useEffect(() => {
+    if (fetcher.state === "idle" && submittingRef.current && fetcher.data) {
+      submittingRef.current = false;
+      if (fetcher.data.ok) onClose();
+      else setError(fetcher.data.error ?? "Failed to create event");
+    }
+  }, [fetcher.state, fetcher.data, onClose]);
+
+  // Convert naive datetime-local values to UTC ISO client-side before submit (CS-6).
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setError(null);
+    const fd = new FormData(e.currentTarget);
+    const startLocal = fd.get("start_at") as string;
+    const endLocal = fd.get("end_at") as string;
+    if (new Date(endLocal) <= new Date(startLocal)) {
+      setError("End time must be after start time");
+      return;
+    }
+    fd.set("start_at", localInputToUtcIso(startLocal, tz));
+    fd.set("end_at", localInputToUtcIso(endLocal, tz));
+    submittingRef.current = true;
+    fetcher.submit(fd, { method: "post" });
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
@@ -315,7 +437,7 @@ function NewEventModal({
           <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200 transition-colors"><X className="h-4 w-4" /></button>
         </div>
 
-        <fetcher.Form method="post" onSubmit={() => setTimeout(onClose, 100)} className="space-y-4">
+        <fetcher.Form method="post" onSubmit={handleSubmit} className="space-y-4">
           <input type="hidden" name="intent" value="create_event" />
           {videoType === "meet" && <input type="hidden" name="add_google_meet" value="true" />}
 
@@ -384,6 +506,7 @@ function NewEventModal({
               className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500" />
           </div>
 
+          {error && <p className="text-xs text-red-400">{error}</p>}
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose} className="flex-1 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg transition-colors">Cancel</button>
             <button type="submit" disabled={fetcher.state !== "idle"}
@@ -399,13 +522,15 @@ function NewEventModal({
 
 // ── Event Detail Modal ────────────────────────────────────────────────────────
 
-function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: () => void }) {
-  const detailFetcher = useFetcher();
-  const editFetcher = useFetcher();
+function EventDetailModal({ event, tz, onClose }: { event: CalendarEvent; tz: string; onClose: () => void }) {
+  const detailFetcher = useFetcher<{ event?: FullEvent }>();
+  const editFetcher = useFetcher<{ ok?: boolean; error?: string }>();
   const actionFetcher = useFetcher();
   const [isEditing, setIsEditing] = useState(false);
   const [videoType, setVideoType] = useState<"none" | "meet" | "teams">("none");
+  const [editError, setEditError] = useState<string | null>(null);
   const didLoad = useRef(false);
+  const editingRef = useRef(false);
 
   useEffect(() => {
     if (!didLoad.current) {
@@ -420,20 +545,41 @@ function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: (
     return () => document.removeEventListener("keydown", h);
   }, [onClose]);
 
-  // Close edit form after successful edit
-  const prevEditState = useRef(editFetcher.state);
+  // Close the edit form only on a confirmed successful save; inline error otherwise.
   useEffect(() => {
-    if (prevEditState.current !== "idle" && editFetcher.state === "idle") {
-      setIsEditing(false);
-      setVideoType("none");
-      detailFetcher.load(`/dashboard/calendar/${event.id}`);
+    if (editFetcher.state === "idle" && editingRef.current && editFetcher.data) {
+      editingRef.current = false;
+      if (editFetcher.data.ok) {
+        setIsEditing(false);
+        setVideoType("none");
+        setEditError(null);
+        detailFetcher.load(`/dashboard/calendar/${event.id}`);
+      } else {
+        setEditError(editFetcher.data.error ?? "Failed to save changes");
+      }
     }
-    prevEditState.current = editFetcher.state;
-  }, [editFetcher.state]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [editFetcher.state, editFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const full = (detailFetcher.data as { event: FullEvent } | undefined)?.event;
+  const handleEditSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setEditError(null);
+    const fd = new FormData(e.currentTarget);
+    const startLocal = fd.get("start_at") as string;
+    const endLocal = fd.get("end_at") as string;
+    if (startLocal && endLocal && new Date(endLocal) <= new Date(startLocal)) {
+      setEditError("End time must be after start time");
+      return;
+    }
+    if (startLocal) fd.set("start_at", localInputToUtcIso(startLocal, tz));
+    if (endLocal) fd.set("end_at", localInputToUtcIso(endLocal, tz));
+    editingRef.current = true;
+    editFetcher.submit(fd, { method: "post", action: `/dashboard/calendar/${event.id}` });
+  };
+
+  const full = detailFetcher.data?.event;
   const isLoading = detailFetcher.state === "loading";
-  const hasAttendees = Array.isArray(full?.attendees) && (full.attendees as unknown[]).length > 0;
+  const loadFailed = !isLoading && didLoad.current && detailFetcher.state === "idle" && !full;
+  const hasAttendees = Array.isArray(full?.attendees) && (full!.attendees as unknown[]).length > 0;
   const actionUrl = `/dashboard/calendar/${event.id}`;
 
   return (
@@ -449,7 +595,7 @@ function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: (
               <h2 className="text-base font-semibold text-zinc-100 break-words">{event.title}</h2>
               <div className="flex items-center gap-2 mt-1 text-xs text-zinc-400">
                 <Clock className="h-3 w-3 shrink-0" />
-                <span>{formatDateTime(event.start_at)} — {formatTime(event.end_at)}</span>
+                <span>{formatDateTimeInTz(event.start_at, tz)} — {formatTimeInTz(event.end_at, tz)}</span>
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
@@ -473,12 +619,19 @@ function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: (
         <div className="flex-1 overflow-y-auto">
           {isLoading && !full ? (
             <div className="flex items-center justify-center py-10 text-xs text-zinc-500">Loading…</div>
+          ) : loadFailed ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-10 text-xs text-zinc-500">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              <span>Couldn&rsquo;t load this event.</span>
+              <button onClick={() => { didLoad.current = true; detailFetcher.load(actionUrl); }}
+                className="text-emerald-400 hover:text-emerald-300">Retry</button>
+            </div>
           ) : full ? (
             <div className="px-6 py-5 space-y-4">
 
               {/* Edit form */}
               {isEditing && (
-                <editFetcher.Form method="post" action={actionUrl} className="space-y-3">
+                <editFetcher.Form method="post" action={actionUrl} onSubmit={handleEditSubmit} className="space-y-3">
                   <input type="hidden" name="intent" value="edit" />
                   {videoType === "meet" && <input type="hidden" name="add_google_meet" value="true" />}
 
@@ -490,12 +643,12 @@ function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: (
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs text-zinc-500 mb-1">Start</label>
-                      <input name="start_at" type="datetime-local" defaultValue={toLocalDateTimeInput(full.start_at)}
+                      <input name="start_at" type="datetime-local" defaultValue={utcIsoToLocalInput(full.start_at, tz)}
                         className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500" />
                     </div>
                     <div>
                       <label className="block text-xs text-zinc-500 mb-1">End</label>
-                      <input name="end_at" type="datetime-local" defaultValue={toLocalDateTimeInput(full.end_at)}
+                      <input name="end_at" type="datetime-local" defaultValue={utcIsoToLocalInput(full.end_at, tz)}
                         className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500" />
                     </div>
                   </div>
@@ -524,8 +677,9 @@ function EventDetailModal({ event, onClose }: { event: CalendarEvent; onClose: (
                     <textarea name="description" defaultValue={full.description ?? ""} rows={2}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500 resize-none" />
                   </div>
+                  {editError && <p className="text-xs text-red-400">{editError}</p>}
                   <div className="flex gap-3">
-                    <button type="button" onClick={() => setIsEditing(false)}
+                    <button type="button" onClick={() => { setIsEditing(false); setEditError(null); }}
                       className="flex-1 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg transition-colors">Cancel</button>
                     <button type="submit" disabled={editFetcher.state !== "idle"}
                       className="flex-1 py-2 text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg disabled:opacity-50 transition-colors">
@@ -716,8 +870,9 @@ function CalendarSettingsModal({
 // ── Main Calendar Component ───────────────────────────────────────────────────
 
 export default function CalendarPage() {
-  const { events, accounts, reauthAccounts, tasks, subCalendars, view, weekOffset, weekStart } =
+  const { events, accounts, reauthAccounts, tasks, subCalendars, view, offset, days, tz, tzKnown } =
     useLoaderData<typeof loader>();
+  const revalidator = useRevalidator();
   const [dismissedReauth, setDismissedReauth] = useState<Set<string>>(new Set());
   const visibleReauth = reauthAccounts.filter((a) => !dismissedReauth.has(a.id));
   const fetcher = useFetcher();
@@ -727,12 +882,26 @@ export default function CalendarPage() {
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const [settingsAccount, setSettingsAccount] = useState<CalendarAccount | null>(null);
 
-  // Sub-calendar visibility + color overrides (local state)
-  const [hiddenSubCals, setHiddenSubCals] = useState<Set<string>>(new Set());
+  // Sub-calendar color overrides for this session (visibility persists server-side).
   const [subCalColors, setSubCalColors] = useState<Record<string, string>>({});
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
 
-  const weekStartDate = new Date(weekStart);
+  // Report the browser's IANA tz to the server (cookie) so the loader computes the
+  // week/day window in the user's timezone. Revalidates once when it changes (CS-5).
+  useEffect(() => {
+    const resolved = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (resolved && (!tzKnown || resolved !== tz)) {
+      document.cookie = `tz=${encodeURIComponent(resolved)};path=/;max-age=31536000;samesite=lax`;
+      revalidator.revalidate();
+    }
+  }, [tz, tzKnown, revalidator]);
+
+  const dayList = days as DayDescriptor[];
+  // Precompute each column's local-midnight UTC instant for placement.
+  const dayBoundaries = useMemo(
+    () => dayList.map((d) => dayStartUtc(d, tz).getTime()),
+    [dayList, tz]
+  );
 
   // Look up DB sub-cal by Google calendar ID (external_id)
   function findSubCal(googleCalId: string | null, accountId: string): SubCalendar | undefined {
@@ -741,75 +910,74 @@ export default function CalendarPage() {
     return entry?.calendars.find((c) => c.external_id === googleCalId);
   }
 
-  // Build event color: local session override → account color → sub-cal DB color → default
-  function getSubCalColor(googleCalId: string | null, accountId: string): string {
-    const sub = findSubCal(googleCalId, accountId);
-    // Local override (sidebar color picker) always wins
-    if (sub && subCalColors[sub.id]) return subCalColors[sub.id];
-    // Account color is the primary setting (CalendarSettingsModal)
-    const account = (accounts as CalendarAccount[]).find((a) => a.id === accountId);
-    if (account?.color) return account.color;
-    // Sub-cal DB color as fallback
-    if (sub?.color) return sub.color;
-    return "#2FE8B6";
+  // One color chain everywhere (CS-10): session override → sub-cal DB color →
+  // account color → default. Sub-cal first — it's what the picker persists.
+  function eventColor(event: CalendarEvent): string {
+    const sub = findSubCal(event.google_calendar_id, event.account_id);
+    const account = (accounts as CalendarAccount[]).find((a) => a.id === event.account_id);
+    return resolveCalendarColor(sub, account ?? null, sub ? subCalColors[sub.id] : undefined);
   }
 
-  // Filter events by hidden sub-cals (hiddenSubCals stores DB UUIDs)
-  const visibleEvents = (events as CalendarEvent[]).filter((e) => {
-    const sub = findSubCal(e.google_calendar_id, e.account_id);
-    if (sub && hiddenSubCals.has(sub.id)) return false;
-    return true;
-  });
+  const visibleEvents = events as CalendarEvent[];
 
-  function toggleSubCal(subCalId: string) {
-    setHiddenSubCals((prev) => {
-      const next = new Set(prev);
-      if (next.has(subCalId)) next.delete(subCalId);
-      else next.add(subCalId);
-      return next;
-    });
+  function toggleSubCal(cal: SubCalendar) {
+    // Persist visibility through the existing is_visible action path (CS-11).
+    const fd = new FormData();
+    fd.set("intent", "update_sub_cal");
+    fd.set("sub_cal_id", cal.id);
+    fd.set("is_visible", String(!cal.is_visible));
+    fetcher.submit(fd, { method: "post" });
   }
 
-  function getEventChipStyle(event: CalendarEvent) {
-    const { top, height } = eventPosition(event);
-    const color = getSubCalColor(event.google_calendar_id, event.account_id);
+  function chipStyle(top: number, height: number, color: string, col: number, colCount: number) {
+    const gapPct = 1.5;
+    const widthPct = (100 - gapPct * (colCount - 1)) / colCount;
+    const leftPct = col * (widthPct + gapPct);
     return {
       position: "absolute" as const,
-      top, height, left: 2, right: 2,
+      top,
+      height,
+      left: `calc(${leftPct}% + 1px)`,
+      width: `calc(${widthPct}% - 2px)`,
       backgroundColor: `${color}22`,
       borderLeft: `3px solid ${color}aa`,
       zIndex: 2,
     };
   }
 
+  // Build placed (column-packed) timed events for a given day column.
+  function placedTimedEventsForDay(dayStart: number): PlacedEvent[] {
+    const items: Array<{ event: CalendarEvent; top: number; height: number }> = [];
+    for (const e of visibleEvents) {
+      if (e.all_day) continue;
+      const pos = timedEventInDay(e, dayStart);
+      if (pos) items.push({ event: e, top: pos.top, height: pos.height });
+    }
+    return packDayColumns(items);
+  }
+
   function handleDrop(e: React.DragEvent, dayIndex: number, hour: number) {
     e.preventDefault();
     if (!draggedTask || accounts.length === 0) return;
-    const startDate = new Date(weekStartDate);
-    startDate.setDate(weekStartDate.getDate() + dayIndex);
-    startDate.setHours(hour, 0, 0, 0);
-    const endDate = new Date(startDate);
-    endDate.setHours(hour + 1);
+    const d = dayList[dayIndex];
+    const localStart = `${d.year}-${pad2(d.month)}-${pad2(d.day)}T${pad2(hour)}:00`;
+    const localEnd = `${d.year}-${pad2(d.month)}-${pad2(d.day)}T${pad2(hour + 1)}:00`;
     const fd = new FormData();
     fd.set("intent", "create_time_block");
     fd.set("task_id", draggedTask.id);
     fd.set("account_id", accounts[0].id);
-    fd.set("start_at", startDate.toISOString());
-    fd.set("end_at", endDate.toISOString());
+    fd.set("start_at", localInputToUtcIso(localStart, tz));
+    fd.set("end_at", localInputToUtcIso(localEnd, tz));
     fetcher.submit(fd, { method: "post" });
     setDraggedTask(null);
   }
 
   function handleCellClick(dayIndex: number, hour: number) {
     if (draggedTask || accounts.length === 0) return;
-    const startDate = new Date(weekStartDate);
-    startDate.setDate(weekStartDate.getDate() + dayIndex);
-    startDate.setHours(hour, 0, 0, 0);
-    const endDate = new Date(startDate);
-    endDate.setHours(hour + 1);
+    const d = dayList[dayIndex];
     setNewEventModal({
-      start: toLocalDateTimeInput(startDate.toISOString()),
-      end: toLocalDateTimeInput(endDate.toISOString()),
+      start: `${d.year}-${pad2(d.month)}-${pad2(d.day)}T${pad2(hour)}:00`,
+      end: `${d.year}-${pad2(d.month)}-${pad2(d.day)}T${pad2(hour + 1)}:00`,
     });
   }
 
@@ -817,13 +985,15 @@ export default function CalendarPage() {
     const now = new Date();
     now.setMinutes(0, 0, 0);
     now.setHours(now.getHours() + 1);
-    const end = new Date(now);
-    end.setHours(now.getHours() + 1);
-    setNewEventModal({ start: toLocalDateTimeInput(now.toISOString()), end: toLocalDateTimeInput(end.toISOString()) });
+    const end = new Date(now.getTime() + 3_600_000);
+    setNewEventModal({
+      start: utcIsoToLocalInput(now.toISOString(), tz),
+      end: utcIsoToLocalInput(end.toISOString(), tz),
+    });
   }
 
-  const prevOffset = weekOffset - 1;
-  const nextOffset = weekOffset + 1;
+  const prevOffset = offset - 1;
+  const nextOffset = offset + 1;
 
   return (
     <div className="flex flex-col h-full overflow-hidden" onClick={() => setColorPickerFor(null)}>
@@ -862,11 +1032,12 @@ export default function CalendarPage() {
           accounts={accounts as CalendarAccount[]}
           defaultStart={newEventModal.start}
           defaultEnd={newEventModal.end}
+          tz={tz}
           onClose={() => setNewEventModal(null)}
         />
       )}
       {selectedEvent && (
-        <EventDetailModal event={selectedEvent} onClose={() => setSelectedEvent(null)} />
+        <EventDetailModal event={selectedEvent} tz={tz} onClose={() => setSelectedEvent(null)} />
       )}
       {settingsAccount && (
         <CalendarSettingsModal account={settingsAccount} onClose={() => setSettingsAccount(null)} />
@@ -941,8 +1112,8 @@ export default function CalendarPage() {
                     {cals.length > 0 ? (
                       <div className="space-y-1 pl-1">
                         {cals.map((cal) => {
-                          const color = subCalColors[cal.id] ?? cal.color ?? account.color ?? "#2FE8B6";
-                          const isHidden = hiddenSubCals.has(cal.id);
+                          const color = resolveCalendarColor(cal, account, subCalColors[cal.id]);
+                          const isHidden = cal.is_visible === false;
                           return (
                             <div key={cal.id} className="flex items-center gap-1.5 group/cal">
                               {/* Color swatch (click to pick color) */}
@@ -996,8 +1167,8 @@ export default function CalendarPage() {
                                 {cal.name}
                               </span>
 
-                              {/* Toggle visibility */}
-                              <button type="button" onClick={() => toggleSubCal(cal.id)}
+                              {/* Toggle visibility (persists via is_visible) */}
+                              <button type="button" onClick={() => toggleSubCal(cal)}
                                 className="shrink-0 text-zinc-600 opacity-0 group-hover/cal:opacity-100 hover:text-zinc-300 transition-all"
                                 title={isHidden ? "Show" : "Hide"}>
                                 {isHidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
@@ -1048,13 +1219,15 @@ export default function CalendarPage() {
                 className="px-2 py-1 text-xs text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 rounded">›</Link>
             </div>
             <h1 className="text-sm font-semibold text-zinc-200">
-              {weekStartDate.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+              {view === "day"
+                ? new Date(dayBoundaries[0]).toLocaleDateString("en-US", { timeZone: tz, weekday: "long", month: "long", day: "numeric", year: "numeric" })
+                : new Date(dayBoundaries[0]).toLocaleDateString("en-US", { timeZone: tz, month: "long", year: "numeric" })}
             </h1>
           </div>
           <div className="flex items-center gap-2">
-            <Link to={`/dashboard/calendar?view=day&offset=${weekOffset}`}
+            <Link to={`/dashboard/calendar?view=day&offset=0`}
               className={`px-3 py-1.5 text-xs rounded transition-colors ${view === "day" ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/50"}`}>Day</Link>
-            <Link to={`/dashboard/calendar?view=week&offset=${weekOffset}`}
+            <Link to={`/dashboard/calendar?view=week&offset=0`}
               className={`px-3 py-1.5 text-xs rounded transition-colors ${view === "week" ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/50"}`}>Week</Link>
             <button onClick={openNewEventDefault} disabled={accounts.length === 0}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
@@ -1065,22 +1238,57 @@ export default function CalendarPage() {
 
         {/* Scrollable grid */}
         <div className="flex-1 overflow-auto">
-          {/* Day headers — sticky */}
+          {/* Day headers — sticky. Dates derive from the actual computed days (CS-5). */}
           <div className="grid border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10"
-            style={{ gridTemplateColumns: "44px repeat(7, 1fr)" }}>
+            style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)` }}>
             <div className="border-r border-zinc-800" />
-            {DAYS.map((day, i) => {
-              const d = new Date(weekStartDate);
-              d.setDate(weekStartDate.getDate() + i);
-              const isToday = d.toDateString() === new Date().toDateString();
+            {dayList.map((d, i) => {
+              const dayStart = dayBoundaries[i];
+              const nowMs = Date.now();
+              const isToday = nowMs >= dayStart && nowMs < dayStart + 86_400_000;
               return (
-                <div key={day} className="px-2 py-2 text-center border-r border-zinc-800 last:border-r-0">
-                  <div className="text-xs text-zinc-500">{day}</div>
-                  <div className={`text-sm font-medium mt-0.5 ${isToday ? "text-emerald-400" : "text-zinc-300"}`}>{d.getDate()}</div>
+                <div key={`${d.year}-${d.month}-${d.day}`} className="px-2 py-2 text-center border-r border-zinc-800 last:border-r-0">
+                  <div className="text-xs text-zinc-500">{weekdayLabel(d.weekday)}</div>
+                  <div className={`text-sm font-medium mt-0.5 ${isToday ? "text-emerald-400" : "text-zinc-300"}`}>{d.day}</div>
                 </div>
               );
             })}
           </div>
+
+          {/* All-day lane — sticky row above the time grid (CS-4) */}
+          {(() => {
+            const allDay = visibleEvents.filter((e) => e.all_day);
+            if (allDay.length === 0) return null;
+            return (
+              <div className="grid border-b border-zinc-800 bg-zinc-950/80"
+                style={{ gridTemplateColumns: `44px repeat(${dayList.length}, 1fr)` }}>
+                <div className="pr-1.5 py-1 text-right text-[10px] text-zinc-600 border-r border-zinc-800">all-day</div>
+                <div style={{ gridColumn: `2 / span ${dayList.length}` }} className="py-1 px-0.5">
+                  <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${dayList.length}, 1fr)` }}>
+                    {allDay.map((ev, idx) => {
+                      let startIdx = -1, endIdx = -1;
+                      for (let i = 0; i < dayList.length; i++) {
+                        if (allDayEventOnDay(ev, dayList[i])) {
+                          if (startIdx === -1) startIdx = i;
+                          endIdx = i;
+                        }
+                      }
+                      if (startIdx === -1) return null;
+                      const color = eventColor(ev);
+                      return (
+                        <button key={ev.id} type="button"
+                          onClick={(e) => { e.stopPropagation(); setSelectedEvent(ev); }}
+                          style={{ gridColumn: `${startIdx + 1} / ${endIdx + 2}`, gridRow: idx + 1, backgroundColor: `${color}22`, borderLeft: `3px solid ${color}aa` }}
+                          className="overflow-hidden truncate rounded-sm px-1.5 py-0.5 text-left text-xs text-zinc-200 hover:brightness-110 transition-all">
+                          {ev.title}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Grid body */}
           <div className="flex" style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}>
@@ -1096,10 +1304,11 @@ export default function CalendarPage() {
             </div>
 
             {/* Day columns */}
-            {DAYS.map((_, dayIndex) => {
-              const dayEvents = getEventsForDay(dayIndex, weekStartDate, visibleEvents);
+            {dayList.map((d, dayIndex) => {
+              const dayStart = dayBoundaries[dayIndex];
+              const placed = placedTimedEventsForDay(dayStart);
               return (
-                <div key={dayIndex} className="flex-1 relative border-r border-zinc-800/40 last:border-r-0"
+                <div key={`${d.year}-${d.month}-${d.day}`} className="flex-1 relative border-r border-zinc-800/40 last:border-r-0"
                   style={{ height: VISIBLE_HOURS * HOUR_HEIGHT }}>
                   {/* Hour background slots */}
                   {HOURS.map((hour, i) => (
@@ -1115,20 +1324,20 @@ export default function CalendarPage() {
                     </div>
                   ))}
 
-                  {/* Events */}
-                  {dayEvents.map((event) => (
+                  {/* Events (column-packed for overlaps — CS-7) */}
+                  {placed.map(({ event, top, height, col, colCount }) => (
                     <button
                       key={event.id}
                       type="button"
                       onClick={(e) => { e.stopPropagation(); setSelectedEvent(event); }}
-                      style={getEventChipStyle(event)}
-                      className="overflow-hidden rounded-sm px-1.5 py-0.5 text-left w-full hover:brightness-110 transition-all"
+                      style={chipStyle(top, height, eventColor(event), col, colCount)}
+                      className="overflow-hidden rounded-sm px-1.5 py-0.5 text-left hover:brightness-110 transition-all"
                     >
                       <div className="truncate text-xs font-medium text-zinc-200 leading-tight">
                         {event.is_time_block ? "⏱ " : ""}{event.title}
                       </div>
                       <div className="text-[10px] text-zinc-400 leading-tight">
-                        {formatTime(event.start_at)}
+                        {formatTimeInTz(event.start_at, tz)}
                       </div>
                     </button>
                   ))}

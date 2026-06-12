@@ -581,7 +581,9 @@ booking.post("/public/:slug", async (c) => {
       scheduled_at: body.scheduled_at,
       duration_minutes: link.duration_minutes,
       timezone: guestTimezone,
-      status: link.requires_confirmation ? "pending" : "confirmed",
+      // requires_confirmation was a half-built pending state (confirmed emails +
+      // invite, but unapprovable). Bookings are always confirmed now (BK-7).
+      status: "confirmed",
     })
     .select()
     .single();

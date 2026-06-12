@@ -4,6 +4,26 @@ import { useFetcher } from 'react-router';
 import { X, Minus, Maximize2, Minimize2, Paperclip, Trash2, Send, Clock, ChevronDown, Sparkles, Loader2, FileText } from 'lucide-react';
 // Same-origin proxy (routes/api.$.tsx) — adds the founder's JWT server-side.
 const API_URL = '/api';
+/** Normalize a string|string[] recipient field to a trimmed array. */
+function toAddressArray(v) {
+    if (!v)
+        return [];
+    const arr = Array.isArray(v) ? v : v.split(',');
+    return arr.map((s) => s.trim()).filter(Boolean);
+}
+/** Dedupe addresses case-insensitively, preserving first-seen casing. */
+function dedupeAddresses(addrs) {
+    const seen = new Set();
+    const out = [];
+    for (const a of addrs) {
+        const k = a.toLowerCase();
+        if (!seen.has(k)) {
+            seen.add(k);
+            out.push(a);
+        }
+    }
+    return out;
+}
 // ── Snippet expansion hook ───────────────────────────────────────────────────
 function useSnippetExpansion(textareaRef, snippets, onBodyChange) {
     const [showSuggestions, setShowSuggestions] = useState(false);
@@ -157,8 +177,13 @@ function AIDraftButton({ emailId, onDraft, }) {
                         }, className: "w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800", children: s.label }, s.id)))] }))] }));
 }
 // ── Main ComposeModal ─────────────────────────────────────────────────────────
-export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, accountId, accountEmail: _accountEmail, }) {
+export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, accountId, accountEmail, }) {
     const fetcher = useFetcher();
+    const draftFetcher = useFetcher();
+    const sendingRef = useRef(false);
+    const [draftId, setDraftId] = useState(null);
+    const [sendError, setSendError] = useState(null);
+    const [savedState, setSavedState] = useState('idle');
     const [isMinimized, setIsMinimized] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [showCc, setShowCc] = useState(false);
@@ -181,30 +206,48 @@ export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, acco
             .then((d) => setSnippets(d.snippets ?? []))
             .catch(() => { });
     }, []);
-    // Populate for reply/forward
+    // Populate for reply/forward. Resets per-open draft/send state too.
     useEffect(() => {
+        setDraftId(null);
+        setSendError(null);
+        setSavedState('idle');
         if (replyTo) {
             if (forward) {
                 setForm({
                     to: '',
                     cc: '',
                     bcc: '',
-                    subject: `Fwd: ${replyTo.subject}`,
+                    subject: replyTo.subject.startsWith('Fwd:') ? replyTo.subject : `Fwd: ${replyTo.subject}`,
                     body: `\n\n---------- Forwarded message ---------\nFrom: ${replyTo.from_name} <${replyTo.from_email}>\nSubject: ${replyTo.subject}\n\n${replyTo.body_text || ''}`,
                     scheduled_for: '',
                 });
             }
             else {
-                const ccList = replyAll && replyTo.cc_emails ? replyTo.cc_emails : '';
+                // Reply-all recipient set = original From + original To (minus self) + original Cc (EC-8).
+                const self = (accountEmail || '').toLowerCase();
+                const notSelf = (e) => e.toLowerCase() !== self;
+                const origTo = toAddressArray(replyTo.to_emails);
+                const origCc = toAddressArray(replyTo.cc_emails);
+                let toList;
+                let ccList;
+                if (replyAll) {
+                    toList = dedupeAddresses([replyTo.from_email, ...origTo].filter(Boolean).filter(notSelf));
+                    const inTo = new Set(toList.map((e) => e.toLowerCase()));
+                    ccList = dedupeAddresses(origCc.filter(Boolean).filter(notSelf)).filter((e) => !inTo.has(e.toLowerCase()));
+                }
+                else {
+                    toList = [replyTo.from_email].filter(Boolean);
+                    ccList = [];
+                }
                 setForm({
-                    to: replyTo.from_email,
-                    cc: ccList,
+                    to: toList.join(', '),
+                    cc: ccList.join(', '),
                     bcc: '',
-                    subject: replyTo.subject.startsWith('Re:') ? replyTo.subject : `Re: ${replyTo.subject}`,
+                    subject: /^re:\s/i.test(replyTo.subject) ? replyTo.subject : `Re: ${replyTo.subject}`,
                     body: `\n\nOn ${new Date().toLocaleDateString()}, ${replyTo.from_name} wrote:\n> ${(replyTo.body_text || '').split('\n').join('\n> ')}`,
                     scheduled_for: '',
                 });
-                if (ccList)
+                if (ccList.length)
                     setShowCc(true);
             }
         }
@@ -213,14 +256,15 @@ export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, acco
             setShowCc(false);
             setShowBcc(false);
         }
-    }, [replyTo, replyAll, forward]);
-    // Auto-save draft every 30 seconds
+    }, [replyTo, replyAll, forward, accountEmail]);
+    // Auto-save draft every 30 seconds (EC-3) — real route, tracked draft id.
     useEffect(() => {
         if (!isOpen || isMinimized)
             return;
         const interval = setInterval(() => {
             if (form.to || form.subject || form.body) {
-                fetcher.submit({
+                draftFetcher.submit({
+                    id: draftId ?? '',
                     account_id: accountId,
                     to_emails: form.to,
                     cc_emails: form.cc,
@@ -228,13 +272,41 @@ export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, acco
                     subject: form.subject,
                     body: form.body,
                     reply_to_id: replyTo?.id || '',
-                    status: 'draft',
                 }, { method: 'post', action: '/dashboard/inbox/drafts' });
             }
         }, 30000);
         return () => clearInterval(interval);
-    }, [isOpen, isMinimized, form, accountId, replyTo]);
+    }, [isOpen, isMinimized, form, accountId, replyTo, draftId]);
+    // Track autosave result → "Saved"/"Save failed" indicator + draft id for upsert.
+    useEffect(() => {
+        if (draftFetcher.state === 'submitting' || draftFetcher.state === 'loading') {
+            setSavedState('saving');
+        }
+        else if (draftFetcher.state === 'idle' && draftFetcher.data) {
+            if (draftFetcher.data.draft?.id) {
+                setDraftId(draftFetcher.data.draft.id);
+                setSavedState('saved');
+            }
+            else if (draftFetcher.data.error) {
+                setSavedState('failed');
+            }
+        }
+    }, [draftFetcher.state, draftFetcher.data]);
+    // Close only on a confirmed successful send; keep open with an inline error otherwise.
+    useEffect(() => {
+        if (fetcher.state === 'idle' && sendingRef.current && fetcher.data) {
+            sendingRef.current = false;
+            if (fetcher.data.success) {
+                onClose();
+            }
+            else {
+                setSendError(fetcher.data.error ?? 'Failed to send. Please try again.');
+            }
+        }
+    }, [fetcher.state, fetcher.data, onClose]);
     const handleSend = () => {
+        setSendError(null);
+        sendingRef.current = true;
         fetcher.submit({
             account_id: accountId,
             to_emails: form.to,
@@ -246,7 +318,6 @@ export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, acco
             scheduled_for: form.scheduled_for || '',
             action: form.scheduled_for ? 'schedule' : 'send',
         }, { method: 'post', action: '/dashboard/inbox/send' });
-        onClose();
     };
     const handleDiscard = () => {
         if (form.to || form.subject || form.body) {
@@ -267,7 +338,11 @@ export function ComposeModal({ isOpen, onClose, replyTo, replyAll, forward, acco
     const modalClasses = isFullscreen
         ? 'fixed inset-4 z-50'
         : 'fixed bottom-0 right-4 z-50 w-[560px] max-h-[80vh]';
-    return (_jsx("div", { className: modalClasses, children: _jsxs("div", { className: "flex h-full flex-col rounded-t-lg border border-zinc-700 bg-zinc-900 shadow-2xl", children: [_jsxs("div", { className: "flex items-center justify-between rounded-t-lg bg-zinc-800 px-4 py-2", children: [_jsx("span", { className: "text-sm font-medium", children: replyTo ? (forward ? 'Forward' : 'Reply') : 'New Message' }), _jsxs("div", { className: "flex items-center gap-1", children: [_jsx("button", { onClick: () => setIsMinimized(true), className: "rounded p-1 hover:bg-zinc-700", title: "Minimize", children: _jsx(Minus, { size: 14 }) }), _jsx("button", { onClick: () => setIsFullscreen(!isFullscreen), className: "rounded p-1 hover:bg-zinc-700", title: isFullscreen ? 'Exit fullscreen' : 'Fullscreen', children: isFullscreen ? _jsx(Minimize2, { size: 14 }) : _jsx(Maximize2, { size: 14 }) }), _jsx("button", { onClick: handleDiscard, className: "rounded p-1 hover:bg-zinc-700", title: "Close", children: _jsx(X, { size: 14 }) })] })] }), _jsxs("div", { className: "flex flex-1 flex-col overflow-hidden", children: [_jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "To" }), _jsx("input", { type: "text", value: form.to, onChange: (e) => setForm({ ...form, to: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none", placeholder: "Recipients" }), _jsxs("div", { className: "flex gap-2 text-sm text-zinc-500", children: [!showCc && _jsx("button", { onClick: () => setShowCc(true), className: "hover:text-zinc-300", children: "Cc" }), !showBcc && _jsx("button", { onClick: () => setShowBcc(true), className: "hover:text-zinc-300", children: "Bcc" })] })] }), showCc && (_jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "Cc" }), _jsx("input", { type: "text", value: form.cc, onChange: (e) => setForm({ ...form, cc: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none" })] })), showBcc && (_jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "Bcc" }), _jsx("input", { type: "text", value: form.bcc, onChange: (e) => setForm({ ...form, bcc: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none" })] })), _jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "Subject" }), _jsx("input", { type: "text", value: form.subject, onChange: (e) => setForm({ ...form, subject: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none" })] }), _jsxs("div", { className: "relative flex-1 overflow-auto p-4", children: [_jsx("textarea", { ref: textareaRef, value: form.body, onChange: (e) => setForm({ ...form, body: e.target.value }), onKeyDown: snippetKeyDown, onInput: snippetInput, className: "h-full min-h-[200px] w-full resize-none bg-transparent text-sm outline-none", placeholder: "Compose your message\u2026 (type /trigger to expand snippets)" }), showSuggestions && (_jsx(SnippetSuggestions, { snippets: filteredSnippets, onSelect: selectSnippet }))] }), showSchedule && (_jsx("div", { className: "border-t border-zinc-800 bg-zinc-800/50 px-4 py-2", children: _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-zinc-400", children: "Schedule for:" }), _jsx("input", { type: "datetime-local", value: form.scheduled_for, onChange: (e) => setForm({ ...form, scheduled_for: e.target.value }), className: "rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" }), _jsx("button", { onClick: () => { setShowSchedule(false); setForm({ ...form, scheduled_for: '' }); }, className: "text-xs text-zinc-500 hover:text-zinc-300", children: "Cancel" })] }) })), _jsxs("div", { className: "flex items-center justify-between border-t border-zinc-800 px-4 py-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsxs("button", { onClick: handleSend, disabled: !form.to || fetcher.state !== 'idle', className: "flex items-center gap-2 rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50", children: [_jsx(Send, { size: 14 }), form.scheduled_for ? 'Schedule' : 'Send'] }), _jsx("button", { onClick: () => setShowSchedule(!showSchedule), className: "rounded p-1.5 hover:bg-zinc-800", title: "Schedule send", children: _jsx(Clock, { size: 16 }) }), replyTo && (_jsx(AIDraftButton, { emailId: replyTo.id, onDraft: (draft) => setForm((f) => ({ ...f, body: draft })) }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsx(TemplateSelector, { onSelect: ({ subject, body }) => {
+    return (_jsx("div", { className: modalClasses, children: _jsxs("div", { className: "flex h-full flex-col rounded-t-lg border border-zinc-700 bg-zinc-900 shadow-2xl", children: [_jsxs("div", { className: "flex items-center justify-between rounded-t-lg bg-zinc-800 px-4 py-2", children: [_jsx("span", { className: "text-sm font-medium", children: replyTo ? (forward ? 'Forward' : 'Reply') : 'New Message' }), _jsxs("div", { className: "flex items-center gap-1", children: [_jsx("button", { onClick: () => setIsMinimized(true), className: "rounded p-1 hover:bg-zinc-700", title: "Minimize", children: _jsx(Minus, { size: 14 }) }), _jsx("button", { onClick: () => setIsFullscreen(!isFullscreen), className: "rounded p-1 hover:bg-zinc-700", title: isFullscreen ? 'Exit fullscreen' : 'Fullscreen', children: isFullscreen ? _jsx(Minimize2, { size: 14 }) : _jsx(Maximize2, { size: 14 }) }), _jsx("button", { onClick: handleDiscard, className: "rounded p-1 hover:bg-zinc-700", title: "Close", children: _jsx(X, { size: 14 }) })] })] }), _jsxs("div", { className: "flex flex-1 flex-col overflow-hidden", children: [_jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "To" }), _jsx("input", { type: "text", value: form.to, onChange: (e) => setForm({ ...form, to: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none", placeholder: "Recipients" }), _jsxs("div", { className: "flex gap-2 text-sm text-zinc-500", children: [!showCc && _jsx("button", { onClick: () => setShowCc(true), className: "hover:text-zinc-300", children: "Cc" }), !showBcc && _jsx("button", { onClick: () => setShowBcc(true), className: "hover:text-zinc-300", children: "Bcc" })] })] }), showCc && (_jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "Cc" }), _jsx("input", { type: "text", value: form.cc, onChange: (e) => setForm({ ...form, cc: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none" })] })), showBcc && (_jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "Bcc" }), _jsx("input", { type: "text", value: form.bcc, onChange: (e) => setForm({ ...form, bcc: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none" })] })), _jsxs("div", { className: "flex items-center border-b border-zinc-800 px-4 py-2", children: [_jsx("span", { className: "w-12 text-sm text-zinc-500", children: "Subject" }), _jsx("input", { type: "text", value: form.subject, onChange: (e) => setForm({ ...form, subject: e.target.value }), className: "flex-1 bg-transparent text-sm outline-none" })] }), _jsxs("div", { className: "relative flex-1 overflow-auto p-4", children: [_jsx("textarea", { ref: textareaRef, value: form.body, onChange: (e) => setForm({ ...form, body: e.target.value }), onKeyDown: snippetKeyDown, onInput: snippetInput, className: "h-full min-h-[200px] w-full resize-none bg-transparent text-sm outline-none", placeholder: "Compose your message\u2026 (type /trigger to expand snippets)" }), showSuggestions && (_jsx(SnippetSuggestions, { snippets: filteredSnippets, onSelect: selectSnippet }))] }), showSchedule && (_jsx("div", { className: "border-t border-zinc-800 bg-zinc-800/50 px-4 py-2", children: _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-zinc-400", children: "Schedule for:" }), _jsx("input", { type: "datetime-local", value: form.scheduled_for, onChange: (e) => setForm({ ...form, scheduled_for: e.target.value }), className: "rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm" }), _jsx("button", { onClick: () => { setShowSchedule(false); setForm({ ...form, scheduled_for: '' }); }, className: "text-xs text-zinc-500 hover:text-zinc-300", children: "Cancel" })] }) })), sendError && (_jsx("div", { className: "border-t border-red-900/50 bg-red-950/40 px-4 py-2 text-sm text-red-300", children: sendError })), _jsxs("div", { className: "flex items-center justify-between border-t border-zinc-800 px-4 py-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsxs("button", { onClick: handleSend, disabled: !form.to || fetcher.state !== 'idle', className: "flex items-center gap-2 rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50", children: [_jsx(Send, { size: 14 }), fetcher.state !== 'idle'
+                                                    ? 'Sending…'
+                                                    : form.scheduled_for
+                                                        ? 'Schedule'
+                                                        : 'Send'] }), savedState === 'saving' && _jsx("span", { className: "text-xs text-zinc-500", children: "Saving\u2026" }), savedState === 'saved' && _jsx("span", { className: "text-xs text-zinc-500", children: "Saved" }), savedState === 'failed' && _jsx("span", { className: "text-xs text-amber-400", children: "Save failed" }), _jsx("button", { onClick: () => setShowSchedule(!showSchedule), className: "rounded p-1.5 hover:bg-zinc-800", title: "Schedule send", children: _jsx(Clock, { size: 16 }) }), replyTo && (_jsx(AIDraftButton, { emailId: replyTo.id, onDraft: (draft) => setForm((f) => ({ ...f, body: draft })) }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsx(TemplateSelector, { onSelect: ({ subject, body }) => {
                                                 setForm((f) => ({ ...f, subject: subject || f.subject, body }));
                                             } }), _jsx(SaveAsTemplateButton, { subject: form.subject, body: form.body }), _jsx("button", { className: "rounded p-1.5 hover:bg-zinc-800", title: "Attach files", children: _jsx(Paperclip, { size: 16 }) }), _jsx("button", { onClick: handleDiscard, className: "rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-red-400", title: "Discard", children: _jsx(Trash2, { size: 16 }) })] })] })] })] }) }));
 }

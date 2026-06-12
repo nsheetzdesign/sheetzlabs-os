@@ -1,4 +1,5 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
+import { type DayDescriptor } from "~/lib/tz";
 export declare const meta: MetaFunction;
 type SubCalendar = {
     id: string;
@@ -12,17 +13,9 @@ type SubCalendarEntry = {
     calendars: SubCalendar[];
 };
 export declare function loader({ request, context }: LoaderFunctionArgs): Promise<{
-    events: {
-        id: string;
-        title: string;
-        start_at: string;
-        end_at: string;
-        is_time_block: boolean | null;
-        all_day: boolean | null;
-        account_id: string | null;
-        task_id: string | null;
-        google_calendar_id: string | null;
-    }[];
+    events: ({
+        error: true;
+    } & "column 'all_day_end_date' does not exist on 'calendar_events'.")[];
     accounts: ({
         error: true;
     } & "column 'needs_reauth' does not exist on 'calendar_accounts'.")[];
@@ -34,13 +27,15 @@ export declare function loader({ request, context }: LoaderFunctionArgs): Promis
         id: string;
         title: string;
         due_date: string | null;
-        priority: "urgent" | "high" | "medium" | "low" | null;
-        status: "backlog" | "todo" | "in-progress" | "review" | "done" | "blocked" | null;
+        priority: "high" | "low" | "urgent" | "medium" | null;
+        status: "done" | "backlog" | "todo" | "in-progress" | "review" | "blocked" | null;
     }[];
     subCalendars: SubCalendarEntry[];
     view: string;
-    weekOffset: number;
-    weekStart: string;
+    offset: number;
+    days: DayDescriptor[];
+    tz: string;
+    tzKnown: boolean;
 }>;
 export declare function action({ request, context }: ActionFunctionArgs): Promise<Response | null>;
 export default function CalendarPage(): import("react/jsx-runtime").JSX.Element;

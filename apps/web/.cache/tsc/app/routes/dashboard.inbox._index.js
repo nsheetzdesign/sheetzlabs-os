@@ -1,8 +1,9 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator } from 'react-router';
-import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell } from 'lucide-react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator, Form } from 'react-router';
+import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell, AlertTriangle, X } from 'lucide-react';
 import { getSupabaseClient } from '~/lib/supabase.server';
+import { apiFetch } from '~/lib/api';
 import { InboxSidebar } from '~/components/inbox/InboxSidebar';
 import { EmailList } from '~/components/inbox/EmailList';
 import { EmailPreview } from '~/components/inbox/EmailPreview';
@@ -39,10 +40,9 @@ export async function loader({ request, context }) {
         .eq('is_deleted', false)
         .order('received_at', { ascending: false })
         .limit(100);
-    if (search) {
-        query = query.or(`subject.ilike.%${search}%,from_email.ilike.%${search}%,snippet.ilike.%${search}%`);
-    }
-    else {
+    // NOTE: search is NOT handled here — it routes through the API's /email/search
+    // (operator-aware, injection-safe, indexed). See the search branch below (EU-6).
+    if (!search) {
         if (folder === 'inbox') {
             query = query.eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_spam', false);
         }
@@ -72,22 +72,43 @@ export async function loader({ request, context }) {
     if (account_id) {
         query = query.eq('account_id', account_id);
     }
-    const [{ data: emails, error: emailsError }, { data: accounts }] = await Promise.all([
-        query,
-        supabase.from('email_accounts').select('id, email').order('email'),
-    ]);
-    console.log('[Inbox] Query result:', {
-        count: emails?.length,
-        error: emailsError,
-        folder,
-        accountId: account_id,
-        firstEmail: emails?.[0] ? {
-            id: emails[0].id,
-            subject: emails[0].subject,
-            folder: emails[0].folder,
-            hasBody: !!emails[0].body_text || !!emails[0].body_html,
-        } : null,
-    });
+    // Search routes through the API's operator-aware, injection-safe /email/search
+    // (EU-6). Folder browsing stays on the direct Supabase query.
+    const accountsPromise = supabase
+        .from('email_accounts')
+        .select('id, email, needs_reauth')
+        .order('email');
+    let emails = null;
+    let emailsError = null;
+    let accounts = null;
+    if (search) {
+        const params = new URLSearchParams({ q: search });
+        if (account_id)
+            params.set('account_id', account_id);
+        const [searchRes, accountsRes] = await Promise.all([
+            apiFetch(request, env, `/email/search?${params.toString()}`),
+            accountsPromise,
+        ]);
+        accounts = accountsRes.data;
+        if (searchRes.ok) {
+            const data = (await searchRes.json());
+            emails = data.emails ?? [];
+        }
+        else {
+            emails = [];
+            emailsError = { message: `search failed (${searchRes.status})` };
+        }
+    }
+    else {
+        const [emailsRes, accountsRes] = await Promise.all([query, accountsPromise]);
+        emails = emailsRes.data;
+        emailsError = emailsRes.error;
+        accounts = accountsRes.data;
+    }
+    if (emailsError)
+        console.error('[Inbox] emails query failed:', emailsError.message);
+    // Accounts flagged for reconnection drive the reconnect banner (ES-3 Part 1).
+    const reauthAccounts = (accounts ?? []).filter(a => a.needs_reauth).map(a => ({ id: a.id, email: a.email }));
     const accountIds = (accounts ?? []).map(a => a.id);
     // Fetch labels for all accounts from DB
     const { data: labelsData } = accountIds.length
@@ -151,22 +172,20 @@ export async function loader({ request, context }) {
         email: account.email,
         labels: labelsByAccount[account.id] ?? [],
     }));
-    // Global counts (across all accounts)
-    const [{ count: gInbox }, { count: gStarred }, { count: gSnoozed }, { count: gSpam }, { count: gTrash }, { count: gDrafts },] = await Promise.all([
-        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_read', false),
-        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_starred', true).eq('is_trashed', false),
-        supabase.from('emails').select('id', { count: 'exact', head: true }).not('snoozed_until', 'is', null),
-        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_spam', true).eq('is_trashed', false),
-        supabase.from('emails').select('id', { count: 'exact', head: true }).eq('is_trashed', true),
-        supabase.from('email_drafts').select('id', { count: 'exact', head: true }).eq('status', 'draft'),
-    ]);
+    // Global counts (across all accounts) — single round trip via get_email_counts
+    // (Prompt 52A Part 7). Excludes deleted everywhere; snoozed excludes expired.
+    const { data: countsRow, error: countsError } = await supabase
+        .rpc('get_email_counts', { p_account_id: null })
+        .single();
+    if (countsError)
+        console.error('[Inbox] get_email_counts failed:', countsError.message);
     const globalCounts = {
-        inbox: gInbox ?? 0,
-        starred: gStarred ?? 0,
-        snoozed: gSnoozed ?? 0,
-        spam: gSpam ?? 0,
-        trash: gTrash ?? 0,
-        drafts: gDrafts ?? 0,
+        inbox: Number(countsRow?.inbox ?? 0),
+        starred: Number(countsRow?.starred ?? 0),
+        snoozed: Number(countsRow?.snoozed ?? 0),
+        spam: Number(countsRow?.spam ?? 0),
+        trash: Number(countsRow?.trash ?? 0),
+        drafts: Number(countsRow?.drafts ?? 0),
     };
     // Per-account counts (simple: just unread inbox for each)
     const counts = {};
@@ -190,6 +209,7 @@ export async function loader({ request, context }) {
             labels: (e.email_label_assignments ?? []).map((a) => a.email_labels).filter(Boolean),
         })),
         accounts: accountsWithLabels,
+        reauthAccounts,
         counts,
         globalCounts,
         folder,
@@ -206,7 +226,9 @@ const TRIAGE_TABS = [
     { id: 'notification', label: 'Notifications', Icon: Bell },
 ];
 export default function Inbox() {
-    const { emails, accounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData();
+    const { emails, accounts, reauthAccounts, counts, globalCounts, folder, accountId, labelId, search } = useLoaderData();
+    const [dismissedReauth, setDismissedReauth] = useState(new Set());
+    const visibleReauth = reauthAccounts.filter(a => !dismissedReauth.has(a.id));
     const [searchParams, setSearchParams] = useSearchParams();
     const navigate = useNavigate();
     const fetcher = useFetcher();
@@ -221,6 +243,7 @@ export default function Inbox() {
     const [triageFilter, setTriageFilter] = useState('all');
     const [composeProps, setComposeProps] = useState(null);
     const [threadEmails, setThreadEmails] = useState(null);
+    const searchDebounce = useRef(null);
     // Triage filtering
     const filteredEmails = useMemo(() => {
         if (triageFilter === 'all')
@@ -239,11 +262,17 @@ export default function Inbox() {
     useEffect(() => {
         setFocusIndex(0);
     }, [triageFilter, folder]);
-    // Handle URL params for compose (reply/forward links)
+    // Reply opens from the original email's account so threading + From are correct.
+    const composeReplyAccount = useMemo(() => {
+        const accId = composeProps?.replyTo?.account_id;
+        return accId ? accounts.find((a) => a.id === accId) ?? null : null;
+    }, [composeProps, accounts]);
+    // Handle URL params for compose (reply/forward/new links from the detail route)
     useEffect(() => {
         const replyId = searchParams.get('reply');
         const forwardId = searchParams.get('forward');
         const replyAll = searchParams.get('all') === 'true';
+        const composeNew = searchParams.get('compose');
         if (replyId || forwardId) {
             const email = emails.find((e) => e.id === (replyId || forwardId));
             if (email) {
@@ -254,6 +283,10 @@ export default function Inbox() {
                 });
                 setShowCompose(true);
             }
+        }
+        else if (composeNew) {
+            setComposeProps(null);
+            setShowCompose(true);
         }
     }, [searchParams, emails]);
     const handleRefresh = async () => {
@@ -391,8 +424,19 @@ export default function Inbox() {
     const handleSearch = (e) => {
         e.preventDefault();
         const formData = new FormData(e.currentTarget);
-        const q = formData.get('q');
+        const q = formData.get('q').trim();
+        if (searchDebounce.current)
+            clearTimeout(searchDebounce.current);
         setSearchParams(q ? { q } : { folder: 'inbox' });
+    };
+    // Debounced as-you-type search (EU-6).
+    const handleSearchChange = (e) => {
+        const q = e.currentTarget.value.trim();
+        if (searchDebounce.current)
+            clearTimeout(searchDebounce.current);
+        searchDebounce.current = setTimeout(() => {
+            setSearchParams(q ? { q } : { folder: 'inbox' });
+        }, 350);
     };
     const closeCompose = () => {
         setShowCompose(false);
@@ -401,6 +445,7 @@ export default function Inbox() {
         params.delete('reply');
         params.delete('forward');
         params.delete('all');
+        params.delete('compose');
         setSearchParams(params);
     };
     const handleClose = useCallback(() => {
@@ -450,37 +495,37 @@ export default function Inbox() {
         onSearch: () => document.getElementById('inbox-search')?.focus(),
         onShowHelp: () => setShowShortcutsHelp(true),
     });
-    return (_jsxs("div", { className: "flex h-full", children: [_jsx(InboxSidebar, { accounts: accounts, counts: counts, globalCounts: globalCounts, activeFolder: folder, activeAccountId: accountId, activeLabel: labelId, onSelectFolder: handleFolderSelect, onSelectLabel: handleLabelSelect, onDragOver: handleDragOver, onDrop: handleDrop }), _jsxs("div", { className: "flex-1 flex overflow-hidden", children: [_jsxs("div", { className: `${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`, children: [_jsxs("div", { className: "p-3 border-b border-zinc-800 flex gap-2", children: [_jsx("form", { onSubmit: handleSearch, className: "flex-1", children: _jsx("input", { id: "inbox-search", type: "text", name: "q", defaultValue: search || '', placeholder: "Search emails...", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500" }) }), _jsx("button", { onClick: handleRefresh, disabled: isRefreshing || revalidator.state === 'loading', title: "Sync emails", className: "flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors", children: _jsx(RefreshCw, { size: 14, className: isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : '' }) })] }), _jsx("div", { className: "flex border-b border-zinc-800 overflow-x-auto scrollbar-none", children: TRIAGE_TABS.map(({ id, label }) => {
-                                    const count = triageCounts[id] ?? 0;
-                                    const isActive = triageFilter === id;
-                                    if (id !== 'all' && count === 0)
-                                        return null;
-                                    return (_jsxs("button", { onClick: () => setTriageFilter(id), className: `flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap border-b-2 transition-colors ${isActive
-                                            ? 'border-emerald-500 text-emerald-400'
-                                            : 'border-transparent text-zinc-500 hover:text-zinc-300'}`, children: [_jsx("span", { children: label }), count > 0 && id !== 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count })), id === 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count }))] }, id));
-                                }) }), _jsx(EmailList, { emails: filteredEmails, selectedIds: selectedIds, activeEmailId: activeEmail?.id ?? null, focusedIndex: focusIndex, onSelect: toggleSelect, onSelectAll: () => setSelectedIds(new Set(filteredEmails.map(e => e.id))), onClearSelection: () => setSelectedIds(new Set()), onOpen: (email) => handleOpenEmail(email), onDragStart: handleDragStart })] }), _jsx("div", { className: `${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`, children: threadEmails && threadEmails.length > 1 ? (_jsx(ThreadView, { emails: threadEmails, onReply: (email) => {
-                                setComposeProps({ replyTo: email });
-                                setShowCompose(true);
-                            }, onReplyAll: (email) => {
-                                setComposeProps({ replyTo: email, replyAll: true });
-                                setShowCompose(true);
-                            }, onForward: (email) => {
-                                setComposeProps({ replyTo: email, forward: true });
-                                setShowCompose(true);
-                            }, onClose: () => {
-                                setActiveEmail(null);
-                                setThreadEmails(null);
-                            } })) : (_jsx(EmailPreview, { email: activeEmail, onClose: () => {
-                                setActiveEmail(null);
-                                setThreadEmails(null);
-                            }, onReply: () => {
-                                setComposeProps({ replyTo: activeEmail });
-                                setShowCompose(true);
-                            }, onReplyAll: () => {
-                                setComposeProps({ replyTo: activeEmail, replyAll: true });
-                                setShowCompose(true);
-                            }, onForward: () => {
-                                setComposeProps({ replyTo: activeEmail, forward: true });
-                                setShowCompose(true);
-                            }, onBulkAction: (action) => handleBulkAction(action, activeEmail?.id) })) })] }), _jsx(ComposeModal, { isOpen: showCompose, onClose: closeCompose, replyTo: composeProps?.replyTo, replyAll: composeProps?.replyAll, forward: composeProps?.forward, accountId: accounts[0]?.id || '', accountEmail: accounts[0]?.email || '' }), _jsx(KeyboardShortcutsHelp, { isOpen: showShortcutsHelp, onClose: () => setShowShortcutsHelp(false) })] }));
+    return (_jsxs("div", { className: "flex flex-col h-full", children: [visibleReauth.map((acct) => (_jsxs("div", { className: "flex items-center gap-3 px-4 py-2 bg-amber-950/40 border-b border-amber-800/50 text-sm text-amber-200", children: [_jsx(AlertTriangle, { size: 16, className: "shrink-0 text-amber-400" }), _jsxs("span", { className: "flex-1", children: ["Gmail access for ", _jsx("strong", { children: acct.email }), " was revoked \u2014 sync is paused until you reconnect."] }), _jsx(Form, { method: "post", action: "/dashboard/inbox/connect-gmail", children: _jsxs("button", { type: "submit", className: "px-3 py-1 rounded bg-amber-500 text-amber-950 font-medium hover:bg-amber-400 transition-colors", children: ["Reconnect ", acct.email] }) }), _jsx("button", { type: "button", onClick: () => setDismissedReauth((prev) => new Set(prev).add(acct.id)), title: "Dismiss", className: "text-amber-400 hover:text-amber-200", children: _jsx(X, { size: 16 }) })] }, acct.id))), _jsxs("div", { className: "flex flex-1 overflow-hidden", children: [_jsx(InboxSidebar, { accounts: accounts, counts: counts, globalCounts: globalCounts, activeFolder: folder, activeAccountId: accountId, activeLabel: labelId, onSelectFolder: handleFolderSelect, onSelectLabel: handleLabelSelect, onCompose: () => { setComposeProps(null); setShowCompose(true); }, onDragOver: handleDragOver, onDrop: handleDrop }), _jsxs("div", { className: "flex-1 flex overflow-hidden", children: [_jsxs("div", { className: `${activeEmail ? 'hidden md:flex md:w-96' : 'flex-1'} flex-col border-r border-zinc-800`, children: [_jsxs("div", { className: "p-3 border-b border-zinc-800 flex gap-2", children: [_jsx("form", { onSubmit: handleSearch, className: "flex-1", children: _jsx("input", { id: "inbox-search", type: "text", name: "q", defaultValue: search || '', onChange: handleSearchChange, placeholder: "Search emails\u2026 (try from:alice is:unread)", className: "w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500" }) }), _jsx("button", { onClick: handleRefresh, disabled: isRefreshing || revalidator.state === 'loading', title: "Sync emails", className: "flex items-center gap-1.5 px-3 py-1.5 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 rounded disabled:opacity-50 transition-colors", children: _jsx(RefreshCw, { size: 14, className: isRefreshing || revalidator.state === 'loading' ? 'animate-spin' : '' }) })] }), _jsx("div", { className: "flex border-b border-zinc-800 overflow-x-auto scrollbar-none", children: TRIAGE_TABS.map(({ id, label }) => {
+                                            const count = triageCounts[id] ?? 0;
+                                            const isActive = triageFilter === id;
+                                            if (id !== 'all' && count === 0)
+                                                return null;
+                                            return (_jsxs("button", { onClick: () => setTriageFilter(id), className: `flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap border-b-2 transition-colors ${isActive
+                                                    ? 'border-emerald-500 text-emerald-400'
+                                                    : 'border-transparent text-zinc-500 hover:text-zinc-300'}`, children: [_jsx("span", { children: label }), count > 0 && id !== 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count })), id === 'all' && (_jsx("span", { className: `px-1.5 py-0.5 rounded-full text-xs ${isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`, children: count }))] }, id));
+                                        }) }), _jsx(EmailList, { emails: filteredEmails, selectedIds: selectedIds, activeEmailId: activeEmail?.id ?? null, focusedIndex: focusIndex, onSelect: toggleSelect, onSelectAll: () => setSelectedIds(new Set(filteredEmails.map(e => e.id))), onClearSelection: () => setSelectedIds(new Set()), onOpen: (email) => handleOpenEmail(email), onDragStart: handleDragStart })] }), _jsx("div", { className: `${activeEmail ? 'flex-1' : 'hidden md:flex md:flex-1'}`, children: threadEmails && threadEmails.length > 1 ? (_jsx(ThreadView, { emails: threadEmails, onReply: (email) => {
+                                        setComposeProps({ replyTo: email });
+                                        setShowCompose(true);
+                                    }, onReplyAll: (email) => {
+                                        setComposeProps({ replyTo: email, replyAll: true });
+                                        setShowCompose(true);
+                                    }, onForward: (email) => {
+                                        setComposeProps({ replyTo: email, forward: true });
+                                        setShowCompose(true);
+                                    }, onClose: () => {
+                                        setActiveEmail(null);
+                                        setThreadEmails(null);
+                                    } })) : (_jsx(EmailPreview, { email: activeEmail, onClose: () => {
+                                        setActiveEmail(null);
+                                        setThreadEmails(null);
+                                    }, onReply: () => {
+                                        setComposeProps({ replyTo: activeEmail });
+                                        setShowCompose(true);
+                                    }, onReplyAll: () => {
+                                        setComposeProps({ replyTo: activeEmail, replyAll: true });
+                                        setShowCompose(true);
+                                    }, onForward: () => {
+                                        setComposeProps({ replyTo: activeEmail, forward: true });
+                                        setShowCompose(true);
+                                    }, onBulkAction: (action) => handleBulkAction(action, activeEmail?.id) })) })] })] }), _jsx(ComposeModal, { isOpen: showCompose, onClose: closeCompose, replyTo: composeProps?.replyTo, replyAll: composeProps?.replyAll, forward: composeProps?.forward, accountId: composeReplyAccount?.id || accounts[0]?.id || '', accountEmail: composeReplyAccount?.email || accounts[0]?.email || '' }), _jsx(KeyboardShortcutsHelp, { isOpen: showShortcutsHelp, onClose: () => setShowShortcutsHelp(false) })] }));
 }

@@ -171,7 +171,7 @@ export default function EmailDetail() {
             </button>
           </starFetcher.Form>
           <Link
-            to={`/dashboard/inbox/compose?reply_to=${email.id}`}
+            to={`/dashboard/inbox?reply=${email.id}`}
             className="flex items-center gap-1.5 rounded-lg border border-surface-2/50 px-3 py-1.5 text-sm text-zinc-400 transition-colors hover:border-surface-3 hover:text-zinc-200"
           >
             <Reply className="h-4 w-4" />
@@ -251,8 +251,8 @@ export default function EmailDetail() {
             </div>
             <p className="text-sm text-zinc-400">
               AI draft saved.{" "}
-              <Link to="/dashboard/inbox/compose" className="text-brand hover:text-brand-light">
-                View drafts
+              <Link to={`/dashboard/inbox?reply=${email.id}`} className="text-brand hover:text-brand-light">
+                Open reply
               </Link>
             </p>
           </div>

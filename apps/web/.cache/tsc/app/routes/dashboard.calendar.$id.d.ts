@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
 export declare const meta: MetaFunction<typeof loader>;
-export declare function loader({ params, context }: LoaderFunctionArgs): Promise<{
+export declare function loader({ params, request, context }: LoaderFunctionArgs): Promise<{
     event: {
         account_id: string | null;
         ai_prep_doc_id: string | null;
@@ -33,13 +33,14 @@ export declare function loader({ params, context }: LoaderFunctionArgs): Promise
         tasks: {
             id: string;
             title: string;
-            status: "backlog" | "todo" | "in-progress" | "review" | "done" | "blocked" | null;
+            status: "done" | "backlog" | "todo" | "in-progress" | "review" | "blocked" | null;
         } | null;
         knowledge: {
             id: string;
             title: string;
         } | null;
     };
+    tz: string;
 }>;
 export declare function action({ params, request, context }: ActionFunctionArgs): Promise<Response | null>;
 export default function CalendarEventDetail(): import("react/jsx-runtime").JSX.Element;

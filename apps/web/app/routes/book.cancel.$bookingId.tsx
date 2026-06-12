@@ -3,6 +3,8 @@ import { useLoaderData } from "react-router";
 import { useState } from "react";
 import { AlertTriangle, Check } from "lucide-react";
 
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
+
 type Booking = {
   id: string;
   guest_name: string;

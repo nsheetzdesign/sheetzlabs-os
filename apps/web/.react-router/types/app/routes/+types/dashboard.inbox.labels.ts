@@ -2,10 +2,10 @@
 
 import type { GetInfo, GetAnnotations } from "react-router/internal";
 
-type Module = typeof import("../dashboard.inbox.compose.js")
+type Module = typeof import("../dashboard.inbox.labels.js")
 
 type Info = GetInfo<{
-  file: "routes/dashboard.inbox.compose.tsx",
+  file: "routes/dashboard.inbox.labels.tsx",
   module: Module
 }>
 
@@ -19,8 +19,8 @@ type Matches = [{
   id: "routes/dashboard.inbox";
   module: typeof import("../dashboard.inbox.js");
 }, {
-  id: "routes/dashboard.inbox.compose";
-  module: typeof import("../dashboard.inbox.compose.js");
+  id: "routes/dashboard.inbox.labels";
+  module: typeof import("../dashboard.inbox.labels.js");
 }];
 
 type Annotations = GetAnnotations<Info & { module: Module, matches: Matches }, false>;

@@ -1,4 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 type Booking = {
     id: string;
     guest_name: string;
@@ -16,4 +17,3 @@ export declare function loader({ params, context }: LoaderFunctionArgs): Promise
     apiUrl: string;
 }>;
 export default function CancelBookingPage(): import("react/jsx-runtime").JSX.Element;
-export {};

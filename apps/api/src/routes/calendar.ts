@@ -841,16 +841,44 @@ calendar.get("/accounts/:id/calendars", async (c) => {
     items?: Array<{ id: string; summary?: string; backgroundColor?: string }>;
   };
 
+  // Don't clobber a user's custom color on every list (CS-11). Insert new
+  // calendars with Google's color; for existing rows refresh the name and only
+  // the color of rows the user hasn't customized (color_is_custom = false).
+  const { data: existingRows } = await supabase
+    .from("calendar_sub_accounts")
+    .select("external_id, color_is_custom")
+    .eq("account_id", id);
+  const existing = new Map(
+    (existingRows ?? []).map((r: { external_id: string; color_is_custom: boolean | null }) => [
+      r.external_id,
+      r.color_is_custom === true,
+    ])
+  );
+
   for (const cal of calList.items ?? []) {
-    await supabase.from("calendar_sub_accounts").upsert(
-      {
+    const name = cal.summary || cal.id;
+    const googleColor = cal.backgroundColor || "#2FE8B6";
+    if (!existing.has(cal.id)) {
+      await supabase.from("calendar_sub_accounts").insert({
         account_id: id,
         external_id: cal.id,
-        name: cal.summary || cal.id,
-        color: cal.backgroundColor || "#2FE8B6",
-      },
-      { onConflict: "account_id,external_id" }
-    );
+        name,
+        color: googleColor,
+      });
+    } else if (existing.get(cal.id)) {
+      // User-customized color — preserve it, refresh name only.
+      await supabase
+        .from("calendar_sub_accounts")
+        .update({ name })
+        .eq("account_id", id)
+        .eq("external_id", cal.id);
+    } else {
+      await supabase
+        .from("calendar_sub_accounts")
+        .update({ name, color: googleColor })
+        .eq("account_id", id)
+        .eq("external_id", cal.id);
+    }
   }
 
   const { data: subCalendars } = await supabase
@@ -870,7 +898,11 @@ calendar.patch("/sub-accounts/:id", async (c) => {
 
   const updates: Record<string, unknown> = {};
   if (body.is_visible !== undefined) updates.is_visible = body.is_visible;
-  if (body.color !== undefined) updates.color = body.color;
+  if (body.color !== undefined) {
+    updates.color = body.color;
+    // Mark as user-customized so the calendars-list refresh never clobbers it (CS-11).
+    updates.color_is_custom = true;
+  }
 
   const { data } = await supabase
     .from("calendar_sub_accounts")

@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useLoaderData } from "react-router";
 import { useState } from "react";
 import { AlertTriangle, Check } from "lucide-react";
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 export async function loader({ params, context }) {
     const env = context.cloudflare.env;
     const apiUrl = env.INTERNAL_API_URL ?? "https://api.sheetzlabs.com";

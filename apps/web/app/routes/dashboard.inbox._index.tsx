@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useLoaderData, useFetcher, useSearchParams, useNavigate, useRevalidator, Form } from 'react-router';
 import { RefreshCw, Inbox as InboxIcon, Star, Mail, Bell, AlertTriangle, X } from 'lucide-react';
 import type { LoaderFunctionArgs, MetaFunction } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
+import { apiFetch } from '~/lib/api';
 import { InboxSidebar } from '~/components/inbox/InboxSidebar';
 import { EmailList, type Email } from '~/components/inbox/EmailList';
 import { EmailPreview, type PreviewEmail } from '~/components/inbox/EmailPreview';
@@ -43,9 +44,9 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     .order('received_at', { ascending: false })
     .limit(100);
 
-  if (search) {
-    query = query.or(`subject.ilike.%${search}%,from_email.ilike.%${search}%,snippet.ilike.%${search}%`);
-  } else {
+  // NOTE: search is NOT handled here — it routes through the API's /email/search
+  // (operator-aware, injection-safe, indexed). See the search branch below (EU-6).
+  if (!search) {
     if (folder === 'inbox') {
       query = query.eq('folder', 'INBOX').eq('is_archived', false).eq('is_trashed', false).eq('is_spam', false);
     } else if (folder === 'starred') {
@@ -70,10 +71,38 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     query = query.eq('account_id', account_id);
   }
 
-  const [{ data: emails, error: emailsError }, { data: accounts }] = await Promise.all([
-    query,
-    supabase.from('email_accounts').select('id, email, needs_reauth').order('email'),
-  ]);
+  // Search routes through the API's operator-aware, injection-safe /email/search
+  // (EU-6). Folder browsing stays on the direct Supabase query.
+  const accountsPromise = supabase
+    .from('email_accounts')
+    .select('id, email, needs_reauth')
+    .order('email');
+
+  let emails: any[] | null = null;
+  let emailsError: { message: string } | null = null;
+  let accounts: { id: string; email: string; needs_reauth?: boolean }[] | null = null;
+
+  if (search) {
+    const params = new URLSearchParams({ q: search });
+    if (account_id) params.set('account_id', account_id);
+    const [searchRes, accountsRes] = await Promise.all([
+      apiFetch(request, env, `/email/search?${params.toString()}`),
+      accountsPromise,
+    ]);
+    accounts = accountsRes.data;
+    if (searchRes.ok) {
+      const data = (await searchRes.json()) as { emails?: any[] };
+      emails = data.emails ?? [];
+    } else {
+      emails = [];
+      emailsError = { message: `search failed (${searchRes.status})` };
+    }
+  } else {
+    const [emailsRes, accountsRes] = await Promise.all([query, accountsPromise]);
+    emails = emailsRes.data;
+    emailsError = emailsRes.error;
+    accounts = accountsRes.data;
+  }
 
   if (emailsError) console.error('[Inbox] emails query failed:', emailsError.message);
 
@@ -232,6 +261,7 @@ export default function Inbox() {
     forward?: boolean;
   } | null>(null);
   const [threadEmails, setThreadEmails] = useState<any[] | null>(null);
+  const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Triage filtering
   const filteredEmails = useMemo(() => {
@@ -253,11 +283,18 @@ export default function Inbox() {
     setFocusIndex(0);
   }, [triageFilter, folder]);
 
-  // Handle URL params for compose (reply/forward links)
+  // Reply opens from the original email's account so threading + From are correct.
+  const composeReplyAccount = useMemo(() => {
+    const accId = composeProps?.replyTo?.account_id;
+    return accId ? accounts.find((a) => a.id === accId) ?? null : null;
+  }, [composeProps, accounts]);
+
+  // Handle URL params for compose (reply/forward/new links from the detail route)
   useEffect(() => {
     const replyId = searchParams.get('reply');
     const forwardId = searchParams.get('forward');
     const replyAll = searchParams.get('all') === 'true';
+    const composeNew = searchParams.get('compose');
 
     if (replyId || forwardId) {
       const email = emails.find((e: any) => e.id === (replyId || forwardId));
@@ -269,6 +306,9 @@ export default function Inbox() {
         });
         setShowCompose(true);
       }
+    } else if (composeNew) {
+      setComposeProps(null);
+      setShowCompose(true);
     }
   }, [searchParams, emails]);
 
@@ -423,8 +463,18 @@ export default function Inbox() {
   const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const q = formData.get('q') as string;
+    const q = (formData.get('q') as string).trim();
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
     setSearchParams(q ? { q } : { folder: 'inbox' });
+  };
+
+  // Debounced as-you-type search (EU-6).
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const q = e.currentTarget.value.trim();
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    searchDebounce.current = setTimeout(() => {
+      setSearchParams(q ? { q } : { folder: 'inbox' });
+    }, 350);
   };
 
   const closeCompose = () => {
@@ -434,6 +484,7 @@ export default function Inbox() {
     params.delete('reply');
     params.delete('forward');
     params.delete('all');
+    params.delete('compose');
     setSearchParams(params);
   };
 
@@ -527,6 +578,7 @@ export default function Inbox() {
         activeLabel={labelId}
         onSelectFolder={handleFolderSelect}
         onSelectLabel={handleLabelSelect}
+        onCompose={() => { setComposeProps(null); setShowCompose(true); }}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       />
@@ -542,7 +594,8 @@ export default function Inbox() {
                 type="text"
                 name="q"
                 defaultValue={search || ''}
-                placeholder="Search emails..."
+                onChange={handleSearchChange}
+                placeholder="Search emails… (try from:alice is:unread)"
                 className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
               />
             </form>
@@ -658,8 +711,8 @@ export default function Inbox() {
         replyTo={composeProps?.replyTo}
         replyAll={composeProps?.replyAll}
         forward={composeProps?.forward}
-        accountId={accounts[0]?.id || ''}
-        accountEmail={accounts[0]?.email || ''}
+        accountId={composeReplyAccount?.id || accounts[0]?.id || ''}
+        accountEmail={composeReplyAccount?.email || accounts[0]?.email || ''}
       />
 
       <KeyboardShortcutsHelp

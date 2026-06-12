@@ -363,6 +363,58 @@ email.delete("/drafts/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// ── MIME / threading helpers (EC-1, EC-8) ────────────────────────────────────
+
+/** RFC 2047 "B" encode a header value only if it contains non-ASCII bytes. */
+function encodeHeaderWord(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x00-\x7F]*$/.test(value)) return value;
+  return `=?UTF-8?B?${btoa(unescape(encodeURIComponent(value)))}?=`;
+}
+
+/** Encode an address list, RFC 2047-encoding non-ASCII display names only. */
+function encodeAddressList(value: string): string {
+  return value
+    .split(",")
+    .map((raw) => raw.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const m = part.match(/^(.*)<([^>]+)>$/);
+      if (m && m[1].trim()) return `${encodeHeaderWord(m[1].trim())} <${m[2].trim()}>`;
+      return part;
+    })
+    .join(", ");
+}
+
+function base64UrlEncode(str: string): string {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/**
+ * Live-fetch the RFC Message-ID/References headers for a synced message that was
+ * imported before rfc_message_id existed (Part 2 — no backfill migration).
+ */
+async function fetchRfcHeaders(
+  externalId: string,
+  accessToken: string
+): Promise<{ messageId: string; references: string } | null> {
+  const res = await fetch(
+    `${GMAIL_API}/messages/${externalId}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as {
+    payload?: { headers?: Array<{ name: string; value: string }> };
+  };
+  const headers = data.payload?.headers ?? [];
+  const get = (n: string) =>
+    headers.find((h) => h.name.toLowerCase() === n.toLowerCase())?.value ?? "";
+  return { messageId: get("Message-ID"), references: get("References") };
+}
+
 email.post("/drafts/:id/send", async (c) => {
   const { id } = c.req.param();
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -375,48 +427,155 @@ email.post("/drafts/:id/send", async (c) => {
 
   if (!draft) return c.json({ error: "Draft not found" }, 404);
 
+  if (!(draft.to_emails ?? []).length) {
+    return c.json({ error: "At least one recipient is required" }, 400);
+  }
+
   await supabase.from("email_drafts").update({ status: "sending" }).eq("id", id);
 
   const draftWithAccount = draft as typeof draft & { email_accounts: Record<string, unknown> };
-  const accessToken = await getValidAccessToken(draftWithAccount.email_accounts, c.env, supabase);
+  const account = draftWithAccount.email_accounts;
 
-  const message = [
-    `To: ${(draft.to_emails ?? []).join(", ")}`,
-    (draft.cc_emails ?? []).length ? `Cc: ${(draft.cc_emails ?? []).join(", ")}` : "",
-    `Subject: ${draft.subject ?? ""}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "",
-    draft.body_text ?? "",
-  ]
-    .filter(Boolean)
-    .join("\r\n");
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken(account, c.env, supabase);
+  } catch (err) {
+    // Leave the draft recoverable rather than stuck "sending" (EC-7).
+    await supabase.from("email_drafts").update({ status: "draft" }).eq("id", id);
+    if (err instanceof ReauthRequiredError)
+      return c.json({ error: "Account needs reconnection", needs_reauth: true }, 409);
+    return c.json({ error: err instanceof Error ? err.message : "Authentication failed" }, 502);
+  }
 
-  const encoded = btoa(unescape(encodeURIComponent(message)))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  // ── Reply threading (EC-1) ──────────────────────────────────────────────
+  let inReplyTo = "";
+  let references = "";
+  let threadId: string | undefined;
+  let subject = draft.subject ?? "";
 
-  const response = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ raw: encoded }),
+  if (draft.reply_to_email_id) {
+    const { data: original } = await supabase
+      .from("emails")
+      .select("id, external_id, thread_id, rfc_message_id, rfc_references")
+      .eq("id", draft.reply_to_email_id)
+      .single();
+    if (original) {
+      threadId = (original.thread_id as string) ?? undefined;
+      let messageId = original.rfc_message_id as string | null;
+      let origRefs = original.rfc_references as string | null;
+      // On-demand capture for messages synced before rfc_message_id existed.
+      if (!messageId && original.external_id) {
+        const fetched = await fetchRfcHeaders(original.external_id as string, accessToken);
+        if (fetched?.messageId) {
+          messageId = fetched.messageId;
+          origRefs = fetched.references || origRefs;
+          await supabase
+            .from("emails")
+            .update({ rfc_message_id: messageId, rfc_references: origRefs })
+            .eq("id", original.id);
+        }
+      }
+      if (messageId) {
+        inReplyTo = messageId;
+        references = [origRefs, messageId].filter(Boolean).join(" ");
+      }
+      // Idempotent Re: prefix.
+      if (subject && !/^re:\s/i.test(subject.trim())) subject = `Re: ${subject}`;
     }
-  );
+  }
+
+  // ── Build MIME message ──────────────────────────────────────────────────
+  const to = (draft.to_emails ?? []).join(", ");
+  const cc = (draft.cc_emails ?? []).join(", ");
+  const bodyText = (draft.body_text as string) ?? "";
+  const bodyHtml = draft.body_html as string | null;
+
+  const headerLines = [
+    `From: ${account.email as string}`,
+    `To: ${encodeAddressList(to)}`,
+    cc ? `Cc: ${encodeAddressList(cc)}` : "",
+    `Subject: ${encodeHeaderWord(subject)}`,
+    "MIME-Version: 1.0",
+    inReplyTo ? `In-Reply-To: ${inReplyTo}` : "",
+    references ? `References: ${references}` : "",
+  ].filter(Boolean);
+
+  let rawMessage: string;
+  if (bodyHtml && bodyHtml.trim()) {
+    // HTML multipart/alternative (EC-6). Body parts carry raw UTF-8; the whole
+    // message is base64url-encoded for transport, so no inner CTE is needed.
+    const boundary = `sl_boundary_${id.replace(/[^a-z0-9]/gi, "")}`;
+    rawMessage = [
+      ...headerLines,
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      "",
+      `--${boundary}`,
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      bodyText,
+      `--${boundary}`,
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      bodyHtml,
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+  } else {
+    rawMessage = [
+      ...headerLines,
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      bodyText,
+    ].join("\r\n");
+  }
+
+  const encoded = base64UrlEncode(rawMessage);
+
+  const response = await fetch(`${GMAIL_API}/messages/send`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(threadId ? { raw: encoded, threadId } : { raw: encoded }),
+  });
 
   if (!response.ok) {
+    const detail = await response.text().catch(() => "");
     await supabase.from("email_drafts").update({ status: "failed" }).eq("id", id);
-    return c.json({ error: "Failed to send" }, 500);
+    return c.json({ error: `Failed to send (${response.status})`, detail }, 502);
   }
+
+  const sent = (await response.json()) as { id?: string; threadId?: string };
 
   await supabase
     .from("email_drafts")
     .update({ status: "sent", sent_at: new Date().toISOString() })
     .eq("id", id);
+
+  // Insert the sent message immediately so Sent updates without waiting for sync (EC-9).
+  if (sent.id) {
+    await supabase.from("emails").upsert(
+      {
+        account_id: account.id as string,
+        external_id: sent.id,
+        thread_id: sent.threadId ?? threadId ?? null,
+        subject,
+        from_email: account.email as string,
+        from_name: "",
+        to_emails: draft.to_emails ?? [],
+        cc_emails: draft.cc_emails ?? [],
+        body_text: bodyText,
+        body_html: bodyHtml ?? null,
+        snippet: bodyText.slice(0, 200),
+        folder: "SENT",
+        is_read: true,
+        is_deleted: false,
+        received_at: new Date().toISOString(),
+      },
+      { onConflict: "account_id,external_id" }
+    );
+  }
 
   if (draft.to_emails?.[0]) {
     const relationshipId = await findRelationship(draft.to_emails[0], supabase);
@@ -434,7 +593,7 @@ email.post("/drafts/:id/send", async (c) => {
     }
   }
 
-  return c.json({ success: true });
+  return c.json({ success: true, id: sent.id, threadId: sent.threadId });
 });
 
 // ============================================
@@ -913,14 +1072,16 @@ email.get("/search", async (c) => {
   // now-deleted duplicate handler — XC-6 / Part 3).
   const esc = (s: string) => s.replace(/[%_\\]/g, "\\$&");
 
-  // Exclude deleted (ES-5); trashed shown only when explicitly requested via in:trash.
+  // Exclude deleted (ES-5); trash/spam shown only when explicitly requested.
   let query = baseEmailQuery(supabase, account_id, "*, email_label_assignments(label_id, email_labels(*))")
     .order("received_at", { ascending: false })
     .limit(50);
   if (filters.in !== "trash") query = query.eq("is_trashed", false);
+  if (filters.in !== "spam") query = query.eq("is_spam", false);
 
   if (filters.from) query = query.ilike("from_email", `%${esc(filters.from)}%`);
-  if (filters.to) query = query.ilike("to_emails", `%${esc(filters.to)}%`);
+  // to_emails is TEXT[] — use array containment, not ilike (EU-6).
+  if (filters.to) query = query.contains("to_emails", [filters.to]);
   if (filters.subject) query = query.ilike("subject", `%${esc(filters.subject)}%`);
   if (filters.has === "attachment") query = query.eq("has_attachments", true);
   if (filters.is === "unread") query = query.eq("is_read", false);
@@ -2009,6 +2170,8 @@ function parseGmailMessageFull(msg: any, accountId: string): Record<string, unkn
     body_text: bodyText,
     body_html: bodyHtml,
     snippet: msg.snippet ?? "",
+    rfc_message_id: getHeader("message-id") || null,
+    rfc_references: getHeader("references") || null,
     received_at: new Date(parseInt(msg.internalDate)).toISOString(),
     ...applyLabelStateToEmail(labels),
     has_attachments: attachmentParts.length > 0,

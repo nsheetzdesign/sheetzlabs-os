@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import { useLoaderData, useFetcher } from "react-router";
 import { useState, useEffect } from "react";
 import { Calendar, Clock, Check, ArrowRight } from "lucide-react";
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 export const meta = () => [{ title: "Reschedule Meeting" }];
 export async function loader({ params, context }) {
     const env = context.cloudflare.env;
@@ -90,6 +91,14 @@ export default function ReschedulePage() {
             scheduled_at: selectedTime,
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }, { method: "post" });
+    }
+    // Guard: cancelled or past bookings can't be rescheduled (BK-16).
+    const isCancelled = booking.status === "cancelled";
+    const isPast = new Date(booking.scheduled_at).getTime() < Date.now();
+    if (isCancelled || isPast) {
+        return (_jsx("div", { className: "min-h-screen bg-zinc-950 flex items-center justify-center p-4", children: _jsxs("div", { className: "bg-zinc-900 border border-zinc-800 rounded-xl p-8 max-w-md w-full text-center", children: [_jsx("h1", { className: "text-2xl font-semibold text-zinc-100 mb-2", children: "This booking can\u2019t be rescheduled" }), _jsx("p", { className: "text-zinc-400", children: isCancelled
+                            ? "This meeting has been cancelled. Please book a new time instead."
+                            : "This meeting time has already passed. Please book a new time instead." })] }) }));
     }
     const confirmed = rescheduleFetcher.data?.success === true;
     if (confirmed) {

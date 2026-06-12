@@ -1,4 +1,5 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 export declare const meta: MetaFunction<typeof loader>;
 type AvailabilityRules = {
     timezone?: string;
@@ -29,4 +30,3 @@ export declare function action({ params, request, context }: ActionFunctionArgs)
     status: number;
 } | null>;
 export default function BookingPage(): import("react/jsx-runtime").JSX.Element;
-export {};

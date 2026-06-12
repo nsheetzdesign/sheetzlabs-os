@@ -1,4 +1,5 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
 export declare const meta: MetaFunction;
 type AvailabilityRules = {
     date_range_days?: number;
@@ -25,4 +26,3 @@ export declare function action({ params, request, context }: ActionFunctionArgs)
     status: number;
 } | null>;
 export default function ReschedulePage(): import("react/jsx-runtime").JSX.Element;
-export {};

@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs, MetaFunction } from "react-router";
 import { useLoaderData, Link, useFetcher, useRevalidator } from "react-router";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   ArrowLeft,
   Clock,
@@ -16,12 +16,24 @@ import {
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
 import { apiFetch } from "~/lib/api";
+import { DEFAULT_TZ, formatDateTimeInTz, formatTimeInTz, utcIsoToLocalInput, localInputToUtcIso } from "~/lib/tz";
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: `${data?.event?.title ?? "Event"} — Calendar — Sheetz Labs OS` },
 ];
 
-export async function loader({ params, context }: LoaderFunctionArgs) {
+function readTzCookie(request: Request): string {
+  const cookie = request.headers.get("cookie") ?? "";
+  const m = cookie.match(/(?:^|;\s*)tz=([^;]+)/);
+  if (!m) return DEFAULT_TZ;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
+}
+
+export async function loader({ params, request, context }: LoaderFunctionArgs) {
   const supabase = getSupabaseClient(context.cloudflare.env);
 
   const { data: event } = await supabase
@@ -37,7 +49,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 
   if (!event) throw new Response("Not found", { status: 404 });
 
-  return { event };
+  return { event, tz: readTzCookie(request) };
 }
 
 export async function action({ params, request, context }: ActionFunctionArgs) {
@@ -51,21 +63,25 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
   }
 
   if (intent === "edit") {
-    const startRaw = fd.get("start_at") as string;
-    const endRaw = fd.get("end_at") as string;
-    await apiFetch(request, env, `/calendar/events/${params.id}`, {
+    // start_at/end_at already arrive as UTC ISO (converted client-side, CS-6).
+    const res = await apiFetch(request, env, `/calendar/events/${params.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: fd.get("title") || undefined,
         description: fd.get("description") || undefined,
         location: fd.get("location") || undefined,
-        start_at: startRaw ? new Date(startRaw).toISOString() : undefined,
-        end_at: endRaw ? new Date(endRaw).toISOString() : undefined,
+        start_at: (fd.get("start_at") as string) || undefined,
+        end_at: (fd.get("end_at") as string) || undefined,
         meeting_link: fd.get("meeting_link") || undefined,
         add_google_meet: fd.get("add_google_meet") === "true",
       }),
     });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      return Response.json({ ok: false, error: data.error ?? "Failed to save changes" }, { status: res.status });
+    }
+    return Response.json({ ok: true });
   }
 
   if (intent === "delete_time_block") {
@@ -79,29 +95,6 @@ export async function action({ params, request, context }: ActionFunctionArgs) {
   return null;
 }
 
-function formatDateTime(iso: string) {
-  return new Date(iso).toLocaleString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatTime(iso: string) {
-  return new Date(iso).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function toLocalDateTimeInput(iso: string) {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 const STATUS_COLORS: Record<string, string> = {
   accepted: "bg-emerald-500",
   declined: "bg-red-500",
@@ -110,22 +103,49 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function CalendarEventDetail() {
-  const { event } = useLoaderData<typeof loader>();
-  const fetcher = useFetcher();
+  const { event, tz } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<{ ok?: boolean; error?: string }>();
   const revalidator = useRevalidator();
   const [isEditing, setIsEditing] = useState(false);
   const [videoType, setVideoType] = useState<"none" | "meet" | "teams">("none");
+  const [editError, setEditError] = useState<string | null>(null);
+  const editingRef = useRef(false);
 
   const isGenerating = fetcher.state !== "idle";
   const hasAttendees = Array.isArray(event.attendees) && event.attendees.length > 0;
   const prepPending = fetcher.formData?.get("intent") === "prep";
   const isEditSubmitting = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "edit";
 
-  // Close edit form after successful submission
-  if (isEditing && fetcher.state === "idle" && fetcher.data !== undefined) {
-    setIsEditing(false);
-    revalidator.revalidate();
-  }
+  // Close edit form on confirmed success only (CS-13: was a render-phase setState
+  // that fired on ANY fetcher completion). Inline error otherwise.
+  useEffect(() => {
+    if (editingRef.current && fetcher.state === "idle" && fetcher.data) {
+      editingRef.current = false;
+      if (fetcher.data.ok) {
+        setIsEditing(false);
+        setEditError(null);
+        revalidator.revalidate();
+      } else {
+        setEditError(fetcher.data.error ?? "Failed to save changes");
+      }
+    }
+  }, [fetcher.state, fetcher.data, revalidator]);
+
+  const handleEditSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setEditError(null);
+    const fd = new FormData(e.currentTarget);
+    const startLocal = fd.get("start_at") as string;
+    const endLocal = fd.get("end_at") as string;
+    if (startLocal && endLocal && new Date(endLocal) <= new Date(startLocal)) {
+      setEditError("End time must be after start time");
+      return;
+    }
+    if (startLocal) fd.set("start_at", localInputToUtcIso(startLocal, tz));
+    if (endLocal) fd.set("end_at", localInputToUtcIso(endLocal, tz));
+    editingRef.current = true;
+    fetcher.submit(fd, { method: "post" });
+  };
 
   return (
     <div className="flex flex-1 flex-col">
@@ -149,7 +169,7 @@ export default function CalendarEventDetail() {
                 <div className="flex items-center gap-2 mt-2 text-sm text-zinc-400">
                   <Clock className="h-3.5 w-3.5 shrink-0" />
                   <span>
-                    {formatDateTime(event.start_at)} — {formatTime(event.end_at)}
+                    {formatDateTimeInTz(event.start_at, tz)} — {formatTimeInTz(event.end_at, tz)}
                   </span>
                 </div>
               </div>
@@ -192,7 +212,7 @@ export default function CalendarEventDetail() {
                 </button>
               </div>
 
-              <fetcher.Form method="post" className="space-y-4">
+              <fetcher.Form method="post" onSubmit={handleEditSubmit} className="space-y-4">
                 <input type="hidden" name="intent" value="edit" />
                 {videoType === "meet" && (
                   <input type="hidden" name="add_google_meet" value="true" />
@@ -213,7 +233,7 @@ export default function CalendarEventDetail() {
                     <input
                       name="start_at"
                       type="datetime-local"
-                      defaultValue={toLocalDateTimeInput(event.start_at)}
+                      defaultValue={utcIsoToLocalInput(event.start_at, tz)}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
                     />
                   </div>
@@ -222,7 +242,7 @@ export default function CalendarEventDetail() {
                     <input
                       name="end_at"
                       type="datetime-local"
-                      defaultValue={toLocalDateTimeInput(event.end_at)}
+                      defaultValue={utcIsoToLocalInput(event.end_at, tz)}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-emerald-500"
                     />
                   </div>
@@ -299,10 +319,11 @@ export default function CalendarEventDetail() {
                   />
                 </div>
 
+                {editError && <p className="text-xs text-red-400">{editError}</p>}
                 <div className="flex gap-3 pt-1">
                   <button
                     type="button"
-                    onClick={() => setIsEditing(false)}
+                    onClick={() => { setIsEditing(false); setEditError(null); }}
                     className="flex-1 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-lg transition-colors"
                   >
                     Cancel

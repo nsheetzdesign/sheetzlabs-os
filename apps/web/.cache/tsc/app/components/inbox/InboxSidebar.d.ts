@@ -27,6 +27,7 @@ interface Props {
     activeLabel: string | null;
     onSelectFolder: (folder: string, accountId?: string | null) => void;
     onSelectLabel: (labelId: string, accountId: string) => void;
+    onCompose: () => void;
     onDragOver: (e: React.DragEvent, target: {
         type: 'folder' | 'label';
         id: string;
@@ -38,5 +39,5 @@ interface Props {
         accountId: string;
     }) => void;
 }
-export declare function InboxSidebar({ accounts, counts, globalCounts, activeFolder, activeAccountId, activeLabel, onSelectFolder, onSelectLabel, onDragOver, onDrop, }: Props): import("react/jsx-runtime").JSX.Element;
+export declare function InboxSidebar({ accounts, counts, globalCounts, activeFolder, activeAccountId, activeLabel, onSelectFolder, onSelectLabel, onCompose, onDragOver, onDrop, }: Props): import("react/jsx-runtime").JSX.Element;
 export {};

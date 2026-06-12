@@ -26,14 +26,36 @@ interface Props {
     subject: string;
     from_email: string;
     from_name: string;
-    to_emails: string;
-    cc_emails?: string;
+    to_emails: string | string[];
+    cc_emails?: string | string[];
     body_text?: string;
+    account_id?: string;
   };
   replyAll?: boolean;
   forward?: boolean;
   accountId: string;
   accountEmail: string;
+}
+
+/** Normalize a string|string[] recipient field to a trimmed array. */
+function toAddressArray(v: string | string[] | undefined): string[] {
+  if (!v) return [];
+  const arr = Array.isArray(v) ? v : v.split(',');
+  return arr.map((s) => s.trim()).filter(Boolean);
+}
+
+/** Dedupe addresses case-insensitively, preserving first-seen casing. */
+function dedupeAddresses(addrs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const a of addrs) {
+    const k = a.toLowerCase();
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(a);
+    }
+  }
+  return out;
 }
 
 // ── Snippet expansion hook ───────────────────────────────────────────────────
@@ -360,9 +382,14 @@ export function ComposeModal({
   replyAll,
   forward,
   accountId,
-  accountEmail: _accountEmail,
+  accountEmail,
 }: Props) {
-  const fetcher = useFetcher();
+  const fetcher = useFetcher<{ success?: boolean; error?: string; scheduled?: boolean }>();
+  const draftFetcher = useFetcher<{ draft?: { id: string }; error?: string }>();
+  const sendingRef = useRef(false);
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [savedState, setSavedState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   const [isMinimized, setIsMinimized] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showCc, setShowCc] = useState(false);
@@ -387,44 +414,64 @@ export function ComposeModal({
       .catch(() => {});
   }, []);
 
-  // Populate for reply/forward
+  // Populate for reply/forward. Resets per-open draft/send state too.
   useEffect(() => {
+    setDraftId(null);
+    setSendError(null);
+    setSavedState('idle');
     if (replyTo) {
       if (forward) {
         setForm({
           to: '',
           cc: '',
           bcc: '',
-          subject: `Fwd: ${replyTo.subject}`,
+          subject: replyTo.subject.startsWith('Fwd:') ? replyTo.subject : `Fwd: ${replyTo.subject}`,
           body: `\n\n---------- Forwarded message ---------\nFrom: ${replyTo.from_name} <${replyTo.from_email}>\nSubject: ${replyTo.subject}\n\n${replyTo.body_text || ''}`,
           scheduled_for: '',
         });
       } else {
-        const ccList = replyAll && replyTo.cc_emails ? replyTo.cc_emails : '';
+        // Reply-all recipient set = original From + original To (minus self) + original Cc (EC-8).
+        const self = (accountEmail || '').toLowerCase();
+        const notSelf = (e: string) => e.toLowerCase() !== self;
+        const origTo = toAddressArray(replyTo.to_emails);
+        const origCc = toAddressArray(replyTo.cc_emails);
+        let toList: string[];
+        let ccList: string[];
+        if (replyAll) {
+          toList = dedupeAddresses([replyTo.from_email, ...origTo].filter(Boolean).filter(notSelf));
+          const inTo = new Set(toList.map((e) => e.toLowerCase()));
+          ccList = dedupeAddresses(origCc.filter(Boolean).filter(notSelf)).filter(
+            (e) => !inTo.has(e.toLowerCase())
+          );
+        } else {
+          toList = [replyTo.from_email].filter(Boolean);
+          ccList = [];
+        }
         setForm({
-          to: replyTo.from_email,
-          cc: ccList,
+          to: toList.join(', '),
+          cc: ccList.join(', '),
           bcc: '',
-          subject: replyTo.subject.startsWith('Re:') ? replyTo.subject : `Re: ${replyTo.subject}`,
+          subject: /^re:\s/i.test(replyTo.subject) ? replyTo.subject : `Re: ${replyTo.subject}`,
           body: `\n\nOn ${new Date().toLocaleDateString()}, ${replyTo.from_name} wrote:\n> ${(replyTo.body_text || '').split('\n').join('\n> ')}`,
           scheduled_for: '',
         });
-        if (ccList) setShowCc(true);
+        if (ccList.length) setShowCc(true);
       }
     } else {
       setForm({ to: '', cc: '', bcc: '', subject: '', body: '', scheduled_for: '' });
       setShowCc(false);
       setShowBcc(false);
     }
-  }, [replyTo, replyAll, forward]);
+  }, [replyTo, replyAll, forward, accountEmail]);
 
-  // Auto-save draft every 30 seconds
+  // Auto-save draft every 30 seconds (EC-3) — real route, tracked draft id.
   useEffect(() => {
     if (!isOpen || isMinimized) return;
     const interval = setInterval(() => {
       if (form.to || form.subject || form.body) {
-        fetcher.submit(
+        draftFetcher.submit(
           {
+            id: draftId ?? '',
             account_id: accountId,
             to_emails: form.to,
             cc_emails: form.cc,
@@ -432,16 +479,43 @@ export function ComposeModal({
             subject: form.subject,
             body: form.body,
             reply_to_id: replyTo?.id || '',
-            status: 'draft',
           },
           { method: 'post', action: '/dashboard/inbox/drafts' }
         );
       }
     }, 30000);
     return () => clearInterval(interval);
-  }, [isOpen, isMinimized, form, accountId, replyTo]);
+  }, [isOpen, isMinimized, form, accountId, replyTo, draftId]);
+
+  // Track autosave result → "Saved"/"Save failed" indicator + draft id for upsert.
+  useEffect(() => {
+    if (draftFetcher.state === 'submitting' || draftFetcher.state === 'loading') {
+      setSavedState('saving');
+    } else if (draftFetcher.state === 'idle' && draftFetcher.data) {
+      if (draftFetcher.data.draft?.id) {
+        setDraftId(draftFetcher.data.draft.id);
+        setSavedState('saved');
+      } else if (draftFetcher.data.error) {
+        setSavedState('failed');
+      }
+    }
+  }, [draftFetcher.state, draftFetcher.data]);
+
+  // Close only on a confirmed successful send; keep open with an inline error otherwise.
+  useEffect(() => {
+    if (fetcher.state === 'idle' && sendingRef.current && fetcher.data) {
+      sendingRef.current = false;
+      if (fetcher.data.success) {
+        onClose();
+      } else {
+        setSendError(fetcher.data.error ?? 'Failed to send. Please try again.');
+      }
+    }
+  }, [fetcher.state, fetcher.data, onClose]);
 
   const handleSend = () => {
+    setSendError(null);
+    sendingRef.current = true;
     fetcher.submit(
       {
         account_id: accountId,
@@ -456,7 +530,6 @@ export function ComposeModal({
       },
       { method: 'post', action: '/dashboard/inbox/send' }
     );
-    onClose();
   };
 
   const handleDiscard = () => {
@@ -616,6 +689,13 @@ export function ComposeModal({
             </div>
           )}
 
+          {/* Send error (keeps modal open, content preserved) */}
+          {sendError && (
+            <div className="border-t border-red-900/50 bg-red-950/40 px-4 py-2 text-sm text-red-300">
+              {sendError}
+            </div>
+          )}
+
           {/* Footer */}
           <div className="flex items-center justify-between border-t border-zinc-800 px-4 py-3">
             <div className="flex items-center gap-2">
@@ -625,8 +705,15 @@ export function ComposeModal({
                 className="flex items-center gap-2 rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
               >
                 <Send size={14} />
-                {form.scheduled_for ? 'Schedule' : 'Send'}
+                {fetcher.state !== 'idle'
+                  ? 'Sending…'
+                  : form.scheduled_for
+                    ? 'Schedule'
+                    : 'Send'}
               </button>
+              {savedState === 'saving' && <span className="text-xs text-zinc-500">Saving…</span>}
+              {savedState === 'saved' && <span className="text-xs text-zinc-500">Saved</span>}
+              {savedState === 'failed' && <span className="text-xs text-amber-400">Save failed</span>}
               <button
                 onClick={() => setShowSchedule(!showSchedule)}
                 className="rounded p-1.5 hover:bg-zinc-800"

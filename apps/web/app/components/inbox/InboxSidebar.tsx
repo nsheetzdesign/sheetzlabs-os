@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Link, Form, useFetcher } from 'react-router';
+import { Form, useFetcher } from 'react-router';
 import {
   Inbox, Star, Clock, Send, File, AlertTriangle, Trash2, Mail,
   ChevronDown, ChevronRight, ChevronUp, Plus, Tag, RefreshCw, Check, AlertCircle,
@@ -37,6 +37,7 @@ interface Props {
   activeLabel: string | null;
   onSelectFolder: (folder: string, accountId?: string | null) => void;
   onSelectLabel: (labelId: string, accountId: string) => void;
+  onCompose: () => void;
   onDragOver: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
   onDrop: (e: React.DragEvent, target: { type: 'folder' | 'label'; id: string; accountId: string }) => void;
 }
@@ -62,6 +63,7 @@ export function InboxSidebar({
   activeLabel,
   onSelectFolder,
   onSelectLabel,
+  onCompose,
   onDragOver,
   onDrop,
 }: Props) {
@@ -80,7 +82,21 @@ export function InboxSidebar({
   }, [activeAccountId]);
   const [expandedLabels, setExpandedLabels] = useState<Set<string>>(new Set());
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
-  const fetcher = useFetcher();
+  // Inline create-label state, keyed by account id (replaces native prompt()).
+  const [creatingLabelFor, setCreatingLabelFor] = useState<string | null>(null);
+  const [newLabelName, setNewLabelName] = useState('');
+  const fetcher = useFetcher<{ label?: unknown; error?: string }>();
+
+  const submitNewLabel = (accountId: string) => {
+    const name = newLabelName.trim();
+    if (!name) return;
+    fetcher.submit(
+      { account_id: accountId, name },
+      { method: 'post', action: '/dashboard/inbox/labels' }
+    );
+    setNewLabelName('');
+    setCreatingLabelFor(null);
+  };
 
   const toggleAccount = (accountId: string) => {
     const next = new Set(expandedAccounts);
@@ -114,15 +130,16 @@ export function InboxSidebar({
 
   return (
     <div className="w-56 border-r border-zinc-800 flex flex-col h-full overflow-hidden">
-      {/* Compose Button */}
+      {/* Compose Button — opens the ComposeModal (the only real send path, EC-2) */}
       <div className="p-3">
-        <Link
-          to="/dashboard/inbox/compose"
+        <button
+          type="button"
+          onClick={onCompose}
           className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition-colors"
         >
           <Plus size={18} />
           Compose
-        </Link>
+        </button>
       </div>
 
       {/* All Inboxes */}
@@ -212,8 +229,8 @@ export function InboxSidebar({
                     );
                   })}
 
-                  {/* User Labels */}
-                  {userLabels.length > 0 && (
+                  {/* User Labels — always shown so Create-label is reachable on fresh accounts */}
+                  {(
                     <div className="mt-1">
                       <button
                         onClick={() => toggleLabels(account.id)}
@@ -251,21 +268,40 @@ export function InboxSidebar({
                               </button>
                             );
                           })}
-                          <button
-                            onClick={() => {
-                              const name = prompt('Label name:');
-                              if (name) {
-                                fetcher.submit(
-                                  { account_id: account.id, name },
-                                  { method: 'post', action: '/dashboard/inbox/labels' }
-                                );
-                              }
-                            }}
-                            className="flex items-center gap-2 w-full px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300"
-                          >
-                            <Plus size={12} />
-                            Create label
-                          </button>
+                          {creatingLabelFor === account.id ? (
+                            <div className="flex items-center gap-1 px-2 py-1">
+                              <input
+                                autoFocus
+                                value={newLabelName}
+                                onChange={(e) => setNewLabelName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') submitNewLabel(account.id);
+                                  if (e.key === 'Escape') { setCreatingLabelFor(null); setNewLabelName(''); }
+                                }}
+                                placeholder="Label name"
+                                className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+                              />
+                              <button
+                                onClick={() => submitNewLabel(account.id)}
+                                disabled={!newLabelName.trim() || fetcher.state !== 'idle'}
+                                className="text-emerald-400 hover:text-emerald-300 disabled:opacity-40"
+                                title="Create"
+                              >
+                                <Check size={14} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => { setCreatingLabelFor(account.id); setNewLabelName(''); }}
+                              className="flex items-center gap-2 w-full px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300"
+                            >
+                              <Plus size={12} />
+                              Create label
+                            </button>
+                          )}
+                          {fetcher.data?.error && creatingLabelFor === null && (
+                            <p className="px-2 py-1 text-xs text-red-400">{fetcher.data.error}</p>
+                          )}
                         </div>
                       )}
                     </div>

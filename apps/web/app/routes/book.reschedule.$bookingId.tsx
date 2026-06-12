@@ -3,6 +3,8 @@ import { useLoaderData, useFetcher } from "react-router";
 import { useState, useEffect } from "react";
 import { Calendar, Clock, Check, ArrowRight } from "lucide-react";
 
+export { BookingErrorBoundary as ErrorBoundary } from "~/components/booking/BookingErrorBoundary";
+
 export const meta: MetaFunction = () => [{ title: "Reschedule Meeting" }];
 
 type AvailabilityRules = {
@@ -128,6 +130,26 @@ export default function ReschedulePage() {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       },
       { method: "post" }
+    );
+  }
+
+  // Guard: cancelled or past bookings can't be rescheduled (BK-16).
+  const isCancelled = booking.status === "cancelled";
+  const isPast = new Date(booking.scheduled_at).getTime() < Date.now();
+  if (isCancelled || isPast) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 max-w-md w-full text-center">
+          <h1 className="text-2xl font-semibold text-zinc-100 mb-2">
+            This booking can&rsquo;t be rescheduled
+          </h1>
+          <p className="text-zinc-400">
+            {isCancelled
+              ? "This meeting has been cancelled. Please book a new time instead."
+              : "This meeting time has already passed. Please book a new time instead."}
+          </p>
+        </div>
+      </div>
     );
   }
 
