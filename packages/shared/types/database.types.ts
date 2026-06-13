@@ -2719,40 +2719,55 @@ export type Database = {
       }
       tasks: {
         Row: {
+          actual_minutes: number | null
           completed_at: string | null
           created_at: string | null
           description: string | null
           due_date: string | null
+          estimated_minutes: number | null
           id: string
           milestone_id: string | null
+          planned_date: string | null
           priority: Database["public"]["Enums"]["task_priority"] | null
+          sort_order: number | null
           status: Database["public"]["Enums"]["task_status"] | null
+          ticket_id: string | null
           title: string
           updated_at: string | null
           venture_id: string | null
         }
         Insert: {
+          actual_minutes?: number | null
           completed_at?: string | null
           created_at?: string | null
           description?: string | null
           due_date?: string | null
+          estimated_minutes?: number | null
           id?: string
           milestone_id?: string | null
+          planned_date?: string | null
           priority?: Database["public"]["Enums"]["task_priority"] | null
+          sort_order?: number | null
           status?: Database["public"]["Enums"]["task_status"] | null
+          ticket_id?: string | null
           title: string
           updated_at?: string | null
           venture_id?: string | null
         }
         Update: {
+          actual_minutes?: number | null
           completed_at?: string | null
           created_at?: string | null
           description?: string | null
           due_date?: string | null
+          estimated_minutes?: number | null
           id?: string
           milestone_id?: string | null
+          planned_date?: string | null
           priority?: Database["public"]["Enums"]["task_priority"] | null
+          sort_order?: number | null
           status?: Database["public"]["Enums"]["task_status"] | null
+          ticket_id?: string | null
           title?: string
           updated_at?: string | null
           venture_id?: string | null
@@ -2763,6 +2778,13 @@ export type Database = {
             columns: ["milestone_id"]
             isOneToOne: false
             referencedRelation: "milestones"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tasks_ticket_id_fkey"
+            columns: ["ticket_id"]
+            isOneToOne: false
+            referencedRelation: "tickets"
             referencedColumns: ["id"]
           },
           {
@@ -3160,6 +3182,8 @@ export type Database = {
         | "review"
         | "done"
         | "blocked"
+        | "planned"
+        | "cancelled"
       venture_stage:
         | "pre-revenue"
         | "early-revenue"
@@ -3352,6 +3376,8 @@ export const Constants = {
         "review",
         "done",
         "blocked",
+        "planned",
+        "cancelled",
       ],
       venture_stage: [
         "pre-revenue",

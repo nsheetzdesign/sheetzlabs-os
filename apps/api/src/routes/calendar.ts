@@ -650,46 +650,82 @@ calendar.get("/tasks/unscheduled", async (c) => {
   return c.json({ tasks: unscheduled });
 });
 
+// Create a time block. Two shapes share this single path (Prompt 66 — no fork):
+//   • task-linked: pass `task_id` → title/description copied from the task; if
+//     `end_at` is omitted we derive duration from the task's estimated_minutes
+//     (default 60), so a task's estimate becomes a starting block length.
+//   • raw freeform: omit `task_id` and pass an explicit `title` + `start_at`/`end_at`.
+// `account_id` is optional: with it we push to Google; without it the block is a
+// purely local time block (external_id stays `timeblock-…`).
 calendar.post("/time-blocks", async (c) => {
-  const body = await c.req.json<{
-    task_id: string;
-    start_at: string;
-    end_at: string;
-    account_id: string;
-  }>();
-  const { task_id, start_at, end_at, account_id } = body;
+  let body: {
+    task_id?: string | null;
+    start_at?: string;
+    end_at?: string;
+    account_id?: string | null;
+    title?: string;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const { task_id, account_id } = body;
+  const start_at = body.start_at;
+  if (!start_at) return c.json({ error: "start_at is required" }, 400);
 
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
 
-  const { data: task } = await supabase
-    .from("tasks")
-    .select("*")
-    .eq("id", task_id)
-    .single();
+  let title = body.title?.trim() || "";
+  let description: string | null = null;
+  let end_at = body.end_at;
 
-  if (!task) return c.json({ error: "Task not found" }, 404);
+  if (task_id) {
+    const { data: task } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("id", task_id)
+      .single();
+    if (!task) return c.json({ error: "Task not found" }, 404);
+    title = `⏱️ ${task.title}`;
+    description = task.description;
+    // Copy the estimate as a starting duration when no explicit end was given.
+    if (!end_at) {
+      const mins =
+        typeof task.estimated_minutes === "number" && task.estimated_minutes > 0
+          ? task.estimated_minutes
+          : 60;
+      end_at = new Date(new Date(start_at).getTime() + mins * 60_000).toISOString();
+    }
+  } else if (!title) {
+    return c.json({ error: "title is required for a raw time block" }, 400);
+  }
 
-  const { data: event } = await supabase
+  if (!end_at) return c.json({ error: "end_at is required" }, 400);
+
+  const { data: event, error: insertErr } = await supabase
     .from("calendar_events")
     .insert({
-      account_id,
+      account_id: account_id ?? null,
       external_id: `timeblock-${Date.now()}`,
-      title: `⏱️ ${task.title}`,
-      description: task.description,
+      title,
+      description,
       start_at,
       end_at,
       is_time_block: true,
-      task_id,
+      task_id: task_id ?? null,
     })
     .select()
     .single();
 
-  // Sync to Google Calendar
-  const { data: account } = await supabase
-    .from("calendar_accounts")
-    .select("*")
-    .eq("id", account_id)
-    .single();
+  if (insertErr || !event) {
+    return c.json({ error: insertErr?.message ?? "Failed to create time block" }, 500);
+  }
+
+  // Sync to Google Calendar only when an account was supplied.
+  const { data: account } = account_id
+    ? await supabase.from("calendar_accounts").select("*").eq("id", account_id).single()
+    : { data: null };
 
   if (account && event) {
     try {
@@ -725,6 +761,45 @@ calendar.post("/time-blocks", async (c) => {
     }
   }
 
+  return c.json({ event });
+});
+
+// Link or unlink a task to/from an existing time block. Body `{ task_id: string }`
+// links; `{ task_id: null }` unlinks (leaving the block as raw time). Only the
+// `task_id` column is settable here — column allowlist, no mass assignment.
+calendar.patch("/time-blocks/:id/link", async (c) => {
+  const { id } = c.req.param();
+  let body: { task_id?: string | null };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (!("task_id" in body) || (body.task_id !== null && typeof body.task_id !== "string")) {
+    return c.json({ error: "task_id must be a string (link) or null (unlink)" }, 400);
+  }
+
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  if (body.task_id) {
+    const { data: task } = await supabase
+      .from("tasks")
+      .select("id")
+      .eq("id", body.task_id)
+      .single();
+    if (!task) return c.json({ error: "Task not found" }, 404);
+  }
+
+  const { data: event, error } = await supabase
+    .from("calendar_events")
+    .update({ task_id: body.task_id })
+    .eq("id", id)
+    .eq("is_time_block", true)
+    .select()
+    .single();
+
+  if (error) return c.json({ error: error.message }, 500);
+  if (!event) return c.json({ error: "Time block not found" }, 404);
   return c.json({ event });
 });
 
