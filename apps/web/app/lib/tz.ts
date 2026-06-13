@@ -172,3 +172,16 @@ export function utcIsoToLocalInput(iso: string, tz: string): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
 }
+
+/** Calendar-day key (YYYY-MM-DD) for an instant in `tz`. Used for planned_date. */
+export function dateKeyInTz(date: Date, tz: string): string {
+  const p = getZonedParts(date, tz);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+}
+
+/** Calendar-day key for a DayDescriptor (no tz math needed — it's already wall-clock). */
+export function dayDescriptorKey(d: DayDescriptor): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.year}-${pad(d.month)}-${pad(d.day)}`;
+}

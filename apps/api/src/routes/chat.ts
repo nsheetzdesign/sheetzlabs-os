@@ -352,7 +352,7 @@ async function gatherChatContext(
     const { data: tasks } = await supabase
       .from("tasks")
       .select("title, priority, status")
-      .in("status", ["todo", "in_progress"])
+      .in("status", ["todo", "in-progress"])
       .order("priority", { ascending: false })
       .limit(5);
 

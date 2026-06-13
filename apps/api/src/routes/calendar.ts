@@ -634,8 +634,8 @@ calendar.get("/tasks/unscheduled", async (c) => {
 
   const { data: tasks } = await supabase
     .from("tasks")
-    .select("*")
-    .in("status", ["todo", "in_progress"])
+    .select("*, ventures(id, name, slug)")
+    .in("status", ["todo", "in-progress"])
     .order("due_date", { nullsFirst: false });
 
   const { data: blockedTasks } = await supabase
@@ -664,6 +664,9 @@ calendar.post("/time-blocks", async (c) => {
     end_at?: string;
     account_id?: string | null;
     title?: string;
+    // Prompt 67: when dragging a task onto the day-strip, the planned day (tz-correct,
+    // computed client-side) so timeboxing a task also schedules it for that date.
+    planned_date?: string | null;
   };
   try {
     body = await c.req.json();
@@ -720,6 +723,16 @@ calendar.post("/time-blocks", async (c) => {
 
   if (insertErr || !event) {
     return c.json({ error: insertErr?.message ?? "Failed to create time block" }, 500);
+  }
+
+  // Timeboxing a task also schedules it: stamp the task's planned_date (the local
+  // day of the block, computed client-side and passed through) so it leaves the
+  // unscheduled rail. Best-effort — the block already exists.
+  if (task_id && typeof body.planned_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.planned_date)) {
+    await supabase
+      .from("tasks")
+      .update({ planned_date: body.planned_date, updated_at: new Date().toISOString() })
+      .eq("id", task_id);
   }
 
   // Sync to Google Calendar only when an account was supplied.

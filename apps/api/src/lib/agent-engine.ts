@@ -667,7 +667,7 @@ async function gatherContext(
         const { data } = await supabase
           .from("tasks")
           .select("*")
-          .in("status", ["todo", "in_progress"])
+          .in("status", ["todo", "in-progress"])
           .order("due_date");
         context.tasks = data;
         break;

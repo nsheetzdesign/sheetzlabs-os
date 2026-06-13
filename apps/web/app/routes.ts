@@ -82,6 +82,7 @@ export default [
       route("bookings", "routes/dashboard.calendar.bookings.tsx"),
       route(":id", "routes/dashboard.calendar.$id.tsx"),
     ]),
+    route("work", "routes/dashboard.work.tsx"),
     route("inbox", "routes/dashboard.inbox.tsx", [
       index("routes/dashboard.inbox._index.tsx"),
       route("connect-gmail", "routes/dashboard.inbox.connect-gmail.tsx"),

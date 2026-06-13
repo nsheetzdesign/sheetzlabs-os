@@ -238,7 +238,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       .gt("end_at", startUtc.toISOString())
       .order("start_at"),
     supabase.from("calendar_accounts").select("id, email, color, display_name, sync_enabled, last_sync_at, needs_reauth").order("email"),
-    supabase.from("tasks").select("id, title, due_date, priority, status").in("status", ["todo", "in_progress"]).order("due_date", { nullsFirst: false }),
+    supabase.from("tasks").select("id, title, due_date, priority, status").in("status", ["todo", "in-progress"]).order("due_date", { nullsFirst: false }),
   ]);
 
   const { data: blockedTasks } = await supabase

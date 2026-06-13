@@ -69,7 +69,7 @@ export async function loader({ context }: LoaderFunctionArgs) {
     supabase
       .from("tasks")
       .select("id", { count: "exact" })
-      .in("status", ["todo", "in_progress"]),
+      .in("status", ["todo", "in-progress"]),
     supabase.from("agents").select("id, name, slug, department, enabled"),
     supabase
       .from("agent_runs")

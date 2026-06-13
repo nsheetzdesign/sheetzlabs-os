@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
+import { buildTaskPayload } from "./tasks";
 
 type Bindings = {
   SUPABASE_URL: string;
@@ -269,6 +270,51 @@ knowledge.post("/captures/:id/process", async (c) => {
     .eq("id", id);
 
   return c.json({ item });
+});
+
+// Convert a capture into a task (Prompt 67). The capture's first line becomes the
+// task title (truncated), the full text the description; we record provenance via
+// captures.converted_task_id and mark it processed. Reuses buildTaskPayload so the
+// new task rides the same column allowlist as every other task write.
+knowledge.post("/captures/:id/convert", async (c) => {
+  const { id } = c.req.param();
+  const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const { data: capture } = await supabase.from("captures").select("*").eq("id", id).single();
+  if (!capture) return c.json({ error: "Capture not found" }, 404);
+  if (capture.converted_task_id) {
+    const { data: existing } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("id", capture.converted_task_id)
+      .maybeSingle();
+    if (existing) return c.json({ task: existing, already: true });
+  }
+
+  const text = (capture.content ?? capture.source_title ?? "").toString().trim();
+  if (!text) return c.json({ error: "capture has no content to convert" }, 400);
+  const firstLine = text.split("\n")[0].trim();
+  const title = firstLine.slice(0, 120) || "Untitled capture";
+  const description = text.length > title.length ? text : null;
+
+  const result = buildTaskPayload({ title, description, status: "todo" }, { partial: false });
+  if (!result.ok) return c.json({ error: result.reason }, 400);
+
+  const { data: task, error: insertErr } = await supabase
+    .from("tasks")
+    .insert({ ...result.payload, completed_at: null } as never)
+    .select("*")
+    .single();
+  if (insertErr || !task) {
+    return c.json({ error: insertErr?.message ?? "Failed to create task" }, 500);
+  }
+
+  await supabase
+    .from("captures")
+    .update({ processed: true, converted_task_id: task.id })
+    .eq("id", id);
+
+  return c.json({ task }, 201);
 });
 
 knowledge.delete("/captures/:id", async (c) => {

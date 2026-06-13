@@ -457,7 +457,7 @@ async function getRealTimeMetrics(supabase: ReturnType<typeof createClient<any>>
     supabase
       .from("tasks")
       .select("id", { count: "exact" })
-      .in("status", ["todo", "in_progress"]),
+      .in("status", ["todo", "in-progress"]),
   ]);
 
   return {
