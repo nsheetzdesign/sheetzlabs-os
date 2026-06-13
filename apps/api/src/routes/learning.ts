@@ -6,6 +6,43 @@ const app = new Hono<{
   Bindings: { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string; ANTHROPIC_API_KEY: string };
 }>();
 
+/**
+ * Guarded Anthropic call (AG-B4, Prompt 65B). The raw handlers assumed a 200 with a
+ * well-formed `data.content[0].text` — an API error, rate-limit, or empty body threw
+ * a TypeError that surfaced as an opaque 500. This checks `res.ok`, guards the JSON
+ * parse, and validates the shape, returning a typed result the caller can branch on.
+ */
+async function anthropicText(
+  apiKey: string,
+  payload: { model: string; max_tokens: number; system: string; messages: unknown }
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { ok: false, error: `Anthropic API error ${res.status}: ${body.slice(0, 300)}` };
+    }
+    const data = (await res.json().catch(() => null)) as
+      | { content?: Array<{ type?: string; text?: string }> }
+      | null;
+    const text = data?.content?.find((b) => b.type === "text")?.text ?? data?.content?.[0]?.text;
+    if (typeof text !== "string" || !text) {
+      return { ok: false, error: "Anthropic returned no text content" };
+    }
+    return { ok: true, text };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // Get all learning paths
 app.get("/paths", async (c) => {
   const supabase = createClient<Database>(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -148,17 +185,10 @@ app.post("/lessons/:id/generate", async (c) => {
   const module = lesson.learning_modules as any;
   const path = module.learning_paths as any;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": c.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
-      system: `You are an expert technical writer creating lesson content for a developer learning platform.
+  const result = await anthropicText(c.env.ANTHROPIC_API_KEY, {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 4096,
+    system: `You are an expert technical writer creating lesson content for a developer learning platform.
 
 Write in markdown format. Include:
 - A brief intro (2-3 sentences)
@@ -168,26 +198,25 @@ Write in markdown format. Include:
 - A "Try It Yourself" exercise at the end
 
 Keep it engaging and practical. Target a developer who learns by doing. Aim for ${lesson.estimated_minutes} minutes of reading time.`,
-      messages: [
-        {
-          role: "user",
-          content: `Write a lesson for:
+    messages: [
+      {
+        role: "user",
+        content: `Write a lesson for:
 
 Course: ${path.title}
 Module: ${module.title}
 Lesson: ${lesson.title}
 
 The lesson should cover this topic thoroughly but concisely.`,
-        },
-      ],
-    }),
+      },
+    ],
   });
 
-  const data: any = await response.json();
-  if (!data.content?.[0]?.text) {
-    return c.json({ error: "Failed to generate content" }, 500);
+  if (!result.ok) {
+    console.error(`[learning] lesson generate failed: ${result.error}`);
+    return c.json({ error: "Failed to generate content" }, 502);
   }
-  const content = data.content[0].text;
+  const content = result.text;
 
   const { error: updateError } = await supabase
     .from("learning_lessons")
@@ -210,17 +239,10 @@ app.post("/generate/curriculum", async (c) => {
   const body = await c.req.json();
   const { topic, depth, include_exercises } = body;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": c.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
-      system: `You are an expert curriculum designer. Create a learning path for the given topic.
+  const result = await anthropicText(c.env.ANTHROPIC_API_KEY, {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 4096,
+    system: `You are an expert curriculum designer. Create a learning path for the given topic.
 
 Output valid JSON with this structure:
 {
@@ -244,28 +266,34 @@ Output valid JSON with this structure:
     }
   ]
 }`,
-      messages: [
-        {
-          role: "user",
-          content: `Create a ${depth || "comprehensive"} learning path for: ${topic}
+    messages: [
+      {
+        role: "user",
+        content: `Create a ${depth || "comprehensive"} learning path for: ${topic}
 
 ${include_exercises ? "Include practical exercises in each module." : ""}
 
 The learner is a software developer who learns best through real code examples.`,
-        },
-      ],
-    }),
+      },
+    ],
   });
 
-  const data: any = await response.json();
-  const content = data.content[0].text;
+  if (!result.ok) {
+    console.error(`[learning] curriculum generate failed: ${result.error}`);
+    return c.json({ error: "Failed to generate curriculum" }, 502);
+  }
 
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  const jsonMatch = result.text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     return c.json({ error: "Failed to generate curriculum" }, 500);
   }
 
-  const curriculum = JSON.parse(jsonMatch[0]);
+  let curriculum: unknown;
+  try {
+    curriculum = JSON.parse(jsonMatch[0]);
+  } catch {
+    return c.json({ error: "Generated curriculum was not valid JSON" }, 502);
+  }
   return c.json({ curriculum });
 });
 
@@ -274,17 +302,10 @@ app.post("/generate/lesson", async (c) => {
   const body = await c.req.json();
   const { title, description, key_concepts, codebase_context } = body;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": c.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
-      system: `You are an expert technical writer creating lesson content.
+  const result = await anthropicText(c.env.ANTHROPIC_API_KEY, {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 4096,
+    system: `You are an expert technical writer creating lesson content.
 
 Write in markdown format. Include:
 - Clear explanations with practical focus
@@ -295,23 +316,24 @@ Write in markdown format. Include:
 ${codebase_context ? `Reference this actual code from the learner's project when relevant:\n${codebase_context}` : ""}
 
 Keep it engaging and practical, not academic.`,
-      messages: [
-        {
-          role: "user",
-          content: `Write a lesson on: ${title}
+    messages: [
+      {
+        role: "user",
+        content: `Write a lesson on: ${title}
 
 Description: ${description}
 
 Key concepts to cover: ${key_concepts?.join(", ") || "N/A"}`,
-        },
-      ],
-    }),
+      },
+    ],
   });
 
-  const data: any = await response.json();
-  const content = data.content[0].text;
+  if (!result.ok) {
+    console.error(`[learning] lesson content generate failed: ${result.error}`);
+    return c.json({ error: "Failed to generate lesson" }, 502);
+  }
 
-  return c.json({ content });
+  return c.json({ content: result.text });
 });
 
 // Get all conversations
@@ -433,29 +455,24 @@ app.post("/chat", async (c) => {
     content: msg.content,
   }));
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": c.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2048,
-      system: `You are a patient, knowledgeable tutor helping a developer learn.
+  const result = await anthropicText(c.env.ANTHROPIC_API_KEY, {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 2048,
+    system: `You are a patient, knowledgeable tutor helping a developer learn.
 
 ${codebase_context ? `The learner is working on this codebase. Reference it when relevant:\n${codebase_context}` : ""}
 
 ${path_slug ? `The learner is studying: ${path_slug}` : ""}
 
 Be concise but thorough. Use code examples when helpful. Encourage good practices.`,
-      messages,
-    }),
+    messages,
   });
 
-  const data: any = await response.json();
-  const assistantMessage = data.content[0].text;
+  if (!result.ok) {
+    console.error(`[learning] tutor chat failed: ${result.error}`);
+    return c.json({ conversation_id: convId, error: "The tutor is unavailable right now." }, 502);
+  }
+  const assistantMessage = result.text;
 
   // Save assistant message
   await supabase.from("learning_messages").insert({

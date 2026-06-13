@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
-import { executeAgent, postToLinkedIn } from "../lib/agent-engine";
+import { executeAgent, postToLinkedIn, sanitizeAgentPatch } from "../lib/agent-engine";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -172,20 +172,33 @@ agents.post("/:slug/run", async (c) => {
   return c.json({ message: "Agent run started", run_id: run.id });
 });
 
-/** PATCH /agents/:slug — update agent config */
+/**
+ * PATCH /agents/:slug — update agent config (AG-C1, Prompt 65B).
+ * Field-allowlisted: only benign operational config (name/description/enabled/
+ * schedule/max_tokens) is settable. `output_actions`, `slug`, `system_prompt`,
+ * `model`, `input_sources`, etc. define agent power/identity and are NOT editable
+ * here — present in the body ⇒ 403. This is the regression lock on the 65A dispatch
+ * gate: an agent can't PATCH itself into a more powerful action set.
+ */
 agents.patch("/:slug", async (c) => {
   const { slug } = c.req.param();
-  const body = await c.req.json();
+  const body = await c.req.json().catch(() => null);
   const supabase = createClient(c.env.SUPABASE_URL, c.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  const sanitized = sanitizeAgentPatch(body);
+  if (!sanitized.ok) {
+    return c.json({ error: sanitized.error, forbidden: sanitized.forbidden }, sanitized.status);
+  }
 
   const { data, error } = await supabase
     .from("agents")
-    .update(body)
+    .update(sanitized.fields)
     .eq("slug", slug)
     .select()
     .single();
 
   if (error) return c.json({ error: error.message }, 500);
+  if (!data) return c.json({ error: "Agent not found" }, 404);
   return c.json({ agent: data });
 });
 

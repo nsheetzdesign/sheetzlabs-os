@@ -1,5 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
-import { executeAgent, postToLinkedIn } from "./lib/agent-engine";
+import {
+  executeAgent,
+  postToLinkedIn,
+  resolveAgentLimits,
+  isDailyBudgetExceeded,
+  resetStuckRuns,
+} from "./lib/agent-engine";
 import { reminderEmail } from "./lib/booking-emails";
 import { sendBookingEmail } from "./lib/send-booking-email";
 import { runEmailSync, processScheduledSends } from "./routes/email";
@@ -34,34 +40,10 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 
-    // Run scheduled agents
-    const { data: agentsData } = await supabase
-      .from("agents")
-      .select("*")
-      .eq("enabled", true)
-      .not("schedule", "is", null);
-
     const now = new Date(event.scheduledTime);
 
-    for (const agent of agentsData ?? []) {
-      if (shouldRunNow(agent.schedule as string, now)) {
-        const { data: run } = await supabase
-          .from("agent_runs")
-          .insert({
-            agent_id: agent.id,
-            agent_name: agent.name,
-            status: "running",
-            trigger_type: "scheduled",
-            started_at: now.toISOString(),
-          })
-          .select()
-          .single();
-
-        if (run) {
-          ctx.waitUntil(executeAgent(agent, run, {}, env, supabase));
-        }
-      }
-    }
+    // Run scheduled agents (AG-B1/B2/B3 — bounded launch, see runScheduledAgents).
+    await runScheduledAgents(env, supabase, ctx, now);
 
     // Post scheduled content queue items
     const { data: scheduledPosts } = await supabase
@@ -150,6 +132,76 @@ export default {
     }
   },
 };
+
+/**
+ * Launch due scheduled agents safely (AG-B1/B2/B3, Prompt 65B):
+ *   1. Stuck-`running` recovery — reset runs left running past the lease window to
+ *      `failed` so a crashed run doesn't pin the dashboard or its agent claim forever
+ *      (the claim itself auto-expires via running_until; this clears the orphan row).
+ *   2. Daily spend ceiling — if any agent is due and today's spend is at the cap, skip
+ *      the whole launch and record one visible marker (no per-agent skip-row spam).
+ *   3. Per-agent try/catch — one agent's insert/launch failure never blocks the rest.
+ * The run-overlap claim + per-run token/iteration caps live inside executeAgent.
+ */
+async function runScheduledAgents(
+  env: Env,
+  supabase: ReturnType<typeof createClient<any>>,
+  ctx: ExecutionContext,
+  now: Date
+) {
+  const limits = resolveAgentLimits(env);
+
+  // (1) Crash recovery: unstick runs left "running" past the lease window.
+  await resetStuckRuns(supabase, limits, now);
+
+  const { data: agentsData, error: agentsErr } = await supabase
+    .from("agents")
+    .select("*")
+    .eq("enabled", true)
+    .not("schedule", "is", null);
+  if (agentsErr) {
+    console.error(`[agents-cron] agent query failed: ${agentsErr.message}`);
+    return;
+  }
+
+  const due = (agentsData ?? []).filter((a) => shouldRunNow(a.schedule as string, now));
+  if (!due.length) return;
+
+  // (2) Daily spend ceiling — skip the whole batch when over budget, record once.
+  if (await isDailyBudgetExceeded(supabase, limits)) {
+    console.warn(`[agents-cron] daily spend cap reached — skipping ${due.length} due agent(s)`);
+    await supabase.from("agent_runs").insert({
+      agent_name: "__system__",
+      status: "skipped",
+      terminated_reason: "daily_budget",
+      trigger_type: "scheduled",
+      started_at: now.toISOString(),
+      completed_at: now.toISOString(),
+    });
+    return;
+  }
+
+  // (3) Per-agent try/catch — isolate launch failures.
+  for (const agent of due) {
+    try {
+      const { data: run } = await supabase
+        .from("agent_runs")
+        .insert({
+          agent_id: agent.id,
+          agent_name: agent.name,
+          status: "running",
+          trigger_type: "scheduled",
+          started_at: now.toISOString(),
+        })
+        .select()
+        .single();
+
+      if (run) ctx.waitUntil(executeAgent(agent, run, {}, env, supabase));
+    } catch (err) {
+      console.error(`[agents-cron] launch failed for ${agent.slug}:`, err);
+    }
+  }
+}
 
 /**
  * Pick the single most-eligible email account and reconcile it (Prompt 59). An

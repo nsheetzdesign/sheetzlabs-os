@@ -26,7 +26,269 @@ type Env = {
   CLOUDFLARE_ACCOUNT_ID?: string;
   SERPER_API_KEY?: string;
   BRAVE_API_KEY?: string;
+  // ── Agent runtime safety knobs (Prompt 65B) — all optional, sane defaults ──
+  AGENT_MAX_ITERATIONS?: string; // hard cap on the agentic tool loop
+  AGENT_WALL_CLOCK_MS?: string; // per-run wall-clock deadline
+  AGENT_RUN_TOKEN_BUDGET?: string; // per-run input+output token ceiling
+  AGENT_DAILY_COST_CAP_CENTS?: string; // rolling daily spend ceiling across all agents
+  AGENT_RUN_TIMEOUT_SECONDS?: string; // claim lease length / stuck threshold
 };
+
+// ─── Runtime safety: loop / token / cost / overlap caps (Prompt 65B, AG-B1/B2/B3) ─
+//
+// The agents loop calls a paid API and writes to the DB under the service role. Left
+// unbounded it can run away (infinite tool loop), overspend (no token/cost ceiling),
+// or double-fire (cron re-launches a still-running agent). These caps contain all
+// three. Every limit is configurable from env so they aren't magic numbers in code.
+
+export interface AgentLimits {
+  maxIterations: number;
+  wallClockMs: number;
+  perRunTokenBudget: number;
+  dailyCostCapCents: number;
+  runTimeoutSeconds: number;
+}
+
+function intEnv(raw: string | undefined, fallback: number): number {
+  const n = raw == null ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : fallback;
+}
+
+export function resolveAgentLimits(env: Partial<Env>): AgentLimits {
+  return {
+    maxIterations: intEnv(env.AGENT_MAX_ITERATIONS, 10),
+    wallClockMs: intEnv(env.AGENT_WALL_CLOCK_MS, 90_000),
+    perRunTokenBudget: intEnv(env.AGENT_RUN_TOKEN_BUDGET, 200_000),
+    dailyCostCapCents: intEnv(env.AGENT_DAILY_COST_CAP_CENTS, 2000), // $20/day
+    runTimeoutSeconds: intEnv(env.AGENT_RUN_TIMEOUT_SECONDS, 300), // 5 min lease
+  };
+}
+
+/**
+ * Atomically claim an agent for a run (AG-B3). Returns true iff we now own the
+ * lease — a still-claimed (not-yet-expired) agent returns false and the caller
+ * skips, so a cron tick can't double-fire a run already in flight. Fail-OPEN on a
+ * transport/RPC error (return true) so a transient DB blip never wedges all agents;
+ * the per-run token/cost caps still bound a doubled run.
+ */
+export async function claimAgent(
+  supabase: SupabaseClient,
+  agentId: string,
+  timeoutSeconds: number
+): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.rpc("claim_agent", {
+      p_agent_id: agentId,
+      p_timeout_seconds: timeoutSeconds,
+    });
+    if (error) {
+      console.error(`[agent-claim] claim_agent failed for ${agentId}: ${error.message}`);
+      return true; // fail-open
+    }
+    return data != null; // RETURNING id ⇒ non-null when we won the claim
+  } catch (err) {
+    console.error(`[agent-claim] claim_agent threw for ${agentId}:`, err);
+    return true;
+  }
+}
+
+/** Release an agent claim (idempotent). Best-effort — logged, never throws. */
+export async function releaseAgent(supabase: SupabaseClient, agentId: string): Promise<void> {
+  try {
+    const { error } = await supabase.rpc("release_agent", { p_agent_id: agentId });
+    if (error) console.error(`[agent-claim] release_agent failed for ${agentId}: ${error.message}`);
+  } catch (err) {
+    console.error(`[agent-claim] release_agent threw for ${agentId}:`, err);
+  }
+}
+
+/**
+ * Today's total agent spend in cents (AG-B2). Summed in JS over the tiny per-agent
+ * rollup set to avoid any PostgREST aggregate/`.or()` surprises. Returns 0 on error
+ * (fail-open — a read blip shouldn't freeze all agents; the per-run cap still holds).
+ */
+export async function dailyCostCents(supabase: SupabaseClient): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+  const { data, error } = await supabase
+    .from("agent_performance")
+    .select("total_cost")
+    .eq("period_start", today);
+  if (error) {
+    console.error(`[agent-budget] daily spend read failed: ${error.message}`);
+    return 0;
+  }
+  return (data ?? []).reduce((sum, r) => sum + Number((r as { total_cost: unknown }).total_cost ?? 0), 0);
+}
+
+/** True when today's spend is at/over the configured ceiling. */
+export async function isDailyBudgetExceeded(
+  supabase: SupabaseClient,
+  limits: AgentLimits
+): Promise<boolean> {
+  if (limits.dailyCostCapCents <= 0) return false;
+  return (await dailyCostCents(supabase)) >= limits.dailyCostCapCents;
+}
+
+/**
+ * Stuck-`running` recovery (AG-B3). Reset runs left `running` past the lease window to
+ * `failed` so a crashed run doesn't pin the dashboard forever (the agent's own claim
+ * auto-expires via running_until). Mirrors the email pipeline's crash-recovery sweep.
+ * Returns the number of rows reset (best-effort; logs and returns 0 on error).
+ */
+export async function resetStuckRuns(
+  supabase: SupabaseClient,
+  limits: AgentLimits,
+  now: Date
+): Promise<number> {
+  const staleIso = new Date(now.getTime() - limits.runTimeoutSeconds * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("agent_runs")
+    .update({
+      status: "failed",
+      terminated_reason: "stuck_timeout",
+      error_message: "Run exceeded the agent lease window and was reset by the cron.",
+      completed_at: now.toISOString(),
+    })
+    .eq("status", "running")
+    .lt("created_at", staleIso)
+    .select("id");
+  if (error) {
+    console.error(`[agents-cron] stuck-run sweep failed: ${error.message}`);
+    return 0;
+  }
+  return Array.isArray(data) ? data.length : 0;
+}
+
+/** Record a run outcome into the agent_performance daily rollup (best-effort). */
+async function recordPerformance(
+  supabase: SupabaseClient,
+  agentId: string | undefined,
+  outcome: {
+    success: boolean;
+    tokensInput: number;
+    tokensOutput: number;
+    costCents: number;
+    durationMs: number;
+    actions: number;
+  }
+): Promise<void> {
+  if (!agentId) return;
+  try {
+    const { error } = await supabase.rpc("record_agent_performance", {
+      p_agent_id: agentId,
+      p_success: outcome.success,
+      p_tokens_input: outcome.tokensInput,
+      p_tokens_output: outcome.tokensOutput,
+      p_cost: outcome.costCents,
+      p_duration_ms: outcome.durationMs,
+      p_actions: outcome.actions,
+    });
+    if (error) console.error(`[agent-perf] record failed for ${agentId}: ${error.message}`);
+  } catch (err) {
+    console.error(`[agent-perf] record threw for ${agentId}:`, err);
+  }
+}
+
+// ─── Config-PATCH field allowlist (AG-C1, Prompt 65B) ────────────────────
+//
+// `PATCH /agents/:slug` must NOT be a path to change what an agent can do. The
+// audit's mass-assignment class (calendar-account / booking-link, Prompt 51) applied
+// to the thing that defines agent power: a single PATCH adding `post_linkedin` to
+// `output_actions` was "one PATCH away from auto-post". So the endpoint accepts only
+// benign operational config and rejects any attempt to touch power/identity/provenance.
+
+// Benign, routinely-editable config. Everything else is default-denied.
+const AGENT_PATCH_ALLOWED = new Set(["name", "description", "enabled", "schedule", "max_tokens"]);
+
+// Fields that define an agent's power, identity, or provenance. Never settable here —
+// present in a PATCH body ⇒ the whole request is rejected (not silently stripped) so a
+// caller attempting privilege escalation gets a hard, observable failure.
+const AGENT_PATCH_FORBIDDEN = new Set([
+  "output_actions",
+  "slug",
+  "system_prompt",
+  "user_prompt_template",
+  "input_sources",
+  "model",
+  "department",
+  "id",
+  "running_until",
+  "created_at",
+]);
+
+export type AgentPatchResult =
+  | { ok: true; fields: Record<string, unknown> }
+  | { ok: false; status: 400 | 403; error: string; forbidden?: string[] };
+
+/**
+ * Validate + filter a `PATCH /agents/:slug` body. Returns the sanitized field set to
+ * write, or a rejection. Changing `output_actions`/`slug`/`system_prompt`/`model`/…
+ * is intentionally NOT possible through this endpoint — agent power is a deliberate,
+ * separately-controlled change (edit the seed migration / a privileged operator path),
+ * never a routine config PATCH.
+ */
+export function sanitizeAgentPatch(body: unknown): AgentPatchResult {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, status: 400, error: "body must be a JSON object" };
+  }
+  const input = body as Record<string, unknown>;
+
+  const forbidden = Object.keys(input).filter((k) => AGENT_PATCH_FORBIDDEN.has(k));
+  if (forbidden.length) {
+    return {
+      ok: false,
+      status: 403,
+      error: `fields not editable via this endpoint: ${forbidden.join(", ")}`,
+      forbidden,
+    };
+  }
+
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!AGENT_PATCH_ALLOWED.has(key)) continue; // default-deny unlisted (benign-unknown) fields
+    switch (key) {
+      case "name":
+      case "description":
+        if (value !== null && typeof value !== "string") {
+          return { ok: false, status: 400, error: `"${key}" must be a string` };
+        }
+        fields[key] = value;
+        break;
+      case "schedule":
+        if (value !== null && typeof value !== "string") {
+          return { ok: false, status: 400, error: `"schedule" must be a string or null` };
+        }
+        fields[key] = value;
+        break;
+      case "enabled":
+        if (typeof value !== "boolean") {
+          return { ok: false, status: 400, error: `"enabled" must be a boolean` };
+        }
+        fields[key] = value;
+        break;
+      case "max_tokens": {
+        const n = typeof value === "number" ? value : Number(value);
+        if (!Number.isInteger(n) || n <= 0 || n > 32000) {
+          return { ok: false, status: 400, error: `"max_tokens" must be an integer in (0, 32000]` };
+        }
+        fields[key] = n;
+        break;
+      }
+    }
+  }
+
+  if (Object.keys(fields).length === 0) {
+    return { ok: false, status: 400, error: "no editable fields provided" };
+  }
+  return { ok: true, fields };
+}
+
+// Injectable Anthropic call — production uses the SDK; tests pass a stub so the
+// loop/budget caps can be exercised without a live API key.
+type CreateMessage = (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
+interface AgentDeps {
+  createMessage?: CreateMessage;
+}
 
 // Agentic loop variant — supports tool use (web_search) before final output
 export async function executeAgentWithTools(
@@ -34,15 +296,36 @@ export async function executeAgentWithTools(
   run: AgentRun,
   userInput: Record<string, unknown>,
   env: Env,
-  supabase: SupabaseClient
+  supabase: SupabaseClient,
+  deps: AgentDeps = {}
 ) {
   const startTime = Date.now();
+  const limits = resolveAgentLimits(env);
+
+  // Gate A — daily spend ceiling (AG-B2). Over budget ⇒ mark the run skipped with a
+  // visible reason and don't spend another token until the rolling day rolls over.
+  if (await isDailyBudgetExceeded(supabase, limits)) {
+    await markSkipped(supabase, run.id, "daily_budget");
+    return;
+  }
+
+  // Gate B — run-overlap claim (AG-B3). A still-running agent is skipped, not re-run.
+  const claimed = await claimAgent(supabase, agent.id, limits.runTimeoutSeconds);
+  if (!claimed) {
+    await markSkipped(supabase, run.id, "already_running");
+    return;
+  }
+
+  let totalTokensInput = 0;
+  let totalTokensOutput = 0;
 
   try {
     const context = await gatherContext(agent.input_sources, supabase, userInput);
     const userPrompt = buildPrompt(agent.user_prompt_template, { ...context, ...userInput });
 
-    const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    const anthropic = deps.createMessage ? null : new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    const createMessage: CreateMessage =
+      deps.createMessage ?? ((p) => (anthropic as Anthropic).messages.create(p));
 
     const tools: Anthropic.Tool[] = [];
     if (agent.output_actions.includes('web_search')) {
@@ -62,12 +345,23 @@ export async function executeAgentWithTools(
     let messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }];
     let response!: Anthropic.Message;
     const allWebResearch: Array<{ query: string; results: unknown }> = [];
-    let totalTokensInput = 0;
-    let totalTokensOutput = 0;
+    let iterations = 0;
+    let terminated: string | null = null;
 
-    // Agentic loop — continue until no more tool calls
+    // Agentic loop — bounded by iteration count, wall-clock, and a cumulative token
+    // budget (AG-B1/B2). Continue until the model stops calling tools, or a cap trips.
     while (true) {
-      response = await anthropic.messages.create({
+      if (iterations >= limits.maxIterations) {
+        terminated = "max_iterations";
+        break;
+      }
+      if (Date.now() - startTime > limits.wallClockMs) {
+        terminated = "wall_clock";
+        break;
+      }
+      iterations++;
+
+      response = await createMessage({
         model: agent.model,
         max_tokens: agent.max_tokens,
         system: agent.system_prompt + UNTRUSTED_DATA_PREAMBLE,
@@ -77,6 +371,11 @@ export async function executeAgentWithTools(
 
       totalTokensInput += response.usage.input_tokens;
       totalTokensOutput += response.usage.output_tokens;
+
+      if (totalTokensInput + totalTokensOutput >= limits.perRunTokenBudget) {
+        terminated = "token_budget";
+        break;
+      }
 
       const toolUseBlocks = response.content.filter(
         (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
@@ -104,28 +403,35 @@ export async function executeAgentWithTools(
       messages.push({ role: 'user', content: toolResults });
     }
 
-    const output = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n');
+    const output = response
+      ? response.content
+          .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+          .map((b) => b.text)
+          .join('\n')
+      : '';
 
     const costCents = (totalTokensInput * 3 + totalTokensOutput * 15) / 10000;
 
-    const actions = await executeActions(
-      agent.output_actions,
-      output,
-      supabase,
-      run.id,
-      env,
-      userInput,
-      { web_research: allWebResearch },
-      context
-    );
+    // A capped/partial run did not finish reasoning — its output is incomplete and
+    // unsafe to dispatch into DB writes. Skip action execution; record the reason.
+    const actions = terminated
+      ? []
+      : await executeActions(
+          agent.output_actions,
+          output,
+          supabase,
+          run.id,
+          env,
+          userInput,
+          { web_research: allWebResearch },
+          context
+        );
 
     await supabase
       .from('agent_runs')
       .update({
         status: 'completed',
+        terminated_reason: terminated,
         output_data: { output, actions, web_research: allWebResearch },
         input_context: context,
         tokens_input: totalTokensInput,
@@ -135,18 +441,57 @@ export async function executeAgentWithTools(
         completed_at: new Date().toISOString(),
       })
       .eq('id', run.id);
+
+    await recordPerformance(supabase, agent.id, {
+      success: !terminated,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+      costCents,
+      durationMs: Date.now() - startTime,
+      actions: Array.isArray(actions) ? actions.length : 0,
+    });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
+    const costCents = (totalTokensInput * 3 + totalTokensOutput * 15) / 10000;
     await supabase
       .from('agent_runs')
       .update({
         status: 'failed',
         error_message: msg,
+        tokens_input: totalTokensInput,
+        tokens_output: totalTokensOutput,
+        cost_cents: costCents,
         duration_ms: Date.now() - startTime,
         completed_at: new Date().toISOString(),
       })
       .eq('id', run.id);
+    await recordPerformance(supabase, agent.id, {
+      success: false,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+      costCents,
+      durationMs: Date.now() - startTime,
+      actions: 0,
+    });
+  } finally {
+    await releaseAgent(supabase, agent.id);
   }
+}
+
+/** Mark a run skipped (overlap / budget) with a visible reason. */
+async function markSkipped(
+  supabase: SupabaseClient,
+  runId: string,
+  reason: string
+): Promise<void> {
+  await supabase
+    .from("agent_runs")
+    .update({
+      status: "skipped",
+      terminated_reason: reason,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("id", runId);
 }
 
 async function performWebSearch(query: string, env: Env): Promise<unknown> {
@@ -159,7 +504,10 @@ async function performWebSearch(query: string, env: Env): Promise<unknown> {
       },
       body: JSON.stringify({ q: query, num: 10 }),
     });
-    const data = await response.json() as Record<string, unknown>;
+    if (!response.ok) {
+      return { query, results: [], error: `Serper API error: ${response.status}` };
+    }
+    const data = await response.json().catch(() => ({})) as Record<string, unknown>;
     return {
       query,
       results: ((data.organic as Array<Record<string, unknown>>) ?? []).map((r) => ({
@@ -182,7 +530,10 @@ async function performWebSearch(query: string, env: Env): Promise<unknown> {
         },
       }
     );
-    const data = await response.json() as Record<string, unknown>;
+    if (!response.ok) {
+      return { query, results: [], error: `Brave API error: ${response.status}` };
+    }
+    const data = await response.json().catch(() => ({})) as Record<string, unknown>;
     const web = data.web as { results?: Array<Record<string, unknown>> } | undefined;
     return {
       query,
@@ -205,6 +556,18 @@ export async function executeAgent(
   supabase: SupabaseClient
 ) {
   const startTime = Date.now();
+  const limits = resolveAgentLimits(env);
+
+  // Daily spend ceiling + run-overlap claim (AG-B2/B3) — mirror executeAgentWithTools.
+  if (await isDailyBudgetExceeded(supabase, limits)) {
+    await markSkipped(supabase, run.id, "daily_budget");
+    return;
+  }
+  const claimed = await claimAgent(supabase, agent.id, limits.runTimeoutSeconds);
+  if (!claimed) {
+    await markSkipped(supabase, run.id, "already_running");
+    return;
+  }
 
   try {
     const context = await gatherContext(agent.input_sources, supabase, userInput);
@@ -242,6 +605,15 @@ export async function executeAgent(
         completed_at: new Date().toISOString(),
       })
       .eq("id", run.id);
+
+    await recordPerformance(supabase, agent.id, {
+      success: true,
+      tokensInput,
+      tokensOutput,
+      costCents,
+      durationMs: Date.now() - startTime,
+      actions: actions.length,
+    });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     await supabase
@@ -253,6 +625,16 @@ export async function executeAgent(
         completed_at: new Date().toISOString(),
       })
       .eq("id", run.id);
+    await recordPerformance(supabase, agent.id, {
+      success: false,
+      tokensInput: 0,
+      tokensOutput: 0,
+      costCents: 0,
+      durationMs: Date.now() - startTime,
+      actions: 0,
+    });
+  } finally {
+    await releaseAgent(supabase, agent.id);
   }
 }
 

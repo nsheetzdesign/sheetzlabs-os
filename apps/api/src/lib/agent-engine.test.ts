@@ -1,8 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildPrompt,
   buildSafePayload,
   executeActions,
+  executeAgentWithTools,
+  sanitizeAgentPatch,
+  claimAgent,
+  isDailyBudgetExceeded,
+  resetStuckRuns,
+  resolveAgentLimits,
   UNTRUSTED_DATA_PREAMBLE,
 } from "./agent-engine";
 
@@ -242,5 +248,257 @@ describe("buildPrompt — untrusted-content trust boundary", () => {
   it("system preamble frames the markers as data, not instructions", () => {
     expect(UNTRUSTED_DATA_PREAMBLE).toMatch(/NEVER instructions/i);
     expect(UNTRUSTED_DATA_PREAMBLE).toContain("UNTRUSTED DATA");
+  });
+});
+
+// ─── Part 0 — config-PATCH field allowlist (the regression lock on 65A) ──
+
+describe("sanitizeAgentPatch — config-PATCH guard", () => {
+  it("rejects output_actions (the privilege-escalation field)", () => {
+    const r = sanitizeAgentPatch({ output_actions: ["post_linkedin"] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe(403);
+      expect(r.forbidden).toContain("output_actions");
+    }
+  });
+
+  it("rejects slug / system_prompt / model / input_sources (power & identity)", () => {
+    for (const field of ["slug", "system_prompt", "model", "input_sources", "department"]) {
+      const r = sanitizeAgentPatch({ [field]: "x" });
+      expect(r.ok, `${field} must be rejected`).toBe(false);
+      if (!r.ok) expect(r.status).toBe(403);
+    }
+  });
+
+  it("rejects when a forbidden field rides alongside benign ones", () => {
+    const r = sanitizeAgentPatch({ name: "ok", output_actions: ["post_linkedin"] });
+    expect(r.ok).toBe(false); // all-or-nothing: don't silently apply the benign part
+  });
+
+  it("allows the benign config set and strips unknown fields", () => {
+    const r = sanitizeAgentPatch({
+      name: "Renamed",
+      description: "desc",
+      enabled: false,
+      schedule: "0 9 * * *",
+      max_tokens: 2048,
+      unknown_field: "ignored",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.fields).toEqual({
+        name: "Renamed",
+        description: "desc",
+        enabled: false,
+        schedule: "0 9 * * *",
+        max_tokens: 2048,
+      });
+      expect(r.fields).not.toHaveProperty("unknown_field");
+    }
+  });
+
+  it("type-checks benign fields (enabled must be boolean, max_tokens bounded)", () => {
+    expect(sanitizeAgentPatch({ enabled: "yes" }).ok).toBe(false);
+    expect(sanitizeAgentPatch({ max_tokens: 0 }).ok).toBe(false);
+    expect(sanitizeAgentPatch({ max_tokens: 999999 }).ok).toBe(false);
+  });
+
+  it("rejects an empty / non-object body", () => {
+    expect(sanitizeAgentPatch({}).ok).toBe(false);
+    expect(sanitizeAgentPatch(null).ok).toBe(false);
+    expect(sanitizeAgentPatch([1, 2]).ok).toBe(false);
+  });
+});
+
+// ─── Parts 1-3 — loop / token / overlap / daily-cap / stuck recovery ─────
+//
+// A richer mock than makeSupabase: it answers rpc() (claim/release/record) and
+// resolves table reads (agent_performance daily spend, stuck-run sweep) so the
+// executor's caps can run end-to-end against a stubbed Anthropic client.
+
+function makeRuntimeSupabase(opts: {
+  claim?: boolean; // claim_agent → won?
+  claimError?: boolean;
+  dailyRows?: Array<{ total_cost: number }>;
+  stuckRows?: Array<{ id: string }>;
+}) {
+  const ops: Array<{ table: string; op: string; payload?: Record<string, unknown>; filters: Record<string, unknown> }> = [];
+  const rpcCalls: Array<{ name: string; params: unknown }> = [];
+
+  class QB {
+    private op = "select";
+    private payload: Record<string, unknown> | undefined;
+    private filters: Record<string, unknown> = {};
+    private rec: { table: string; op: string; payload?: Record<string, unknown>; filters: Record<string, unknown> } | null = null;
+    constructor(private table: string) {}
+
+    insert(payload: Record<string, unknown>) {
+      this.op = "insert";
+      this.payload = payload;
+      this.record();
+      return this;
+    }
+    update(payload: Record<string, unknown>) {
+      this.op = "update";
+      this.payload = payload;
+      this.record();
+      return this;
+    }
+    private record() {
+      this.rec = { table: this.table, op: this.op, payload: this.payload, filters: this.filters };
+      ops.push(this.rec);
+    }
+    eq(col: string, val: unknown) {
+      this.filters[col] = val;
+      return this;
+    }
+    lt(col: string, val: unknown) {
+      this.filters[`${col}<`] = val;
+      return this;
+    }
+    not() { return this; }
+    gte() { return this; }
+    lte() { return this; }
+    order() { return this; }
+    limit() { return this; }
+    select() { return this; }
+    single() { return this; }
+    maybeSingle() { return this; }
+    private resolve() {
+      if (this.table === "agent_performance") return { data: opts.dailyRows ?? [], error: null };
+      if (this.table === "agent_runs" && this.op === "update") return { data: opts.stuckRows ?? null, error: null };
+      return { data: null, error: null };
+    }
+    then(cb: (v: { data: unknown; error: null }) => void) {
+      cb(this.resolve());
+    }
+  }
+
+  const client = {
+    from: (table: string) => new QB(table),
+    rpc: (name: string, params: unknown) => {
+      rpcCalls.push({ name, params });
+      if (name === "claim_agent") {
+        if (opts.claimError) return Promise.resolve({ data: null, error: { message: "boom" } });
+        return Promise.resolve({ data: opts.claim === false ? null : "agent-1", error: null });
+      }
+      return Promise.resolve({ data: null, error: null });
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+
+  return { client, ops, rpcCalls };
+}
+
+const AGENT = {
+  id: "agent-1",
+  slug: "tester",
+  system_prompt: "sys",
+  user_prompt_template: "do it",
+  input_sources: [],
+  output_actions: ["web_search"],
+  model: "claude-sonnet-4-20250514",
+  max_tokens: 1024,
+};
+const RUN = { id: "run-1" };
+
+// A model response that always asks to use a tool — the loop would never end on its
+// own, so only the caps can stop it.
+function toolUseMessage(inTok: number, outTok: number) {
+  return {
+    content: [{ type: "tool_use", id: "t1", name: "web_search", input: { query: "x" } }],
+    stop_reason: "tool_use",
+    usage: { input_tokens: inTok, output_tokens: outTok },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+}
+
+describe("executeAgentWithTools — runtime caps", () => {
+  it("terminates a runaway tool loop at MAX_ITERATIONS (no infinite loop)", async () => {
+    const { client, ops } = makeRuntimeSupabase({ claim: true });
+    const createMessage = vi.fn(async () => toolUseMessage(5, 5));
+    const env = { AGENT_MAX_ITERATIONS: "3" } as never;
+
+    await executeAgentWithTools(AGENT, RUN, {}, env, client, { createMessage });
+
+    expect(createMessage).toHaveBeenCalledTimes(3);
+    const upd = ops.find((o) => o.table === "agent_runs" && o.op === "update");
+    expect(upd?.payload?.terminated_reason).toBe("max_iterations");
+    // a capped/partial run must NOT dispatch actions
+    expect(ops.some((o) => o.table === "tasks" || o.table === "knowledge")).toBe(false);
+  });
+
+  it("aborts when the per-run token budget is exceeded", async () => {
+    const { client, ops } = makeRuntimeSupabase({ claim: true });
+    const createMessage = vi.fn(async () => toolUseMessage(40, 40)); // 80 > 50
+    const env = { AGENT_RUN_TOKEN_BUDGET: "50" } as never;
+
+    await executeAgentWithTools(AGENT, RUN, {}, env, client, { createMessage });
+
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    const upd = ops.find((o) => o.table === "agent_runs" && o.op === "update");
+    expect(upd?.payload?.terminated_reason).toBe("token_budget");
+  });
+
+  it("skips (does not call the model) when the agent is already running", async () => {
+    const { client, ops } = makeRuntimeSupabase({ claim: false });
+    const createMessage = vi.fn(async () => toolUseMessage(5, 5));
+
+    await executeAgentWithTools(AGENT, RUN, {}, {} as never, client, { createMessage });
+
+    expect(createMessage).not.toHaveBeenCalled();
+    const upd = ops.find((o) => o.table === "agent_runs" && o.op === "update");
+    expect(upd?.payload?.status).toBe("skipped");
+    expect(upd?.payload?.terminated_reason).toBe("already_running");
+  });
+
+  it("skips when the daily spend ceiling is already reached", async () => {
+    const { client, ops } = makeRuntimeSupabase({ claim: true, dailyRows: [{ total_cost: 50 }] });
+    const createMessage = vi.fn(async () => toolUseMessage(5, 5));
+    const env = { AGENT_DAILY_COST_CAP_CENTS: "10" } as never; // 50 >= 10
+
+    await executeAgentWithTools(AGENT, RUN, {}, env, client, { createMessage });
+
+    expect(createMessage).not.toHaveBeenCalled();
+    const upd = ops.find((o) => o.table === "agent_runs" && o.op === "update");
+    expect(upd?.payload?.terminated_reason).toBe("daily_budget");
+  });
+});
+
+describe("claim / budget / stuck-recovery helpers", () => {
+  it("claimAgent returns true only when the RPC reports the claim won", async () => {
+    const won = makeRuntimeSupabase({ claim: true });
+    expect(await claimAgent(won.client, "agent-1", 300)).toBe(true);
+    const lost = makeRuntimeSupabase({ claim: false });
+    expect(await claimAgent(lost.client, "agent-1", 300)).toBe(false);
+  });
+
+  it("claimAgent fails OPEN on a transport error (availability over strictness)", async () => {
+    const errd = makeRuntimeSupabase({ claimError: true });
+    expect(await claimAgent(errd.client, "agent-1", 300)).toBe(true);
+  });
+
+  it("isDailyBudgetExceeded compares summed spend against the configured cap", async () => {
+    const limits = resolveAgentLimits({ AGENT_DAILY_COST_CAP_CENTS: "100" } as never);
+    const under = makeRuntimeSupabase({ dailyRows: [{ total_cost: 40 }, { total_cost: 30 }] });
+    expect(await isDailyBudgetExceeded(under.client, limits)).toBe(false);
+    const over = makeRuntimeSupabase({ dailyRows: [{ total_cost: 60 }, { total_cost: 50 }] });
+    expect(await isDailyBudgetExceeded(over.client, limits)).toBe(true);
+  });
+
+  it("resetStuckRuns marks runs left running past the lease as failed", async () => {
+    const { client, ops } = makeRuntimeSupabase({ stuckRows: [{ id: "r1" }, { id: "r2" }] });
+    const limits = resolveAgentLimits({ AGENT_RUN_TIMEOUT_SECONDS: "300" } as never);
+    const now = new Date("2026-06-13T12:00:00Z");
+
+    const reset = await resetStuckRuns(client, limits, now);
+
+    expect(reset).toBe(2);
+    const upd = ops.find((o) => o.table === "agent_runs" && o.op === "update");
+    expect(upd?.payload?.status).toBe("failed");
+    expect(upd?.payload?.terminated_reason).toBe("stuck_timeout");
+    expect(upd?.filters?.status).toBe("running");
+    expect(upd?.filters?.["created_at<"]).toBe("2026-06-13T11:55:00.000Z");
   });
 });
