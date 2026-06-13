@@ -1,8 +1,10 @@
 import type { ActionFunctionArgs } from 'react-router';
 import { getSupabaseClient } from '~/lib/supabase.server';
+import { requireAuth } from "~/lib/auth.server";
 import { apiFetch } from '~/lib/api';
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const env = context.cloudflare.env as Record<string, string>;
   const supabase = getSupabaseClient(env as any);
 

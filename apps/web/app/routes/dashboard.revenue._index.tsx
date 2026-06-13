@@ -3,6 +3,7 @@ import { useLoaderData, Form, Link, redirect } from "react-router";
 import { Plus, DollarSign } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 import { Badge } from "~/components/ui/Badge";
 import { Button } from "~/components/ui/Button";
 import { EmptyState } from "~/components/ui/EmptyState";
@@ -42,6 +43,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;

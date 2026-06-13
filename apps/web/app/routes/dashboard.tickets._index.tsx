@@ -2,6 +2,8 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, Link, useLoaderData } from "react-router";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
+import { apiFetch } from "~/lib/api";
 import { Button } from "~/components/ui/Button";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -63,6 +65,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
@@ -76,33 +79,15 @@ export async function action({ request, context }: ActionFunctionArgs) {
   }
 
   if (intent === "bulk-convert-tasks") {
+    // Route each conversion through the authed API so it's atomic — the endpoint
+    // claims the ticket with a conditional UPDATE, so concurrent submits (or an
+    // already-converted ticket, 409) can never double-convert. Per-row failures
+    // are skipped so one bad ticket doesn't abort the batch (Prompt 63).
     const ids = fd.getAll("selected") as string[];
     for (const id of ids) {
-      const { data: ticket } = await supabase
-        .from("tickets")
-        .select("*")
-        .eq("id", id)
-        .single();
-      if (!ticket || ticket.converted_task_id) continue;
-
-      const { data: newTask } = await supabase
-        .from("tasks")
-        .insert({
-          venture_id: ticket.venture_id,
-          title: `[${ticket.type?.toUpperCase()}] ${ticket.title}`,
-          description: ticket.description,
-          priority: (ticket.priority as never) ?? "medium",
-          status: "backlog" as const,
-        })
-        .select("id")
-        .single();
-
-      if (newTask) {
-        await supabase
-          .from("tickets")
-          .update({ converted_task_id: newTask.id, status: "in-progress" })
-          .eq("id", id);
-      }
+      await apiFetch(request, context.cloudflare.env, `/tickets/${id}/convert-to-task`, {
+        method: "POST",
+      });
     }
     return { ok: true };
   }

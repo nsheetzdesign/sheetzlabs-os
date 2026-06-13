@@ -130,6 +130,11 @@ Cloudflare tsconfig has no DOM lib).
     endpoint is public *because* it is signature-gated.
 13. **(Target, not yet enforced)** Agent/model output must be column-allowlisted before any DB
     write, and external-content fed to a model must be delimited as data — see Tier 1.
+14. **RR v7 `action`s do NOT inherit ancestor-loader auth.** Every mutating action must establish
+    auth *itself* — either `await requireAuth(request, context.cloudflare.env)` as its first line
+    (when it mutates Supabase directly) or by routing the mutation through an auth-gated API endpoint
+    via `apiFetch` (the API middleware is the real gate). A dashboard layout loader running
+    `requireAuth` does **not** protect a child route's action. (Prompt 63 closed 27 such gaps.)
 
 ## Residual register
 

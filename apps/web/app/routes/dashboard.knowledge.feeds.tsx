@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Rss, Plus, Trash2, RefreshCw, BookmarkPlus, Check, ExternalLink } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 import { apiFetch } from "~/lib/api";
 import { EmptyState } from "~/components/ui/EmptyState";
 import { Button } from "~/components/ui/Button";
@@ -29,6 +30,7 @@ export async function loader({ context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const env = context.cloudflare.env;
   const supabase = getSupabaseClient(env);
   const fd = await request.formData();

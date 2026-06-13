@@ -11,6 +11,7 @@ import {
 import { Sparkles } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 import { apiFetch } from "~/lib/api";
 import { FormField } from "~/components/ui/FormField";
 import { Input } from "~/components/ui/Input";
@@ -192,6 +193,7 @@ Begin by creating the full monorepo structure described above.`;
 }
 
 export async function action({ request, params, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;

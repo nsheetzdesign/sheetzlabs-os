@@ -46,6 +46,12 @@ const PUBLIC_EXACT = new Set([
 const PUBLIC_PREFIXES = [
   "/booking/public/",
   "/stripe/webhook/", // Stripe-signed webhooks (verified by signature, not JWT)
+  // N8N ticket ingestion (Prompt 63). No Supabase JWT is possible for automation,
+  // so the chokepoint is skipped here and the handler validates `N8N_API_KEY`
+  // internally (constant-time, fail-closed) — same shape as the Stripe webhook.
+  // The founder-facing `/tickets/:id/convert-*` routes are NOT under this prefix
+  // and stay behind the JWT gate.
+  "/tickets/sync/",
 ];
 
 function isPublicPath(path: string): boolean {

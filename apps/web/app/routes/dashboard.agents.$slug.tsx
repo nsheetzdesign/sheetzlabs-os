@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ArrowLeft, Play, Clock, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 import { apiFetch } from "~/lib/api";
 import { Button } from "~/components/ui/Button";
 
@@ -84,6 +85,7 @@ export async function loader({ params, context }: LoaderFunctionArgs) {
 }
 
 export async function action({ params, request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const formData = await request.formData();
   const intent = formData.get("intent");

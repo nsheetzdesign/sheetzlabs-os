@@ -3,6 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, MetaFunction } from "react
 import { useLoaderData, useFetcher, Link } from "react-router";
 import { Plus, Pencil, Trash2, ArrowLeft, X } from "lucide-react";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 
 export const meta: MetaFunction = () => [{ title: "Snippets — Inbox — Sheetz Labs OS" }];
 
@@ -17,6 +18,7 @@ export async function loader({ context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const env = context.cloudflare.env;
   const supabase = getSupabaseClient(env);
   const formData = await request.formData();

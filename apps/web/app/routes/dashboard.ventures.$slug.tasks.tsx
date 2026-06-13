@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, Link, useLoaderData, data } from "react-router";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 import { Button } from "~/components/ui/Button";
 import { Input } from "~/components/ui/Input";
 import { Select } from "~/components/ui/Select";
@@ -64,6 +65,7 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, params, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;

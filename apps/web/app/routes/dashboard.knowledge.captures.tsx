@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Inbox, Send, Trash2, ExternalLink, ArrowRight } from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
 import { EmptyState } from "~/components/ui/EmptyState";
 import { Button } from "~/components/ui/Button";
 
@@ -21,6 +22,7 @@ export async function loader({ context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;

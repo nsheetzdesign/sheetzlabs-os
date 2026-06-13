@@ -1,6 +1,8 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, useLoaderData, data } from "react-router";
 import { getSupabaseClient } from "~/lib/supabase.server";
+import { requireAuth } from "~/lib/auth.server";
+import { apiFetch } from "~/lib/api";
 import { Button } from "~/components/ui/Button";
 import { Input } from "~/components/ui/Input";
 import { Select } from "~/components/ui/Select";
@@ -66,6 +68,7 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, params, context }: ActionFunctionArgs) {
+  await requireAuth(request, context.cloudflare.env);
   const supabase = getSupabaseClient(context.cloudflare.env);
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
@@ -101,71 +104,39 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
   }
 
   if (intent === "convert-to-task") {
+    // Route through the authed API so the conversion is atomic (no double-convert
+    // under concurrent submit) — Prompt 63.
     const ticketId = fd.get("ticket_id") as string;
-    const { data: ticket } = await supabase
-      .from("tickets")
-      .select("*")
-      .eq("id", ticketId)
-      .single();
-    if (!ticket) return data({ error: "Ticket not found" }, { status: 404 });
-
-    const { data: newTask, error: taskErr } = await supabase
-      .from("tasks")
-      .insert({
-        venture_id: v.id,
-        title: `[${ticket.type?.toUpperCase()}] ${ticket.title}`,
-        description: ticket.description,
-        priority:
-          (ticket.priority as "urgent" | "high" | "medium" | "low") ?? "medium",
-        status: "backlog" as const,
-      })
-      .select("id")
-      .single();
-
-    if (taskErr) return data({ error: taskErr.message }, { status: 500 });
-
-    await supabase
-      .from("tickets")
-      .update({ converted_task_id: newTask.id, status: "in-progress" })
-      .eq("id", ticketId);
-
+    const res = await apiFetch(
+      request,
+      context.cloudflare.env,
+      `/tickets/${ticketId}/convert-to-task`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      return data({ error: body.error ?? "Failed to convert ticket" }, { status: res.status });
+    }
     return { ok: true };
   }
 
   if (intent === "add-to-roadmap") {
     const ticketId = fd.get("ticket_id") as string;
-    const milestoneId = fd.get("milestone_id") as string | null;
-    const { data: ticket } = await supabase
-      .from("tickets")
-      .select("*")
-      .eq("id", ticketId)
-      .single();
-    if (!ticket) return data({ error: "Ticket not found" }, { status: 404 });
-
-    let targetMilestoneId = milestoneId;
-
-    if (!targetMilestoneId) {
-      // Create a new milestone from this ticket
-      const { data: newMs } = await supabase
-        .from("milestones")
-        .insert({
-          venture_id: v.id,
-          title: ticket.title,
-          description: ticket.description,
-          status: "planned",
-        })
-        .select("id")
-        .single();
-      targetMilestoneId = newMs?.id ?? null;
+    const milestoneId = (fd.get("milestone_id") as string) || null;
+    const res = await apiFetch(
+      request,
+      context.cloudflare.env,
+      `/tickets/${ticketId}/convert-to-milestone`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ milestone_id: milestoneId }),
+      },
+    );
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      return data({ error: body.error ?? "Failed to add to roadmap" }, { status: res.status });
     }
-
-    if (targetMilestoneId) {
-      await supabase
-        .from("tickets")
-        .update({ converted_milestone_id: targetMilestoneId, status: "in-progress" })
-        .eq("id", ticketId);
-    }
-
     return { ok: true };
   }
 
