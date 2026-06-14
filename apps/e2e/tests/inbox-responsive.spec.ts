@@ -153,20 +153,23 @@ test.describe("email iframe containment", () => {
   const subject = e2eSubject("wide-html");
   let emailId: string | null = null;
 
-  // A rigid newsletter far wider than any half-screen pane.
+  // A rigid newsletter far wider than any half-screen pane. The table + img are
+  // clampable (FRAME_STYLE forces max-width:100%) — they must NOT widen the page.
+  // The fixed-width <div> is deliberately UNclampable (no max-width rule applies),
+  // so it forces genuine horizontal overflow that must stay INSIDE the iframe.
   const WIDE_HTML = `
     <table width="1200" cellpadding="0" cellspacing="0" style="width:1200px;border-collapse:collapse">
       <tr><td style="width:1200px;background:#003a9b;color:#fff;padding:24px;font-size:28px">
         Jobs picked for you
       </td></tr>
       <tr><td style="width:1200px;padding:24px">
-        <p style="white-space:nowrap;font-size:16px">
-          ThisIsADeliberatelyUnbreakableSingleWordThatIsFarWiderThanAnyHalfScreenReadingPaneToForceHorizontalOverflowInsideTheIframeDocumentBodyXXXXXXXXXXXXXXXXXXXX
-        </p>
         <img src="https://example.com/banner.png" width="1200" height="200"
              alt="banner" style="width:1200px;height:200px;display:block;background:#ddd" />
       </td></tr>
-    </table>`;
+    </table>
+    <div style="width:1500px;height:40px;background:#eee;white-space:nowrap">
+      Rigid 1500px content that cannot reflow — scrolls inside the iframe, never the page.
+    </div>`;
 
   test.beforeAll(async () => {
     const recipient = await recipientAccount();
@@ -212,24 +215,33 @@ test.describe("email iframe containment", () => {
       // The sandboxed iframe renders the body.
       const iframeEl = page.locator('iframe[title="Email content"]');
       await expect(iframeEl).toBeVisible();
-      await expectNoPageHScroll(page);
+
+      // EmailHtmlFrame sanitizes async (dynamic DOMPurify import) before it writes
+      // srcDoc, so wait until the 1500px content has actually rendered inside the
+      // iframe — measuring sooner catches an empty frame.
+      const readDims = async () => {
+        const cf = await (await iframeEl.elementHandle())!.contentFrame();
+        return cf!.evaluate(() => ({
+          scrollW: document.body.scrollWidth,
+          clientW: document.documentElement.clientWidth,
+        }));
+      };
+      await expect.poll(async () => (await readDims()).scrollW, { timeout: 10_000 }).toBeGreaterThan(
+        1000,
+      );
 
       // The iframe element itself never exceeds the viewport (it's clamped to its
-      // pane), so the 1200px content cannot bleed onto the page.
+      // pane), so the 1500px content cannot bleed onto the page.
       const ifBox = (await iframeEl.boundingBox())!;
       expect(ifBox.width, "iframe wider than viewport").toBeLessThanOrEqual(width + 1);
 
-      // And the overflow is REAL but contained: the iframe document scrolls
-      // horizontally inside itself (content wider than the iframe viewport).
-      const cf = await (await iframeEl.elementHandle())!.contentFrame();
-      const dims = await cf!.evaluate(() => ({
-        scrollW: document.body.scrollWidth,
-        clientW: document.documentElement.clientWidth,
-      }));
-      expect(dims.scrollW, "expected the 1200px content to overflow the iframe").toBeGreaterThan(
+      // The overflow is REAL but contained: the iframe DOCUMENT scrolls horizontally
+      // inside itself (content wider than the iframe viewport)…
+      const dims = await readDims();
+      expect(dims.scrollW, "expected the 1500px content to overflow the iframe").toBeGreaterThan(
         dims.clientW,
       );
-
+      // …and yet the page never gains a horizontal scrollbar.
       await expectNoPageHScroll(page);
     });
   }

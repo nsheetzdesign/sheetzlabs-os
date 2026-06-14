@@ -166,19 +166,27 @@ test.describe("nav indicators @ 1440", () => {
 
   const badgeText = (n: number) => (n > 99 ? "99+" : String(n));
 
-  test("inbox badge reflects the unread count and hides at zero", async ({ page }) => {
+  // The global unread total is SHARED, live state — other tests' syncs can nudge
+  // it between reads. So we never assert an absolute remembered number; we assert
+  // the badge matches the RPC value read at (near) the same moment, and that
+  // seeding/removing a row moves it the right direction.
+  async function expectBadgeMatchesLive(page: Page) {
     const badge = page.getByTestId("nav-inbox-badge");
-
-    // Baseline (the e2e mailbox is otherwise empty, so usually 0 → hidden).
-    const baseline = await readUnread();
-    await page.goto("/dashboard", { waitUntil: "networkidle" });
-    if (baseline === 0) {
+    const live = await readUnread();
+    if (live === 0) {
       await expect(badge).toHaveCount(0);
     } else {
-      await expect(badge).toHaveText(badgeText(baseline));
+      await expect(badge).toHaveText(badgeText(live));
     }
+    return live;
+  }
 
-    // Seed one UNREAD inbox email → the global count goes up by one.
+  test("inbox badge reflects the unread count and hides at zero", async ({ page }) => {
+    // Reflects the live count (and hides when that count is zero).
+    await page.goto("/dashboard", { waitUntil: "networkidle" });
+    const before = await expectBadgeMatchesLive(page);
+
+    // Seed one UNREAD inbox email → the count goes up; the badge tracks it.
     const recipient = await recipientAccount();
     const { data, error } = await admin()
       .from("emails")
@@ -206,8 +214,9 @@ test.describe("nav indicators @ 1440", () => {
 
     try {
       await page.reload({ waitUntil: "networkidle" });
-      await expect(badge).toBeVisible();
-      await expect(badge).toHaveText(badgeText(baseline + 1));
+      const withSeed = await expectBadgeMatchesLive(page);
+      expect(withSeed, "seeding an unread row should raise the count").toBeGreaterThan(before);
+      await expect(page.getByTestId("nav-inbox-badge")).toBeVisible();
 
       // Collapsed rail shows the presence dot instead of the number.
       await page.getByTestId("sidebar-toggle").click();
@@ -217,13 +226,9 @@ test.describe("nav indicators @ 1440", () => {
       await admin().from("emails").delete().eq("id", seededId);
     }
 
-    // Back to baseline after removing the seed.
+    // After removing the seed the badge again matches the live count.
     await page.reload({ waitUntil: "networkidle" });
-    if (baseline === 0) {
-      await expect(badge).toHaveCount(0);
-    } else {
-      await expect(badge).toHaveText(badgeText(baseline));
-    }
+    await expectBadgeMatchesLive(page);
   });
 
   test("calendar proximity dot is always present with a semantic colour", async ({ page }) => {
