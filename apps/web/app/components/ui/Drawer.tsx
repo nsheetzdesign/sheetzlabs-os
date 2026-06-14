@@ -78,7 +78,7 @@ export function Drawer({ open, onClose, side = 'left', ariaLabel, children, pane
         aria-modal="true"
         aria-label={ariaLabel}
         tabIndex={-1}
-        className={`absolute top-0 ${side === 'left' ? 'left-0' : 'right-0'} h-full max-w-[85vw] bg-zinc-950 shadow-2xl outline-none ${panelClassName}`}
+        className={`absolute top-0 ${side === 'left' ? 'left-0 pl-safe' : 'right-0 pr-safe'} h-full max-w-[85vw] bg-zinc-950 shadow-2xl outline-none pt-safe pb-safe ${panelClassName}`}
       >
         {children}
       </div>

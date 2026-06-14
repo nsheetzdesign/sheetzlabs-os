@@ -18,10 +18,22 @@ import { formatTimeInTz } from "~/lib/tz";
  *    its estimate, and stamps the task's planned_date — optimistic, revert on fail.
  */
 
-const HOUR_HEIGHT = 48; // px per hour
-const SNAP_MIN = 15;
+export const HOUR_HEIGHT = 48; // px per hour
+export const SNAP_MIN = 15;
 const MIN_BLOCK_MIN = 15;
-const DAY_MIN = 24 * 60;
+export const DAY_MIN = 24 * 60;
+
+/**
+ * Map a viewport Y to a snapped minute-of-day within a timeline scroll container.
+ * Shared by the in-timeline drag (move/resize) and the rail→timeline drop
+ * (useTimeboxDrag) so both land on the same 15-min grid.
+ */
+export function yToMinutesIn(el: HTMLElement, clientY: number): number {
+  const rect = el.getBoundingClientRect();
+  const y = clientY - rect.top + el.scrollTop;
+  const mins = (y / HOUR_HEIGHT) * 60;
+  return Math.max(0, Math.min(DAY_MIN - SNAP_MIN, Math.round(mins / SNAP_MIN) * SNAP_MIN));
+}
 
 type Override = { startMin: number; endMin: number };
 
@@ -36,12 +48,13 @@ function clampTop(min: number): number {
 export function DayTimeline({
   tz,
   dayStartUtcMs,
-  planDate,
   isToday,
   meetings,
   blocks,
   onChanged,
   onToast,
+  scrollRef: externalScrollRef,
+  dropPreviewMin = null,
 }: {
   tz: string;
   dayStartUtcMs: number;
@@ -51,10 +64,14 @@ export function DayTimeline({
   blocks: WorkEvent[];
   onChanged: () => void;
   onToast: (message: string, variant?: "default" | "error") => void;
+  /** Owned by the Plan view so useTimeboxDrag can hit-test the timeline. */
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
+  /** Snapped drop minute while a rail task hovers the timeline (else null). */
+  dropPreviewMin?: number | null;
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const scrollRef = externalScrollRef ?? internalRef;
   const [overrides, setOverrides] = useState<Record<string, Override>>({});
-  const [dragOver, setDragOver] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [nowMin, setNowMin] = useState(0);
 
@@ -69,35 +86,6 @@ export function DayTimeline({
     if (scrollRef.current) scrollRef.current.scrollTop = (target / 60) * HOUR_HEIGHT;
     return () => clearInterval(iv);
   }, [dayStartUtcMs, isToday]);
-
-  function yToMinutes(clientY: number): number {
-    const el = scrollRef.current;
-    if (!el) return 0;
-    const rect = el.getBoundingClientRect();
-    const y = clientY - rect.top + el.scrollTop;
-    const mins = (y / HOUR_HEIGHT) * 60;
-    return Math.max(0, Math.min(DAY_MIN - SNAP_MIN, Math.round(mins / SNAP_MIN) * SNAP_MIN));
-  }
-
-  // ── Drop a rail task → create a block ──────────────────────────────────────
-  async function onDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setDragOver(false);
-    const taskId = e.dataTransfer.getData("application/x-task-id");
-    if (!taskId) return;
-    const startMin = yToMinutes(e.clientY);
-    const startIso = new Date(dayStartUtcMs + startMin * 60000).toISOString();
-    const res = await workApi<{ event: WorkEvent }>("/calendar/time-blocks", {
-      method: "POST",
-      body: JSON.stringify({ task_id: taskId, start_at: startIso, planned_date: planDate }),
-    });
-    if (res.ok) {
-      onToast("Task timeboxed.");
-      onChanged();
-    } else {
-      onToast("Couldn't create that time block.", "error");
-    }
-  }
 
   // ── Block move / resize (pointer drag) ─────────────────────────────────────
   // The move/up handlers are defined per-drag (stable closures) so add/remove use
@@ -166,17 +154,8 @@ export function DayTimeline({
       <div
         ref={scrollRef}
         className={`relative min-h-0 flex-1 overflow-y-auto rounded-xl border bg-surface-1/30 ${
-          dragOver ? "border-brand" : "border-surface-2/50"
+          dropPreviewMin != null ? "border-brand" : "border-surface-2/50"
         }`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "copy";
-          if (!dragOver) setDragOver(true);
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setDragOver(false);
-        }}
-        onDrop={onDrop}
       >
         <div className="relative" style={{ height: 24 * HOUR_HEIGHT }}>
           {/* Hour gridlines + labels */}
@@ -201,6 +180,15 @@ export function DayTimeline({
             >
               <span className="absolute -left-0.5 -top-1 h-2 w-2 rounded-full bg-red-500" />
             </div>
+          )}
+
+          {/* Drop preview — where a dragged rail task would land. */}
+          {dropPreviewMin != null && (
+            <div
+              className="pointer-events-none absolute left-12 right-2 z-30 rounded-md border border-dashed border-brand bg-brand/10"
+              style={{ top: (dropPreviewMin / 60) * HOUR_HEIGHT, height: (30 / 60) * HOUR_HEIGHT }}
+              data-testid="drop-preview"
+            />
           )}
 
           {/* Meetings — read-only anchors */}
@@ -248,16 +236,17 @@ export function DayTimeline({
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => deleteBlock(b.id)}
                     aria-label="Remove time block"
-                    className="shrink-0 text-brand/60 opacity-0 transition-opacity hover:text-brand group-hover:opacity-100"
+                    // opacity-60 (not 0) so it's tappable on touch — iPad has no hover.
+                    className="-m-1 shrink-0 p-1 text-brand/60 opacity-60 transition-opacity hover:text-brand group-hover:opacity-100"
                   >
-                    <X className="h-3 w-3" />
+                    <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
                 <div className="text-[10px] text-brand/70">{formatTimeInTz(startIso, tz)}</div>
                 {/* Resize handle */}
                 <div
                   onPointerDown={(e) => beginDrag(e, b, "resize")}
-                  className="absolute bottom-0 left-0 right-0 h-2 cursor-ns-resize"
+                  className="absolute bottom-0 left-0 right-0 h-3 cursor-ns-resize touch-none"
                   aria-label="Resize block"
                 />
               </div>

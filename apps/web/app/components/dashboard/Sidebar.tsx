@@ -99,7 +99,7 @@ export function Sidebar({
       className={
         inDrawer
           ? "flex h-full w-full flex-col bg-surface-0"
-          : `fixed left-0 top-0 z-30 hidden h-screen flex-col border-r border-surface-2/50 bg-surface-0 lg:flex ${
+          : `fixed left-0 top-0 z-30 hidden h-screen flex-col border-r border-surface-2/50 bg-surface-0 pt-safe pb-safe pl-safe lg:flex ${
               mounted ? "transition-all duration-200" : ""
             } ${isCollapsed ? "w-16" : "w-64"}`
       }

@@ -24,6 +24,7 @@ import {
 import { useToasts, ToastContainer } from "~/components/ui/Toast";
 import { TaskRail } from "~/components/work/TaskRail";
 import { DayTimeline } from "~/components/work/DayTimeline";
+import { useTimeboxDrag } from "~/hooks/useTimeboxDrag";
 import { FocusCard } from "~/components/work/FocusCard";
 import { QuickCapture } from "~/components/work/QuickCapture";
 import {
@@ -210,6 +211,16 @@ function PlanView({
   const freeMin = Math.max(0, 24 * 60 - meetingMin);
   const overcommitted = plannedMin > freeMin;
 
+  // Pointer-based rail→timeline drag (Prompt 69 — touch-safe, replaces HTML5 DnD).
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const { ghost, dropPreviewMin, onTaskPointerDown } = useTimeboxDrag({
+    timelineRef,
+    dayStartUtcMs: ld.dayStartUtcMs,
+    planDate: ld.planDate,
+    onChanged,
+    onToast,
+  });
+
   const dayParam = (offset: number) => {
     const sp = new URLSearchParams(searchParams);
     if (offset === 0) sp.delete("d");
@@ -228,7 +239,7 @@ function PlanView({
           <Link
             to={dayParam(ld.dayOffset - 1)}
             aria-label="Previous day"
-            className="rounded-md border border-surface-2 p-1.5 text-zinc-400 hover:text-zinc-200"
+            className="flex h-11 w-11 items-center justify-center rounded-md border border-surface-2 text-zinc-400 hover:text-zinc-200"
           >
             <ChevronLeft className="h-4 w-4" />
           </Link>
@@ -238,7 +249,7 @@ function PlanView({
           <Link
             to={dayParam(ld.dayOffset + 1)}
             aria-label="Next day"
-            className="rounded-md border border-surface-2 p-1.5 text-zinc-400 hover:text-zinc-200"
+            className="flex h-11 w-11 items-center justify-center rounded-md border border-surface-2 text-zinc-400 hover:text-zinc-200"
           >
             <ChevronRight className="h-4 w-4" />
           </Link>
@@ -255,7 +266,12 @@ function PlanView({
       {/* Rail + timeline — stacks below lg (Prompt 60 responsive system). */}
       <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
         <div className="flex min-h-0 w-full flex-col lg:w-80 lg:shrink-0">
-          <TaskRail tasks={ld.tasks} onChanged={onChanged} onToast={onToast} />
+          <TaskRail
+            tasks={ld.tasks}
+            onChanged={onChanged}
+            onToast={onToast}
+            onTaskPointerDown={onTaskPointerDown}
+          />
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <DayTimeline
@@ -267,11 +283,24 @@ function PlanView({
             blocks={ld.blocks}
             onChanged={onChanged}
             onToast={onToast}
+            scrollRef={timelineRef}
+            dropPreviewMin={dropPreviewMin}
           />
         </div>
       </div>
 
       <QuickCapture captures={ld.captures} onChanged={onChanged} onToast={onToast} />
+
+      {/* Floating drag ghost — follows the finger/cursor while timeboxing. */}
+      {ghost && (
+        <div
+          className="pointer-events-none fixed z-50 max-w-[14rem] -translate-x-1/2 -translate-y-1/2 truncate rounded-lg border border-brand/50 bg-surface-1 px-3 py-1.5 text-xs font-medium text-brand shadow-lg"
+          style={{ left: ghost.x, top: ghost.y }}
+          data-testid="drag-ghost"
+        >
+          {ghost.title}
+        </div>
+      )}
     </div>
   );
 }

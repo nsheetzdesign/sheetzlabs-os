@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   Links,
   Meta,
@@ -12,6 +13,10 @@ import appCss from "./app.css?url";
 
 export const links: LinksFunction = () => [
   { rel: "stylesheet", href: appCss },
+  // PWA: manifest + iOS home-screen icon (iOS ignores manifest icons for A2HS).
+  { rel: "manifest", href: "/manifest.webmanifest" },
+  { rel: "apple-touch-icon", href: "/icons/apple-touch-icon.png" },
+  { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -19,7 +24,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* viewport-fit=cover → the app uses the full screen under the notch /
+            home indicator on iPad; safe-area insets (app.css) keep chrome clear. */}
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
+        {/* Matches the app surface (zinc-950) so the iOS status bar / PWA splash
+            chrome blends seamlessly rather than flashing a light bar. */}
+        <meta name="theme-color" content="#09090b" />
+        {/* iOS Safari ignores most of the manifest — these give the native-feel
+            install: full-screen (no Safari chrome), translucent status bar drawn
+            over our dark surface (we pad with env(safe-area-inset-top)), and the
+            home-screen title. */}
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="SL OS" />
         <Meta />
         <Links />
       </head>
@@ -33,6 +54,36 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  // Register the shell service worker (client-only). The SW caches static assets
+  // and an offline fallback but never API/auth/data — see public/sw.js. We reload
+  // only when an UPDATE activates (a controller already existed), so deploys pick
+  // up fresh app code without a jarring first-visit reload.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const onControllerChange = () => {
+      if (sessionStorage.getItem("sw-reloaded")) return;
+      sessionStorage.setItem("sw-reloaded", "1");
+      window.location.reload();
+    };
+    navigator.serviceWorker
+      .register("/sw.js")
+      .then((reg) => {
+        reg.addEventListener("updatefound", () => {
+          const installing = reg.installing;
+          if (!installing) return;
+          installing.addEventListener("statechange", () => {
+            // New SW installed AND a controller was already in place → an update.
+            if (installing.state === "installed" && navigator.serviceWorker.controller) {
+              navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
+            }
+          });
+        });
+      })
+      .catch(() => {
+        /* SW is a progressive enhancement — ignore registration failures. */
+      });
+  }, []);
+
   return <Outlet />;
 }
 

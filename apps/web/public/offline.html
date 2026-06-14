@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#09090b" />
+    <title>Offline — Sheetz Labs OS</title>
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #09090b;
+        color: #e4e4e7;
+        font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+        padding: calc(env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right))
+                 calc(env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left));
+        text-align: center;
+      }
+      .card { max-width: 22rem; }
+      .mark {
+        width: 56px; height: 56px; margin: 0 auto 1.25rem;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 14px; background: #10B981;
+        color: #fff; font-weight: 700; font-size: 1.25rem;
+      }
+      h1 { font-size: 1.125rem; font-weight: 600; color: #f4f4f5; margin: 0 0 .5rem; }
+      p { font-size: .875rem; color: #a1a1aa; line-height: 1.5; margin: 0 0 1.5rem; }
+      button {
+        appearance: none; border: 1px solid #3f3f46; background: #18181b;
+        color: #e4e4e7; font: inherit; font-size: .875rem; font-weight: 500;
+        padding: .625rem 1.25rem; border-radius: .625rem; cursor: pointer;
+      }
+      button:hover { border-color: #10B981; color: #34D399; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="mark">SL</div>
+      <h1>You're offline</h1>
+      <p>Sheetz Labs OS needs a connection to load your latest data. Reconnect and try again — your work is safe on the server.</p>
+      <button type="button" onclick="location.reload()">Retry</button>
+    </div>
+  </body>
+</html>

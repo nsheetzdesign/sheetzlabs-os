@@ -5,17 +5,23 @@ import { workApi, type WorkTask, minutesLabel } from "~/lib/work-client";
 /**
  * The unscheduled-task rail (Plan view, Prompt 67). Tasks here have no time block
  * yet; drag one onto the day-strip to timebox it. Inline add + inline estimate
- * edit; filterable by venture. Drag uses native DnD — the dragged task id rides
- * `dataTransfer` ("application/x-task-id") and the timeline is the drop target.
+ * edit; filterable by venture.
+ *
+ * Drag is POINTER-based (Prompt 69 — native HTML5 DnD never fired on iOS touch).
+ * Only the grip handle initiates a drag (`touch-action: none` there), so the rest
+ * of the row stays free for the list's own touch-scroll. `onTaskPointerDown` is
+ * wired up by the Plan view via useTimeboxDrag.
  */
 export function TaskRail({
   tasks,
   onChanged,
   onToast,
+  onTaskPointerDown,
 }: {
   tasks: WorkTask[];
   onChanged: () => void;
   onToast: (message: string, variant?: "default" | "error") => void;
+  onTaskPointerDown: (e: React.PointerEvent, task: WorkTask) => void;
 }) {
   const [title, setTitle] = useState("");
   const [adding, setAdding] = useState(false);
@@ -108,7 +114,13 @@ export function TaskRail({
           </li>
         )}
         {visible.map((task) => (
-          <RailRow key={task.id} task={task} onChanged={onChanged} onToast={onToast} />
+          <RailRow
+            key={task.id}
+            task={task}
+            onChanged={onChanged}
+            onToast={onToast}
+            onTaskPointerDown={onTaskPointerDown}
+          />
         ))}
       </ul>
     </div>
@@ -119,10 +131,12 @@ function RailRow({
   task,
   onChanged,
   onToast,
+  onTaskPointerDown,
 }: {
   task: WorkTask;
   onChanged: () => void;
   onToast: (message: string, variant?: "default" | "error") => void;
+  onTaskPointerDown: (e: React.PointerEvent, task: WorkTask) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [estimate, setEstimate] = useState(String(task.estimated_minutes ?? ""));
@@ -143,18 +157,22 @@ function RailRow({
 
   return (
     <li
-      draggable
-      onDragStart={(e) => {
-        e.dataTransfer.setData("application/x-task-id", task.id);
-        e.dataTransfer.setData("text/plain", task.title);
-        e.dataTransfer.effectAllowed = "copy";
-      }}
       data-testid="rail-task"
       data-task-id={task.id}
-      className="group flex cursor-grab items-start gap-2 rounded-lg border border-surface-2/60 bg-surface-0 px-2.5 py-2 active:cursor-grabbing hover:border-surface-3"
+      className="group flex items-start gap-1 rounded-lg border border-surface-2/60 bg-surface-0 py-1 pr-2.5 hover:border-surface-3"
     >
-      <GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-zinc-600 group-hover:text-zinc-400" />
-      <div className="min-w-0 flex-1">
+      {/* Drag handle — the ONLY drag-initiating surface (touch-none) so the rail
+          list still scrolls under a finger. ≥44px touch target for the iPad. */}
+      <button
+        type="button"
+        onPointerDown={(e) => onTaskPointerDown(e, task)}
+        data-testid="rail-task-handle"
+        aria-label={`Drag ${task.title} onto the timeline`}
+        className="flex h-11 w-7 shrink-0 cursor-grab touch-none items-center justify-center self-stretch text-zinc-600 active:cursor-grabbing group-hover:text-zinc-400"
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <div className="min-w-0 flex-1 py-1">
         <div className="truncate text-sm text-zinc-200">{task.title}</div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5">
           {task.ventures && (

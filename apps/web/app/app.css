@@ -4,6 +4,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Safe-area insets (Prompt 69, PWA). env(safe-area-inset-*) is 0 in normal
+ * browsers and only non-zero in a standalone iOS install with
+ * viewport-fit=cover — so these are inert until installed. Applied at the app
+ * shell (sidebar / mobile top bar / scroll area / drawer) so content never sits
+ * under the notch, status bar, or home indicator on iPad.
+ */
+@layer utilities {
+  .pt-safe { padding-top: env(safe-area-inset-top); }
+  .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+  .pl-safe { padding-left: env(safe-area-inset-left); }
+  .pr-safe { padding-right: env(safe-area-inset-right); }
+  /* Additive variants for elements that already carry padding. */
+  .pt-safe-2\.5 { padding-top: calc(0.625rem + env(safe-area-inset-top)); }
+  .pb-safe-3 { padding-bottom: calc(0.75rem + env(safe-area-inset-bottom)); }
+}
+
 .grid-bg {
   background-image:
     linear-gradient(rgba(39, 39, 42, 0.5) 1px, transparent 1px),

@@ -5,6 +5,7 @@ import { PanelLeft } from "lucide-react";
 import { Sidebar } from "~/components/dashboard/Sidebar";
 import { CommandPalette } from "~/components/dashboard/CommandPalette";
 import { Drawer } from "~/components/ui/Drawer";
+import { AddToHomeScreen } from "~/components/pwa/AddToHomeScreen";
 import { useSidebarCollapsed } from "~/hooks/useSidebarCollapsed";
 import { useMeetingProximity } from "~/hooks/useMeetingProximity";
 import { requireAuth } from "~/lib/auth.server";
@@ -146,7 +147,7 @@ export default function DashboardLayout() {
             On the inbox route the inbox's own "Open mailboxes" hamburger lives in
             the toolbar one row below this, with a different icon + label, so the
             two drawer triggers stay visually and functionally distinct. */}
-        <header className="flex items-center gap-3 border-b border-surface-2/50 bg-surface-0 px-4 py-2.5 lg:hidden">
+        <header className="flex items-center gap-3 border-b border-surface-2/50 bg-surface-0 px-4 pb-2.5 pt-safe-2.5 pl-safe lg:hidden">
           <button
             type="button"
             onClick={() => setNavOpen(true)}
@@ -162,12 +163,15 @@ export default function DashboardLayout() {
           <span className="text-sm font-semibold">Sheetz Labs</span>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto min-w-0">
+        <div className="min-h-0 flex-1 overflow-auto min-w-0 pb-safe pr-safe">
           <Outlet />
         </div>
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+
+      {/* iOS-only, one-time install nudge (skipped when already installed). */}
+      <AddToHomeScreen />
     </div>
   );
 }
