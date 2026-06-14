@@ -20,10 +20,13 @@
  *
  * Bump CACHE_VERSION on any change to this file or the precache list.
  */
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const SHELL_CACHE = `slos-shell-${CACHE_VERSION}`;
 const ASSET_CACHE = `slos-assets-${CACHE_VERSION}`;
-const OFFLINE_URL = "/offline.html";
+// Cloudflare Workers Assets serves /offline.html at the extensionless /offline
+// (default html_handling = auto-trailing-slash) and 307-redirects the .html form.
+// A redirected response can't be cache.put()'d, so reference the served path.
+const OFFLINE_URL = "/offline";
 
 // Minimal precache: the offline shell + install-surface icons. Hashed JS/CSS is
 // cached lazily on first use (its names aren't known at SW-author time).
