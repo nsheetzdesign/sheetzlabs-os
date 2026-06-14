@@ -30,7 +30,7 @@ const OFFLINE_URL = "/offline.html";
 const PRECACHE = [
   OFFLINE_URL,
   "/manifest.webmanifest",
-  "/favicon.svg",
+  "/favicon.png",
   "/icons/apple-touch-icon.png",
   "/icons/icon-192.png",
   "/icons/icon-512.png",

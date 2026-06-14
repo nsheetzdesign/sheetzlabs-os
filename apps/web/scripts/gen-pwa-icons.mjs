@@ -1,18 +1,24 @@
 /**
  * PWA icon generator (Prompt 69).
  *
- * Renders the Sheetz Labs "SL" mark (brand green #10B981) to the PNG sizes a
- * PWA install needs and writes them to `public/icons/`. One-time, idempotent —
- * the PNGs are committed; re-run only when the mark changes:
+ * Derives the PWA / iOS install icons from the canonical Sheetz Labs mark
+ * (`apps/desktop/src-tauri/icons/512x512.png` — the same logo the desktop app
+ * ships) and writes them to `public/icons/`. One-time, idempotent — the PNGs are
+ * committed; re-run only when the source mark changes:
  *
  *   node scripts/gen-pwa-icons.mjs
  *
+ * The source has a transparent background that composites to ~#09090b, so every
+ * variant is flattened onto the app surface (#09090b) — matching the manifest
+ * background/theme colour for a seamless splash + opaque iOS tile (iOS drops
+ * transparency).
+ *
  * Outputs:
- *   icon-192.png / icon-512.png            — manifest `any` (rounded mark)
- *   icon-192-maskable.png / -512-maskable  — manifest `maskable` (full-bleed,
- *                                            logo inside the ~80% safe zone)
- *   apple-touch-icon.png (180×180)         — iOS home screen (full-bleed, opaque;
- *                                            iOS rounds + ignores transparency)
+ *   icon-192.png / icon-512.png            — manifest `any`
+ *   icon-192-maskable.png / -512-maskable  — manifest `maskable` (logo scaled into
+ *                                            the ~80% safe zone, bg bleeds to edge)
+ *   apple-touch-icon.png (180×180)         — iOS home screen (opaque)
+ *   favicon.png (48×48)                    — browser tab
  *
  * sharp lives only in the pnpm store here (transitive dep), so we resolve it by
  * globbing `.pnpm` rather than a bare import.
@@ -25,6 +31,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../../..");
 const outDir = resolve(__dirname, "../public/icons");
+const publicDir = resolve(__dirname, "../public");
+const SRC = resolve(repoRoot, "apps/desktop/src-tauri/icons/512x512.png");
+const SURFACE = "#09090b"; // app surface (zinc-950) === manifest background_color
 
 function resolveSharp() {
   const store = resolve(repoRoot, "node_modules/.pnpm");
@@ -33,49 +42,43 @@ function resolveSharp() {
   return pathToFileURL(resolve(store, match, "node_modules/sharp/lib/index.js")).href;
 }
 
-const BRAND = "#10B981";
-const WHITE = "#FFFFFF";
-
-/**
- * @param {number} size  canvas size (px)
- * @param {boolean} rounded  true → rounded-rect mark (`any`); false → full-bleed (maskable/apple)
- * @param {number} textScale  glyph size as a fraction of the canvas
- */
-function markSvg(size, rounded, textScale) {
-  const radius = rounded ? Math.round(size * 0.22) : 0;
-  const fontSize = Math.round(size * textScale);
-  // Optical centering: nudge the baseline so "SL" sits visually centered.
-  const y = Math.round(size * 0.5 + fontSize * 0.34);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-  <rect width="${size}" height="${size}" rx="${radius}" ry="${radius}" fill="${BRAND}"/>
-  <text x="50%" y="${y}" text-anchor="middle"
-        font-family="'IBM Plex Sans','Helvetica Neue',Arial,sans-serif"
-        font-weight="700" font-size="${fontSize}" fill="${WHITE}"
-        letter-spacing="${Math.round(size * 0.01)}">SL</text>
-</svg>`;
-}
-
-const TARGETS = [
-  { file: "icon-192.png", size: 192, rounded: true, textScale: 0.42 },
-  { file: "icon-512.png", size: 512, rounded: true, textScale: 0.42 },
-  // Maskable: full-bleed background, logo kept inside the ~80% safe zone.
-  { file: "icon-192-maskable.png", size: 192, rounded: false, textScale: 0.34 },
-  { file: "icon-512-maskable.png", size: 512, rounded: false, textScale: 0.34 },
-  // Apple touch icon: iOS adds its own rounding + drops transparency, so full-bleed.
-  { file: "apple-touch-icon.png", size: 180, rounded: false, textScale: 0.4 },
-];
-
 const sharp = (await import(resolveSharp())).default;
 
-await mkdir(outDir, { recursive: true });
-for (const t of TARGETS) {
-  const svg = Buffer.from(markSvg(t.size, t.rounded, t.textScale));
-  // flatten onto opaque brand for the apple/maskable variants (no transparency).
-  const png = await sharp(svg)
-    .flatten(t.rounded ? false : { background: BRAND })
+/** Full-bleed: source flattened onto the surface, resized to `size`. */
+async function plain(size) {
+  return sharp(SRC).resize(size, size, { fit: "contain", background: SURFACE })
+    .flatten({ background: SURFACE })
     .png()
     .toBuffer();
-  await writeFile(resolve(outDir, t.file), png);
-  console.log(`✓ ${t.file} (${t.size}×${t.size})`);
 }
-console.log(`\nWrote ${TARGETS.length} icons to public/icons/`);
+
+/** Maskable: logo scaled to ~82% and padded with surface so it sits inside the
+ *  maskable safe zone (aggressive launchers crop toward a centred circle). */
+async function maskable(size) {
+  const inner = Math.round(size * 0.82);
+  const pad = Math.round((size - inner) / 2);
+  return sharp(SRC)
+    .resize(inner, inner, { fit: "contain", background: SURFACE })
+    .flatten({ background: SURFACE })
+    .extend({ top: pad, bottom: pad, left: pad, right: pad, background: SURFACE })
+    .resize(size, size)
+    .png()
+    .toBuffer();
+}
+
+await mkdir(outDir, { recursive: true });
+
+const writes = [
+  ["icons/icon-192.png", await plain(192)],
+  ["icons/icon-512.png", await plain(512)],
+  ["icons/icon-192-maskable.png", await maskable(192)],
+  ["icons/icon-512-maskable.png", await maskable(512)],
+  ["icons/apple-touch-icon.png", await plain(180)],
+  ["favicon.png", await plain(48)],
+];
+
+for (const [rel, buf] of writes) {
+  await writeFile(resolve(publicDir, rel), buf);
+  console.log(`✓ ${rel}`);
+}
+console.log(`\nGenerated ${writes.length} icons from ${SRC.replace(repoRoot + "/", "")}`);

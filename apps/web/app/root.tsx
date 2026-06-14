@@ -16,7 +16,7 @@ export const links: LinksFunction = () => [
   // PWA: manifest + iOS home-screen icon (iOS ignores manifest icons for A2HS).
   { rel: "manifest", href: "/manifest.webmanifest" },
   { rel: "apple-touch-icon", href: "/icons/apple-touch-icon.png" },
-  { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+  { rel: "icon", href: "/favicon.png", type: "image/png" },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
