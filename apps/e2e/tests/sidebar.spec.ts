@@ -1,4 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
+import { admin } from "../lib/supabase";
+import { recipientAccount } from "../lib/email";
 
 /**
  * Collapsible primary sidebar (Prompt 61).
@@ -143,5 +145,92 @@ test.describe("sidebar narrow-width drawer @ 900", () => {
     await mailTrigger.click();
     await expect(page.getByRole("dialog", { name: "Mailboxes and folders" })).toBeVisible();
     await page.keyboard.press("Escape");
+  });
+});
+
+/**
+ * Nav indicators (Prompt 68): the Inbox unread badge + the Calendar proximity dot.
+ * Both render from the dashboard loader (global unread RPC + today's events). We
+ * assert the badge tracks the live unread total and hides at zero, and that the
+ * calendar dot is always present with a semantic colour token.
+ */
+test.describe("nav indicators @ 1440", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  /** Live global unread inbox total, straight from the same RPC the loader uses. */
+  async function readUnread(): Promise<number> {
+    const { data } = await admin().rpc("get_email_counts", { p_account_id: null });
+    const row = Array.isArray(data) ? data[0] : data;
+    return Number(row?.inbox ?? 0) || 0;
+  }
+
+  const badgeText = (n: number) => (n > 99 ? "99+" : String(n));
+
+  test("inbox badge reflects the unread count and hides at zero", async ({ page }) => {
+    const badge = page.getByTestId("nav-inbox-badge");
+
+    // Baseline (the e2e mailbox is otherwise empty, so usually 0 → hidden).
+    const baseline = await readUnread();
+    await page.goto("/dashboard", { waitUntil: "networkidle" });
+    if (baseline === 0) {
+      await expect(badge).toHaveCount(0);
+    } else {
+      await expect(badge).toHaveText(badgeText(baseline));
+    }
+
+    // Seed one UNREAD inbox email → the global count goes up by one.
+    const recipient = await recipientAccount();
+    const { data, error } = await admin()
+      .from("emails")
+      .insert({
+        account_id: recipient.id,
+        external_id: `e2e-badge-${Date.now()}`,
+        subject: "[E2E] badge unread",
+        from_email: "noreply@example.com",
+        from_name: "Badge Seed",
+        to_emails: [recipient.email],
+        body_text: "unread badge seed",
+        folder: "INBOX",
+        is_read: false,
+        is_archived: false,
+        is_trashed: false,
+        is_spam: false,
+        is_deleted: false,
+        received_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+    expect(error, error?.message).toBeFalsy();
+    const seededId = (data as { id: string } | null)?.id;
+    expect(seededId).toBeTruthy();
+
+    try {
+      await page.reload({ waitUntil: "networkidle" });
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveText(badgeText(baseline + 1));
+
+      // Collapsed rail shows the presence dot instead of the number.
+      await page.getByTestId("sidebar-toggle").click();
+      await expect(page.getByTestId("nav-inbox-dot")).toBeVisible();
+      await page.getByTestId("sidebar-toggle").click(); // restore expanded
+    } finally {
+      await admin().from("emails").delete().eq("id", seededId);
+    }
+
+    // Back to baseline after removing the seed.
+    await page.reload({ waitUntil: "networkidle" });
+    if (baseline === 0) {
+      await expect(badge).toHaveCount(0);
+    } else {
+      await expect(badge).toHaveText(badgeText(baseline));
+    }
+  });
+
+  test("calendar proximity dot is always present with a semantic colour", async ({ page }) => {
+    await page.goto("/dashboard", { waitUntil: "networkidle" });
+    const dot = page.getByTestId("nav-calendar-dot");
+    await expect(dot).toBeVisible();
+    // One of the four semantic tokens (no hardcoded hex).
+    await expect(dot).toHaveClass(/bg-(success|caution|warning|danger)/);
   });
 });

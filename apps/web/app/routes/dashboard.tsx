@@ -1,21 +1,84 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { Outlet, data, useLoaderData } from "react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PanelLeft } from "lucide-react";
 import { Sidebar } from "~/components/dashboard/Sidebar";
 import { CommandPalette } from "~/components/dashboard/CommandPalette";
 import { Drawer } from "~/components/ui/Drawer";
 import { useSidebarCollapsed } from "~/hooks/useSidebarCollapsed";
+import { useMeetingProximity } from "~/hooks/useMeetingProximity";
 import { requireAuth } from "~/lib/auth.server";
+import { getSupabaseClient } from "~/lib/supabase.server";
+import { apiFetch } from "~/lib/api";
+import { DEFAULT_TZ, getDayBounds, formatTimeInTz } from "~/lib/tz";
+import type { ProximityEvent } from "~/lib/meeting-proximity";
+
+function readTzCookie(request: Request): string | null {
+  const cookie = request.headers.get("cookie") ?? "";
+  const m = cookie.match(/(?:^|;\s*)tz=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
-  const { user, headers } = await requireAuth(request, context.cloudflare.env);
-  return data({ user: { email: user.email } }, { headers });
+  const env = context.cloudflare.env;
+  const { user, headers } = await requireAuth(request, env);
+
+  const tz = readTzCookie(request) || DEFAULT_TZ;
+
+  // Two nav indicators, both off existing infra (Prompt 68):
+  //   • Inbox badge — global unread total from the get_email_counts RPC (the
+  //     `inbox` field IS the unread count: INBOX, not archived/trashed/spam, unread).
+  //   • Calendar dot — today's events (real meetings only; the client recomputes
+  //     proximity colour on a tick). Both fail soft so they never 500 the shell.
+  const supabase = getSupabaseClient(env);
+  const { startUtc, windowEnd } = getDayBounds(new Date(), tz);
+  const range = `start=${encodeURIComponent(startUtc.toISOString())}&end=${encodeURIComponent(
+    windowEnd.toISOString(),
+  )}`;
+
+  let unreadCount = 0;
+  let todayEvents: ProximityEvent[] = [];
+  try {
+    const [countsRes, eventsRes] = await Promise.all([
+      supabase.rpc("get_email_counts", { p_account_id: null }).single<{ inbox: number }>(),
+      apiFetch(request, env, `/calendar/events?${range}`),
+    ]);
+    unreadCount = Number((countsRes.data as { inbox?: number } | null)?.inbox ?? 0) || 0;
+    if (eventsRes.ok) {
+      const body = (await eventsRes.json()) as { events?: ProximityEvent[] };
+      todayEvents = (body.events ?? []).map((e) => ({
+        title: e.title ?? null,
+        start_at: e.start_at,
+        end_at: e.end_at,
+        is_time_block: e.is_time_block ?? false,
+        all_day: e.all_day ?? false,
+      }));
+    }
+  } catch (err) {
+    // Nav indicators are decorative — never 500 the whole shell over them.
+    console.error("[dashboard] nav indicators load failed:", err);
+  }
+
+  return data({ user: { email: user.email }, tz, unreadCount, todayEvents }, { headers });
 }
 
 export default function DashboardLayout() {
-  const { user } = useLoaderData<typeof loader>();
+  const { user, tz, unreadCount, todayEvents } = useLoaderData<typeof loader>();
   const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // Calendar nav dot: recompute proximity colour client-side on a 30s tick + focus
+  // (no extra API call — events come from the loader). Tooltip carries the next
+  // meeting's title + tz-local start time.
+  const proximity = useMeetingProximity(todayEvents);
+  const meetingDot = useMemo(() => {
+    const tooltip =
+      proximity.title && proximity.startAt
+        ? proximity.level === "in-progress"
+          ? `In progress: ${proximity.title}`
+          : `Next: ${proximity.title} at ${formatTimeInTz(proximity.startAt, tz)}`
+        : "No upcoming meetings";
+    return { level: proximity.level, tooltip };
+  }, [proximity, tz]);
   // Mobile (<lg): the primary sidebar is a hamburger-triggered drawer.
   const [navOpen, setNavOpen] = useState(false);
   // Desktop (≥lg): collapse to an icon rail. Persisted, SSR-safe, no auto-collapse.
@@ -49,6 +112,8 @@ export default function DashboardLayout() {
         collapsed={collapsed}
         onToggle={toggle}
         mounted={mounted}
+        unreadCount={unreadCount}
+        meetingDot={meetingDot}
       />
 
       {/* Mobile nav drawer (<lg) — focus-trapped, Esc-closes, restores focus. */}
@@ -66,6 +131,8 @@ export default function DashboardLayout() {
           }}
           inDrawer
           onNavigate={() => setNavOpen(false)}
+          unreadCount={unreadCount}
+          meetingDot={meetingDot}
         />
       </Drawer>
 

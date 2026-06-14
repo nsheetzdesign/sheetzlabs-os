@@ -17,9 +17,15 @@ import type { Attachment } from "./AttachmentChips";
 
 // Gmail-style light defaults. Deliberately NOT `!important` (except layout safety
 // rails) so the email's own inline/embedded styles win — branded colors survive.
+//
+// Containment (Prompt 68): a rigid fixed-width newsletter (fixed-px <td>/spacers)
+// has a min-content width that can exceed a half-screen pane. We keep the iframe
+// itself clamped to the pane (see the element below) and make the DOCUMENT own any
+// horizontal overflow — `overflow-x:auto` on html/body means a too-wide email
+// scrolls INSIDE the iframe, never widening the pane or the page.
 const FRAME_STYLE = `
-  html { color-scheme: light; }
-  html, body { margin: 0; padding: 0; }
+  html { color-scheme: light; overflow-x: hidden; }
+  html, body { margin: 0; padding: 0; max-width: 100%; }
   body {
     background: #ffffff;
     color: #1a1a1a;
@@ -28,6 +34,7 @@ const FRAME_STYLE = `
     line-height: 1.5;
     overflow-wrap: break-word;
     word-break: break-word;
+    overflow-x: auto;
     padding: 8px;
   }
   img { max-width: 100% !important; height: auto; }
@@ -215,7 +222,10 @@ export function EmailHtmlFrame({
   const activeDoc = hasQuoted && !showQuoted ? collapsedDoc : srcDoc;
 
   return (
-    <div>
+    // `max-w-full overflow-hidden` is the outer guard: even if a rigid email's
+    // content is wider than the pane, it can never push this wrapper (or the pane)
+    // wider — horizontal scrolling stays inside the iframe document (Prompt 68).
+    <div className="max-w-full overflow-hidden">
       <iframe
         ref={iframeRef}
         title="Email content"
@@ -223,7 +233,7 @@ export function EmailHtmlFrame({
         referrerPolicy="no-referrer"
         srcDoc={activeDoc}
         onLoad={handleLoad}
-        style={{ width: "100%", height, border: "none", display: "block", borderRadius: 8 }}
+        style={{ width: "100%", maxWidth: "100%", height, border: "none", display: "block", borderRadius: 8 }}
       />
       {hasQuoted && (
         <button

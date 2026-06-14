@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { primaryAccount, recipientAccount, send, findBySubject, trigger, purgeSubject } from "../lib/email";
 import { pollFor } from "../lib/poll";
 import { e2eSubject } from "../lib/tags";
+import { admin } from "../lib/supabase";
 
 /**
  * Responsive inbox layout (Prompt 60). Runs the "inbox loads" + one selection
@@ -136,4 +137,100 @@ test.describe("inbox responsive layout", () => {
     const reset = (await page.getByTestId("inbox-list-pane").boundingBox())!.width;
     expect(reset, "double-click resets the divider").toBeLessThan(after - 40);
   });
+});
+
+/**
+ * Email iframe containment (Prompt 68). A fixed-width newsletter (1200px table +
+ * an unbreakable line + a 1200px image) must render INSIDE the preview-pane iframe
+ * — horizontal scroll lives in the iframe document, never on the pane or page.
+ *
+ * The prior responsive specs exercised the empty/selection state; this opens a
+ * deliberately-too-wide HTML email. We insert the row straight into the DB (the
+ * web inbox reads from the DB) so we control the body_html exactly and skip the
+ * Gmail round-trip.
+ */
+test.describe("email iframe containment", () => {
+  const subject = e2eSubject("wide-html");
+  let emailId: string | null = null;
+
+  // A rigid newsletter far wider than any half-screen pane.
+  const WIDE_HTML = `
+    <table width="1200" cellpadding="0" cellspacing="0" style="width:1200px;border-collapse:collapse">
+      <tr><td style="width:1200px;background:#003a9b;color:#fff;padding:24px;font-size:28px">
+        Jobs picked for you
+      </td></tr>
+      <tr><td style="width:1200px;padding:24px">
+        <p style="white-space:nowrap;font-size:16px">
+          ThisIsADeliberatelyUnbreakableSingleWordThatIsFarWiderThanAnyHalfScreenReadingPaneToForceHorizontalOverflowInsideTheIframeDocumentBodyXXXXXXXXXXXXXXXXXXXX
+        </p>
+        <img src="https://example.com/banner.png" width="1200" height="200"
+             alt="banner" style="width:1200px;height:200px;display:block;background:#ddd" />
+      </td></tr>
+    </table>`;
+
+  test.beforeAll(async () => {
+    const recipient = await recipientAccount();
+    const { data, error } = await admin()
+      .from("emails")
+      .insert({
+        account_id: recipient.id,
+        external_id: `e2e-wide-${Date.now()}`,
+        subject,
+        from_email: "newsletter@example.com",
+        from_name: "Wide Newsletter",
+        to_emails: [recipient.email],
+        body_html: WIDE_HTML,
+        folder: "INBOX",
+        is_read: false,
+        is_archived: false,
+        is_trashed: false,
+        is_spam: false,
+        is_deleted: false,
+        received_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+    expect(error, error?.message).toBeFalsy();
+    emailId = (data as { id: string } | null)?.id ?? null;
+    expect(emailId).toBeTruthy();
+  });
+
+  test.afterAll(async () => {
+    if (emailId) await admin().from("emails").delete().eq("id", emailId);
+  });
+
+  for (const width of [1440, 900] as const) {
+    test(`wide HTML email stays inside the pane — no page h-scroll @ ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/dashboard/inbox", { waitUntil: "networkidle" });
+
+      // Open our seeded wide email.
+      const row = page.getByTestId("email-row").filter({ hasText: "wide-html" }).first();
+      await expect(row).toBeVisible();
+      await row.click();
+
+      // The sandboxed iframe renders the body.
+      const iframeEl = page.locator('iframe[title="Email content"]');
+      await expect(iframeEl).toBeVisible();
+      await expectNoPageHScroll(page);
+
+      // The iframe element itself never exceeds the viewport (it's clamped to its
+      // pane), so the 1200px content cannot bleed onto the page.
+      const ifBox = (await iframeEl.boundingBox())!;
+      expect(ifBox.width, "iframe wider than viewport").toBeLessThanOrEqual(width + 1);
+
+      // And the overflow is REAL but contained: the iframe document scrolls
+      // horizontally inside itself (content wider than the iframe viewport).
+      const cf = await (await iframeEl.elementHandle())!.contentFrame();
+      const dims = await cf!.evaluate(() => ({
+        scrollW: document.body.scrollWidth,
+        clientW: document.documentElement.clientWidth,
+      }));
+      expect(dims.scrollW, "expected the 1200px content to overflow the iframe").toBeGreaterThan(
+        dims.clientW,
+      );
+
+      await expectNoPageHScroll(page);
+    });
+  }
 });

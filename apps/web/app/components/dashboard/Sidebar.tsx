@@ -16,6 +16,16 @@ import {
   ChevronsLeft,
   ChevronsRight,
 } from "lucide-react";
+import type { ProximityLevel } from "~/lib/meeting-proximity";
+
+// Proximity level → semantic colour token (defined in tailwind.config.ts). Literal
+// strings so Tailwind's JIT can see the classes. Prompt 68.
+const DOT_COLOR: Record<ProximityLevel, string> = {
+  "in-progress": "bg-danger",
+  soon: "bg-warning",
+  upcoming: "bg-caution",
+  clear: "bg-success",
+};
 
 const NAV_ITEMS = [
   { icon: Home, label: "Home", to: "/dashboard", exact: true },
@@ -51,6 +61,10 @@ interface SidebarProps {
   mounted?: boolean;
   /** Close the drawer after navigating (mobile only). */
   onNavigate?: () => void;
+  /** Global unread inbox total → badge on the Inbox item. Hidden when 0. */
+  unreadCount?: number;
+  /** Meeting-proximity status for the Calendar item dot. */
+  meetingDot?: { level: ProximityLevel; tooltip: string };
 }
 
 function getInitials(email?: string): string {
@@ -71,6 +85,8 @@ export function Sidebar({
   inDrawer = false,
   mounted = true,
   onNavigate,
+  unreadCount = 0,
+  meetingDot,
 }: SidebarProps) {
   const initials = getInitials(user?.email);
   const displayEmail = user?.email ?? "";
@@ -127,28 +143,72 @@ export function Sidebar({
 
       {/* Main Nav */}
       <nav className={`min-h-0 flex-1 space-y-0.5 overflow-y-auto py-2 ${isCollapsed ? "px-2" : "px-3"}`}>
-        {NAV_ITEMS.map(({ icon: Icon, label, to, exact }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={exact}
-            onClick={onNavigate}
-            title={isCollapsed ? label : undefined}
-            aria-label={isCollapsed ? label : undefined}
-            className={({ isActive }) =>
-              `flex items-center rounded-lg py-2 text-sm transition-colors ${
-                isCollapsed ? "justify-center px-2" : "gap-3 px-3"
-              } ${
-                isActive
-                  ? "border border-brand/30 bg-brand/10 text-brand"
-                  : "text-zinc-500 hover:bg-surface-1/50 hover:text-zinc-300"
-              }`
-            }
-          >
-            <Icon className="h-4 w-4 shrink-0" />
-            {!isCollapsed && label}
-          </NavLink>
-        ))}
+        {NAV_ITEMS.map(({ icon: Icon, label, to, exact }) => {
+          const showBadge = to === "/dashboard/inbox" && unreadCount > 0;
+          const dot = to === "/dashboard/calendar" ? meetingDot : undefined;
+          // Collapsed: the title carries the count/meeting info too (no visible label).
+          const title = isCollapsed
+            ? dot
+              ? `${label} — ${dot.tooltip}`
+              : showBadge
+                ? `${label} (${unreadCount} unread)`
+                : label
+            : dot
+              ? dot.tooltip
+              : undefined;
+          return (
+            <NavLink
+              key={to}
+              to={to}
+              end={exact}
+              onClick={onNavigate}
+              title={title}
+              aria-label={isCollapsed ? label : undefined}
+              className={({ isActive }) =>
+                `flex items-center rounded-lg py-2 text-sm transition-colors ${
+                  isCollapsed ? "justify-center px-2" : "gap-3 px-3"
+                } ${
+                  isActive
+                    ? "border border-brand/30 bg-brand/10 text-brand"
+                    : "text-zinc-500 hover:bg-surface-1/50 hover:text-zinc-300"
+                }`
+              }
+            >
+              <span className="relative shrink-0">
+                <Icon className="h-4 w-4" />
+                {/* Collapsed-rail adornments ride the top-right of the icon. */}
+                {isCollapsed && showBadge && (
+                  <span
+                    data-testid="nav-inbox-dot"
+                    className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 rounded-full bg-brand ring-2 ring-surface-0"
+                  />
+                )}
+                {isCollapsed && dot && (
+                  <span
+                    data-testid="nav-calendar-dot"
+                    className={`absolute -right-1.5 -top-1.5 h-2.5 w-2.5 rounded-full ring-2 ring-surface-0 ${DOT_COLOR[dot.level]}`}
+                  />
+                )}
+              </span>
+              {!isCollapsed && <span className="flex-1 truncate">{label}</span>}
+              {/* Expanded adornments sit at the trailing edge. */}
+              {!isCollapsed && showBadge && (
+                <span
+                  data-testid="nav-inbox-badge"
+                  className="ml-auto shrink-0 rounded-full bg-brand/20 px-1.5 py-0.5 text-xs font-medium tabular-nums text-brand"
+                >
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+              {!isCollapsed && dot && (
+                <span
+                  data-testid="nav-calendar-dot"
+                  className={`ml-auto h-2.5 w-2.5 shrink-0 rounded-full ${DOT_COLOR[dot.level]}`}
+                />
+              )}
+            </NavLink>
+          );
+        })}
       </nav>
 
       {/* Settings */}

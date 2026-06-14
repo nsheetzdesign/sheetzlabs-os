@@ -99,7 +99,7 @@ export function EmailPreview({ email, onClose, onReply, onReplyAll, onForward, o
   const senderInitial = (email.from_name || email.from_email || '?')[0].toUpperCase();
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-w-0">
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-zinc-800">
         <button onClick={onClose} aria-label="Back to list" title="Back" className="flex items-center gap-1 p-1.5 hover:bg-zinc-800 rounded xl:hidden">
