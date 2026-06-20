@@ -112,14 +112,22 @@ export interface IngestResult {
  *   2. Staleness-gated write keyed on run_id: insert when new, update only when the
  *      incoming `updated_at` is >= the stored one (a late webhook can't clobber a
  *      newer poll, and vice-versa).
- *   3. On a failing conclusion, atomically claim `alerted_at` and send ntfy — only
- *      if the claim took a row (0 rows = already alerted by the other path).
+ *   3. On a failing conclusion AND `opts.alert`, atomically claim `alerted_at` and
+ *      send ntfy — only if the claim took a row.
+ *
+ * `opts.alert` is true ONLY for real-time webhook deliveries. The poll/backfill
+ * path passes false (the default): it reconciles silently so registering a repo —
+ * which pulls its entire recent run history at once — never fires a burst of alerts
+ * for failures that already happened. A genuinely new failure alerts via its
+ * webhook; a failure only the poll ever sees (a missed delivery) is backfilled
+ * without an alert, which is the right trade vs. an alert storm.
  */
 export async function ingestRun(
   supabase: Supabase,
   run: GithubRun,
   repoFullName: string,
   env: GithubEnv,
+  opts: { alert?: boolean } = {},
 ): Promise<IngestResult> {
   // (1) Auto-register the repo so the poll loop will reconcile it later.
   await supabase
@@ -162,9 +170,10 @@ export async function ingestRun(
     }
   }
 
-  // (3) Failure alert — atomic claim, then ntfy only if the claim took a row.
+  // (3) Failure alert — webhook (real-time) only. Atomic claim, then ntfy only if
+  // the claim took a row. The poll path (opts.alert falsy) never alerts.
   let alerted = false;
-  if (row.conclusion && ALERT_CONCLUSIONS.has(row.conclusion)) {
+  if (opts.alert && row.conclusion && ALERT_CONCLUSIONS.has(row.conclusion)) {
     alerted = await claimAndAlert(supabase, row, env);
   }
 

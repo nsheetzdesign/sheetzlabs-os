@@ -57,7 +57,8 @@ github.post("/webhook", async (c) => {
   }
 
   const supabase = db(c.env);
-  const result = await ingestRun(supabase, run as never, repoFullName, c.env);
+  // Real-time delivery → this is the path that alerts on failures.
+  const result = await ingestRun(supabase, run as never, repoFullName, c.env, { alert: true });
   return c.json({ ok: true, ...result });
 });
 
