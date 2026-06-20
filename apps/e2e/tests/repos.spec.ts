@@ -59,6 +59,24 @@ test.describe("repos & actions module", () => {
     const row = page.getByTestId("repos-run-row").filter({ hasText: WORKFLOW });
     await expect(row).toBeVisible();
     await expect(row.getByText("failure")).toBeVisible();
+
+    // Overview cards render above the table (one per registered repo).
+    await expect(page.getByTestId("repo-card").first()).toBeVisible();
+  });
+
+  test("GET /github/repos returns overview cards ordered failing-first", async () => {
+    const res = await api<{ repos: Array<{ full_name: string; last_run_conclusion: string | null }> }>(
+      "/github/repos",
+    );
+    expect(res.ok).toBeTruthy();
+    expect(Array.isArray(res.body.repos)).toBeTruthy();
+    // If any repo is failing, the first card must be a failing one (failing-first sort).
+    const failing = new Set(["failure", "timed_out", "cancelled"]);
+    const firstFailingIdx = res.body.repos.findIndex((r) => failing.has(r.last_run_conclusion ?? ""));
+    const firstPassingIdx = res.body.repos.findIndex((r) => !failing.has(r.last_run_conclusion ?? ""));
+    if (firstFailingIdx !== -1 && firstPassingIdx !== -1) {
+      expect(firstFailingIdx).toBeLessThan(firstPassingIdx);
+    }
   });
 
   test("GET /github/runs returns the run and honors the conclusion filter", async () => {
