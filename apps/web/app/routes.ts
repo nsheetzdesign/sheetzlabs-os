@@ -83,6 +83,10 @@ export default [
       route(":id", "routes/dashboard.calendar.$id.tsx"),
     ]),
     route("work", "routes/dashboard.work.tsx"),
+    route("repos", "routes/dashboard.repos.tsx", [
+      index("routes/dashboard.repos._index.tsx"),
+      route("reconcile", "routes/dashboard.repos.reconcile.tsx"),
+    ]),
     route("inbox", "routes/dashboard.inbox.tsx", [
       index("routes/dashboard.inbox._index.tsx"),
       route("connect-gmail", "routes/dashboard.inbox.connect-gmail.tsx"),

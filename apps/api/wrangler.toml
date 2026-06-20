@@ -56,3 +56,7 @@ simple = { limit = 30, period = 60 }
 # GOOGLE_CLIENT_ID — Gmail OAuth
 # GOOGLE_CLIENT_SECRET — Gmail OAuth
 # API_URL — public API base URL (https://api.sheetzlabs.com)
+# GITHUB_WEBHOOK_SECRET — shared secret for the org-level workflow_run webhook (HMAC-SHA256)
+# GITHUB_TOKEN — fine-grained PAT for poll-backfill (Actions:read + Metadata:read)
+# NTFY_URL — ntfy server base (defaults to https://ntfy.sh; optional)
+# NTFY_TOPIC — ntfy topic for CI failure alerts (unset ⇒ alerting is a no-op)

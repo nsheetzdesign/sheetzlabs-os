@@ -11,3 +11,6 @@ build/
 # Rust/Tauri build artifacts
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/icons/icon.iconset/
+
+# Temp file for piping prod secrets to wrangler (Prompt 70)
+.secrets.prod.tmp

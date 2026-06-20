@@ -52,6 +52,12 @@ const PUBLIC_PREFIXES = [
   // The founder-facing `/tickets/:id/convert-*` routes are NOT under this prefix
   // and stay behind the JWT gate.
   "/tickets/sync/",
+  // GitHub org-level workflow_run webhook. No Supabase JWT is possible, so the
+  // chokepoint is skipped and the handler verifies the HMAC X-Hub-Signature-256
+  // internally (fail-closed) — same shape as the Stripe webhook. `path === p`
+  // matches this exact route; the JWT-gated /github/runs + /github/reconcile are
+  // NOT under this prefix.
+  "/github/webhook",
 ];
 
 function isPublicPath(path: string): boolean {

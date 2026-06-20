@@ -12,6 +12,7 @@ import { runEmailSync, processScheduledSends } from "./routes/email";
 import { reconcileAccount } from "./lib/email-reconcile";
 import { getValidAccessToken as getGoogleAccessToken, ReauthRequiredError } from "./lib/google-auth";
 import { syncCalendarAccount } from "./lib/calendar-sync";
+import { pollNextRepo } from "./lib/github";
 
 type Env = {
   ENVIRONMENT: string;
@@ -28,6 +29,9 @@ type Env = {
   APP_URL: string;
   CRON_SECRET: string;
   RESEND_API_KEY: string;
+  GITHUB_TOKEN: string;
+  NTFY_URL: string;
+  NTFY_TOPIC: string;
 };
 
 // Header that lets the cron reach still-HTTP internal endpoints past the API's
@@ -130,8 +134,34 @@ export default {
     if (now.getUTCMinutes() % 15 === 0) {
       ctx.waitUntil(reconcileNextAccount(env, supabase, now));
     }
+
+    // GitHub Actions poll-with-ETag reconcile every 5 minutes (one repo/tick,
+    // most-stale first). Webhooks are the primary feed; this backfills missed
+    // deliveries and repos registered before the hook existed. A 304 Not Modified
+    // costs no rate budget, so rotating one repo per tick stays well under the PAT
+    // limit even with many repos.
+    if (now.getUTCMinutes() % 5 === 0) {
+      ctx.waitUntil(pollGithubRepo(env, supabase));
+    }
   },
 };
+
+/** Poll one repo's Actions runs (ETag-conditional). Fail-soft: logs, never throws. */
+async function pollGithubRepo(env: Env, supabase: ReturnType<typeof createClient<any>>) {
+  try {
+    const r = await pollNextRepo(env, supabase);
+    if (r.repo) {
+      console.log(
+        `[github-poll] ${r.repo}: status=${r.status ?? "?"} ingested=${r.ingested ?? 0}` +
+          (r.error ? ` error=${r.error}` : "")
+      );
+    } else if (r.error) {
+      console.warn(`[github-poll] skipped: ${r.error}`);
+    }
+  } catch (err) {
+    console.error("[github-poll] threw:", err);
+  }
+}
 
 /**
  * Launch due scheduled agents safely (AG-B1/B2/B3, Prompt 65B):

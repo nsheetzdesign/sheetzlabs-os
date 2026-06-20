@@ -17,6 +17,7 @@ import chatRouter from "./routes/chat";
 import bookingRouter from "./routes/booking";
 import learningRouter from "./routes/learning";
 import { focus as focusRouter, dailyPlan as dailyPlanRouter } from "./routes/work";
+import githubRouter from "./routes/github";
 import scheduledHandler from "./scheduled";
 
 type Bindings = {
@@ -43,6 +44,13 @@ type Bindings = {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   API_URL: string;
+  // GitHub Actions monitoring module. Webhook uses the shared secret only (no
+  // token); the poll-backfill uses a fine-grained PAT (Actions:read + Metadata:read).
+  GITHUB_WEBHOOK_SECRET: string;
+  GITHUB_TOKEN: string;
+  // ntfy failure alerts (degrade to no-op when NTFY_TOPIC is unset).
+  NTFY_URL: string;
+  NTFY_TOPIC: string;
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: { userId: string } }>();
@@ -100,6 +108,7 @@ app.route("/booking", bookingRouter);
 app.route("/learning", learningRouter);
 app.route("/focus", focusRouter);
 app.route("/daily-plan", dailyPlanRouter);
+app.route("/github", githubRouter);
 
 export default {
   fetch: app.fetch,

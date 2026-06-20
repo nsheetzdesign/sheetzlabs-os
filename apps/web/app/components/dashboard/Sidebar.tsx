@@ -8,6 +8,7 @@ import {
   Calendar,
   Target,
   Bot,
+  GitBranch,
   BarChart3,
   Settings2,
   LogOut,
@@ -36,6 +37,7 @@ const NAV_ITEMS = [
   { icon: Calendar, label: "Calendar", to: "/dashboard/calendar" },
   { icon: Target, label: "Work", to: "/dashboard/work" },
   { icon: Bot, label: "Agents", to: "/dashboard/agents" },
+  { icon: GitBranch, label: "Repos", to: "/dashboard/repos" },
   { icon: BarChart3, label: "Analytics", to: "/dashboard/analytics" },
   { icon: GraduationCap, label: "Learning", to: "/dashboard/learning" },
 ];
@@ -63,6 +65,8 @@ interface SidebarProps {
   onNavigate?: () => void;
   /** Global unread inbox total → badge on the Inbox item. Hidden when 0. */
   unreadCount?: number;
+  /** Recent CI failures → danger badge on the Repos item. Hidden when 0. */
+  failuresCount?: number;
   /** Meeting-proximity status for the Calendar item dot. */
   meetingDot?: { level: ProximityLevel; tooltip: string };
 }
@@ -86,6 +90,7 @@ export function Sidebar({
   mounted = true,
   onNavigate,
   unreadCount = 0,
+  failuresCount = 0,
   meetingDot,
 }: SidebarProps) {
   const initials = getInitials(user?.email);
@@ -145,6 +150,7 @@ export function Sidebar({
       <nav className={`min-h-0 flex-1 space-y-0.5 overflow-y-auto py-2 ${isCollapsed ? "px-2" : "px-3"}`}>
         {NAV_ITEMS.map(({ icon: Icon, label, to, exact }) => {
           const showBadge = to === "/dashboard/inbox" && unreadCount > 0;
+          const showFailures = to === "/dashboard/repos" && failuresCount > 0;
           const dot = to === "/dashboard/calendar" ? meetingDot : undefined;
           // Collapsed: the title carries the count/meeting info too (no visible label).
           const title = isCollapsed
@@ -152,7 +158,9 @@ export function Sidebar({
               ? `${label} — ${dot.tooltip}`
               : showBadge
                 ? `${label} (${unreadCount} unread)`
-                : label
+                : showFailures
+                  ? `${label} (${failuresCount} recent failure${failuresCount === 1 ? "" : "s"})`
+                  : label
             : dot
               ? dot.tooltip
               : undefined;
@@ -189,6 +197,12 @@ export function Sidebar({
                     className={`absolute -right-1.5 -top-1.5 h-2.5 w-2.5 rounded-full ring-2 ring-surface-0 ${DOT_COLOR[dot.level]}`}
                   />
                 )}
+                {isCollapsed && showFailures && (
+                  <span
+                    data-testid="nav-repos-dot"
+                    className="absolute -right-1.5 -top-1.5 h-2.5 w-2.5 rounded-full bg-danger ring-2 ring-surface-0"
+                  />
+                )}
               </span>
               {!isCollapsed && <span className="flex-1 truncate">{label}</span>}
               {/* Expanded adornments sit at the trailing edge. */}
@@ -205,6 +219,14 @@ export function Sidebar({
                   data-testid="nav-calendar-dot"
                   className={`ml-auto h-2.5 w-2.5 shrink-0 rounded-full ${DOT_COLOR[dot.level]}`}
                 />
+              )}
+              {!isCollapsed && showFailures && (
+                <span
+                  data-testid="nav-repos-badge"
+                  className="ml-auto shrink-0 rounded-full bg-danger/20 px-1.5 py-0.5 text-xs font-medium tabular-nums text-danger"
+                >
+                  {failuresCount > 99 ? "99+" : failuresCount}
+                </span>
               )}
             </NavLink>
           );

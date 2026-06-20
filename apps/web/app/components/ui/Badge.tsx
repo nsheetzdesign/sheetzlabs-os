@@ -24,12 +24,37 @@ const VENTURE_STATUS: Record<string, string> = {
   sold: "bg-purple-500/15 text-purple-400",
 };
 
-type BadgeVariant = "task-status" | "task-priority" | "venture-status";
+// GitHub Actions run status/conclusion → semantic tokens (success/caution/warning/
+// danger, defined in tailwind.config.ts). Keys are the conclusion when present,
+// else the in-flight status (queued/in_progress).
+const WORKFLOW_STATUS: Record<string, string> = {
+  success: "bg-success/15 text-success",
+  completed: "bg-success/15 text-success",
+  failure: "bg-danger/15 text-danger",
+  timed_out: "bg-danger/15 text-danger",
+  startup_failure: "bg-danger/15 text-danger",
+  action_required: "bg-warning/15 text-warning",
+  in_progress: "bg-caution/15 text-caution",
+  queued: "bg-zinc-700 text-zinc-300",
+  requested: "bg-zinc-700 text-zinc-300",
+  waiting: "bg-zinc-700 text-zinc-300",
+  cancelled: "bg-zinc-800 text-zinc-400",
+  skipped: "bg-zinc-800 text-zinc-400",
+  neutral: "bg-zinc-800 text-zinc-400",
+  stale: "bg-zinc-800 text-zinc-400",
+};
+
+type BadgeVariant =
+  | "task-status"
+  | "task-priority"
+  | "venture-status"
+  | "workflow-status";
 
 const COLOR_MAPS: Record<BadgeVariant, Record<string, string>> = {
   "task-status": TASK_STATUS,
   "task-priority": TASK_PRIORITY,
   "venture-status": VENTURE_STATUS,
+  "workflow-status": WORKFLOW_STATUS,
 };
 
 export function Badge({

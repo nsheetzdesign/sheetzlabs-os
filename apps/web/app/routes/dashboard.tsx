@@ -37,14 +37,24 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     windowEnd.toISOString(),
   )}`;
 
+  // CI failures in the last 24h → danger badge on the Repos nav item.
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
   let unreadCount = 0;
+  let failuresCount = 0;
   let todayEvents: ProximityEvent[] = [];
   try {
-    const [countsRes, eventsRes] = await Promise.all([
+    const [countsRes, eventsRes, failuresRes] = await Promise.all([
       supabase.rpc("get_email_counts", { p_account_id: null }).single<{ inbox: number }>(),
       apiFetch(request, env, `/calendar/events?${range}`),
+      supabase
+        .from("workflow_runs")
+        .select("id", { count: "exact", head: true })
+        .in("conclusion", ["failure", "timed_out", "cancelled"])
+        .gte("run_started_at", since24h),
     ]);
     unreadCount = Number((countsRes.data as { inbox?: number } | null)?.inbox ?? 0) || 0;
+    failuresCount = failuresRes.count ?? 0;
     if (eventsRes.ok) {
       const body = (await eventsRes.json()) as { events?: ProximityEvent[] };
       todayEvents = (body.events ?? []).map((e) => ({
@@ -60,11 +70,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     console.error("[dashboard] nav indicators load failed:", err);
   }
 
-  return data({ user: { email: user.email }, tz, unreadCount, todayEvents }, { headers });
+  return data(
+    { user: { email: user.email }, tz, unreadCount, failuresCount, todayEvents },
+    { headers },
+  );
 }
 
 export default function DashboardLayout() {
-  const { user, tz, unreadCount, todayEvents } = useLoaderData<typeof loader>();
+  const { user, tz, unreadCount, failuresCount, todayEvents } = useLoaderData<typeof loader>();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Calendar nav dot: recompute proximity colour client-side on a 30s tick + focus
@@ -114,6 +127,7 @@ export default function DashboardLayout() {
         onToggle={toggle}
         mounted={mounted}
         unreadCount={unreadCount}
+        failuresCount={failuresCount}
         meetingDot={meetingDot}
       />
 
@@ -133,6 +147,7 @@ export default function DashboardLayout() {
           inDrawer
           onNavigate={() => setNavOpen(false)}
           unreadCount={unreadCount}
+          failuresCount={failuresCount}
           meetingDot={meetingDot}
         />
       </Drawer>
