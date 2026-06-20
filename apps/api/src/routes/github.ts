@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 import { createClient } from "@supabase/supabase-js";
-import { verifyGithubSignature, ingestRun, pollNextRepo } from "../lib/github";
+import {
+  verifyGithubSignature,
+  ingestRun,
+  pollNextRepo,
+  discoverRepos,
+  probeWebhookPermission,
+} from "../lib/github";
 
 type Bindings = {
   SUPABASE_URL: string;
@@ -9,6 +15,7 @@ type Bindings = {
   GITHUB_TOKEN: string;
   NTFY_URL: string;
   NTFY_TOPIC: string;
+  API_URL: string;
 };
 
 // Untyped client — `repos`/`workflow_runs` aren't in the generated Database types
@@ -93,15 +100,58 @@ github.get("/runs", async (c) => {
 });
 
 /**
+ * GET /github/repos
+ *
+ * Behind the JWT gate. One row per repo for the overview cards: denormalized
+ * last_run_*, open issue/PR counts, and sync timestamps. Ordered failing-first
+ * (last_run_conclusion in the failure set), then by most-recent run.
+ */
+github.get("/repos", async (c) => {
+  const supabase = db(c.env);
+  const { data, error } = await supabase
+    .from("repos")
+    .select(
+      "full_name, last_run_status, last_run_conclusion, last_run_at, last_run_url, " +
+        "open_issues, open_prs, counts_synced_at, hooked_at",
+    );
+  if (error) return c.json({ error: error.message }, 500);
+
+  const FAILING = new Set(["failure", "timed_out", "cancelled"]);
+  const rows = (data ?? []) as unknown as Array<{
+    last_run_conclusion: string | null;
+    last_run_at: string | null;
+  }>;
+  const repos = rows.slice().sort((a, b) => {
+    const af = FAILING.has(a.last_run_conclusion ?? "") ? 0 : 1;
+    const bf = FAILING.has(b.last_run_conclusion ?? "") ? 0 : 1;
+    if (af !== bf) return af - bf; // failing first
+    const at = a.last_run_at ? new Date(a.last_run_at).getTime() : 0;
+    const bt = b.last_run_at ? new Date(b.last_run_at).getTime() : 0;
+    return bt - at; // then most-recent run
+  });
+
+  return c.json({ repos });
+});
+
+/**
  * POST /github/reconcile
  *
  * Manual "reconcile now" — runs one poll-with-ETag tick (one repo, most-stale
- * first). Behind the JWT gate (the web action calls requireAuth first); the cron
- * reaches the same logic directly via pollNextRepo.
+ * first). `?discover=1` also runs the self-healing discovery sweep + a Webhooks-
+ * permission probe (used to confirm the fine-grained PAT prereq operationally).
+ * Behind the JWT gate (the web action calls requireAuth first); the cron reaches
+ * the same logic directly via pollNextRepo / discoverRepos.
  */
 github.post("/reconcile", async (c) => {
   const supabase = db(c.env);
   const result = await pollNextRepo(c.env, supabase);
+
+  if (c.req.query("discover") === "1") {
+    const discovery = await discoverRepos(c.env, supabase);
+    const permission = await probeWebhookPermission(c.env, "nsheetzdesign/sheetzlabs-os");
+    return c.json({ ok: !result.error, ...result, discovery, permission });
+  }
+
   return c.json({ ok: !result.error, ...result });
 });
 

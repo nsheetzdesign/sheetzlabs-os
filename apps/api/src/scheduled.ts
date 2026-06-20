@@ -12,7 +12,7 @@ import { runEmailSync, processScheduledSends } from "./routes/email";
 import { reconcileAccount } from "./lib/email-reconcile";
 import { getValidAccessToken as getGoogleAccessToken, ReauthRequiredError } from "./lib/google-auth";
 import { syncCalendarAccount } from "./lib/calendar-sync";
-import { pollNextRepo } from "./lib/github";
+import { pollNextRepo, discoverRepos } from "./lib/github";
 
 type Env = {
   ENVIRONMENT: string;
@@ -30,6 +30,7 @@ type Env = {
   CRON_SECRET: string;
   RESEND_API_KEY: string;
   GITHUB_TOKEN: string;
+  GITHUB_WEBHOOK_SECRET: string;
   NTFY_URL: string;
   NTFY_TOPIC: string;
 };
@@ -143,10 +144,19 @@ export default {
     if (now.getUTCMinutes() % 5 === 0) {
       ctx.waitUntil(pollGithubRepo(env, supabase));
     }
+
+    // Self-healing webhook discovery, hourly (top of the hour). Scans all visible
+    // repos, registers new ones, and creates a workflow_run hook on any workflow-
+    // having repo that isn't hooked yet — so coverage stays current with zero manual
+    // hooks. Idempotent + fail-soft (skips hooked repos, 403s if the PAT lacks
+    // Webhooks:write without crashing the sweep).
+    if (now.getUTCMinutes() === 0) {
+      ctx.waitUntil(discoverGithubRepos(env, supabase));
+    }
   },
 };
 
-/** Poll one repo's Actions runs (ETag-conditional). Fail-soft: logs, never throws. */
+/** Poll one repo's runs + counts (ETag-conditional). Fail-soft: logs, never throws. */
 async function pollGithubRepo(env: Env, supabase: ReturnType<typeof createClient<any>>) {
   try {
     const r = await pollNextRepo(env, supabase);
@@ -160,6 +170,20 @@ async function pollGithubRepo(env: Env, supabase: ReturnType<typeof createClient
     }
   } catch (err) {
     console.error("[github-poll] threw:", err);
+  }
+}
+
+/** Hourly self-healing webhook discovery. Fail-soft: logs, never throws. */
+async function discoverGithubRepos(env: Env, supabase: ReturnType<typeof createClient<any>>) {
+  try {
+    const d = await discoverRepos(env, supabase);
+    console.log(
+      `[github-discover] scanned=${d.scanned} hooked=${d.hooked} adopted=${d.adopted} ` +
+        `noWorkflow=${d.noWorkflow} webhooksForbidden=${d.webhooksForbidden}` +
+        (d.error ? ` error=${d.error}` : "")
+    );
+  } catch (err) {
+    console.error("[github-discover] threw:", err);
   }
 }
 

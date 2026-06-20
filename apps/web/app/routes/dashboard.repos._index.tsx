@@ -1,10 +1,19 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams, useFetcher } from "react-router";
 import { useEffect, useState } from "react";
-import { GitBranch, RefreshCw, ExternalLink, GitCommit, X } from "lucide-react";
+import {
+  GitBranch,
+  RefreshCw,
+  ExternalLink,
+  GitCommit,
+  GitPullRequest,
+  CircleDot,
+  X,
+} from "lucide-react";
 import { Header } from "~/components/dashboard/Header";
 import { Badge } from "~/components/ui/Badge";
 import { EmptyState } from "~/components/ui/EmptyState";
+import { Skeleton } from "~/components/ui/Skeleton";
 import { apiFetch } from "~/lib/api";
 
 interface WorkflowRun {
@@ -24,12 +33,20 @@ interface WorkflowRun {
   run_updated_at: string | null;
 }
 
-interface RepoRow {
+interface RepoCard {
   full_name: string;
-  last_polled_at: string | null;
+  last_run_status: string | null;
+  last_run_conclusion: string | null;
+  last_run_at: string | null;
+  last_run_url: string | null;
+  open_issues: number;
+  open_prs: number;
+  counts_synced_at: string | null;
+  hooked_at: string | null;
 }
 
 const CONCLUSIONS = ["success", "failure", "cancelled", "timed_out"];
+const FAILING = new Set(["failure", "timed_out", "cancelled"]);
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   const env = context.cloudflare.env;
@@ -43,20 +60,44 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
 
   let runs: WorkflowRun[] = [];
-  let repos: RepoRow[] = [];
+  let repoCards: RepoCard[] = [];
   try {
-    const res = await apiFetch(request, env, `/github/runs${suffix}`);
-    if (res.ok) {
-      const body = (await res.json()) as { runs?: WorkflowRun[]; repos?: RepoRow[] };
-      runs = body.runs ?? [];
-      repos = body.repos ?? [];
+    // Cards (one row per repo, failing-first) + the runs list (table). Both authed.
+    const [reposRes, runsRes] = await Promise.all([
+      apiFetch(request, env, `/github/repos`),
+      apiFetch(request, env, `/github/runs${suffix}`),
+    ]);
+    if (reposRes.ok) {
+      repoCards = ((await reposRes.json()) as { repos?: RepoCard[] }).repos ?? [];
+    }
+    if (runsRes.ok) {
+      runs = ((await runsRes.json()) as { runs?: WorkflowRun[] }).runs ?? [];
     }
   } catch (err) {
-    console.error("[repos] runs load failed:", err);
+    console.error("[repos] load failed:", err);
   }
 
-  return { runs, repos, filters: { repo, conclusion } };
+  return { runs, repoCards, filters: { repo, conclusion } };
 }
+
+/** Card status pill value: passing/failing/running/none from the last conclusion. */
+function cardState(c: RepoCard): { value: string; failing: boolean } {
+  const concl = c.last_run_conclusion;
+  if (concl === "success") return { value: "passing", failing: false };
+  if (concl && FAILING.has(concl)) return { value: "failing", failing: true };
+  if (c.last_run_status === "in_progress" || c.last_run_status === "queued")
+    return { value: "running", failing: false };
+  if (!concl && !c.last_run_status) return { value: "none", failing: false };
+  return { value: concl ?? c.last_run_status ?? "none", failing: false };
+}
+
+// Card pill → Badge workflow-status key (passing→success, failing→failure, etc.).
+const CARD_PILL_KEY: Record<string, string> = {
+  passing: "success",
+  failing: "failure",
+  running: "in_progress",
+  none: "neutral",
+};
 
 function relativeTime(str: string | null): string {
   if (!str) return "—";
@@ -75,7 +116,7 @@ function runState(run: WorkflowRun): string {
 }
 
 export default function ReposIndex() {
-  const { runs, repos, filters } = useLoaderData<typeof loader>();
+  const { runs, repoCards, filters } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const reconcile = useFetcher<{ ok?: boolean; repo?: string; status?: number; ingested?: number; error?: string }>();
   const [selected, setSelected] = useState<WorkflowRun | null>(null);
@@ -92,6 +133,11 @@ export default function ReposIndex() {
 
   const reconciling = reconcile.state !== "idle";
 
+  // Enrich cards with the latest run's number + branch from the loaded runs (the
+  // denormalized last_run_* intentionally omits these — runs are newest-first).
+  const latestByRepo = new Map<string, WorkflowRun>();
+  for (const r of runs) if (!latestByRepo.has(r.repo_full_name)) latestByRepo.set(r.repo_full_name, r);
+
   function setFilter(key: "repo" | "conclusion", value: string) {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
@@ -103,6 +149,87 @@ export default function ReposIndex() {
     <div className="flex flex-1 flex-col">
       <Header title="Repos & Actions" />
       <main className="flex-1 p-6">
+        {/* Overview cards — one per repo, failing first (server-ordered). */}
+        {reconciling && repoCards.length === 0 ? (
+          <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-28 rounded-xl" />
+            ))}
+          </div>
+        ) : repoCards.length > 0 ? (
+          <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {repoCards.map((card) => {
+              const { value, failing } = cardState(card);
+              const latest = latestByRepo.get(card.full_name);
+              const active = filters.repo === card.full_name;
+              return (
+                <button
+                  key={card.full_name}
+                  type="button"
+                  onClick={() => setFilter("repo", active ? "" : card.full_name)}
+                  data-testid="repo-card"
+                  aria-pressed={active}
+                  title={active ? "Clear repo filter" : `Filter runs to ${card.full_name}`}
+                  className={`flex flex-col gap-3 rounded-xl border p-4 text-left transition-colors ${
+                    failing
+                      ? "border-danger/40 bg-danger/5 hover:border-danger/60"
+                      : active
+                        ? "border-brand/40 bg-brand/5"
+                        : "border-surface-2/60 bg-surface-1/40 hover:border-surface-3"
+                  }`}
+                >
+                  {/* Header: repo name + status pill */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span
+                        className={`h-2 w-2 shrink-0 rounded-full ${
+                          value === "passing"
+                            ? "bg-success"
+                            : value === "failing"
+                              ? "bg-danger"
+                              : value === "running"
+                                ? "bg-caution animate-pulse"
+                                : "bg-zinc-600"
+                        }`}
+                      />
+                      <span className="truncate font-mono text-sm text-zinc-200">
+                        {card.full_name.replace(/^[^/]+\//, "")}
+                      </span>
+                    </div>
+                    <Badge value={CARD_PILL_KEY[value] ?? value} variant="workflow-status" />
+                  </div>
+
+                  {/* Last run: number + relative time + branch */}
+                  <div className="min-w-0 text-xs text-zinc-500">
+                    {latest?.run_number != null && (
+                      <span className="font-mono text-zinc-400">#{latest.run_number} </span>
+                    )}
+                    <span>{card.last_run_at ? relativeTime(card.last_run_at) : "no runs yet"}</span>
+                    {latest?.head_branch && (
+                      <span className="ml-1.5 inline-flex items-center gap-1 text-zinc-600">
+                        <GitBranch className="h-3 w-3" />
+                        <span className="truncate">{latest.head_branch}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Footer: open PRs + issues */}
+                  <div className="flex items-center gap-4 border-t border-surface-2/40 pt-2 text-xs text-zinc-500">
+                    <span className="inline-flex items-center gap-1" title={`${card.open_prs} open pull requests`}>
+                      <GitPullRequest className="h-3.5 w-3.5" />
+                      <span className="tabular-nums">{card.open_prs}</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1" title={`${card.open_issues} open issues`}>
+                      <CircleDot className="h-3.5 w-3.5" />
+                      <span className="tabular-nums">{card.open_issues}</span>
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
         {/* Toolbar: filters + reconcile */}
         <div className="mb-5 flex flex-wrap items-center gap-3">
           <select
@@ -112,7 +239,7 @@ export default function ReposIndex() {
             className="rounded-lg border border-surface-2 bg-surface-1/50 px-3 py-1.5 text-sm text-zinc-300"
           >
             <option value="">All repos</option>
-            {repos.map((r) => (
+            {repoCards.map((r) => (
               <option key={r.full_name} value={r.full_name}>
                 {r.full_name}
               </option>
