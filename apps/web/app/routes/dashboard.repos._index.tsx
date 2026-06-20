@@ -39,6 +39,8 @@ interface RepoCard {
   last_run_conclusion: string | null;
   last_run_at: string | null;
   last_run_url: string | null;
+  last_run_number: number | null;
+  last_run_branch: string | null;
   open_issues: number;
   open_prs: number;
   counts_synced_at: string | null;
@@ -133,11 +135,6 @@ export default function ReposIndex() {
 
   const reconciling = reconcile.state !== "idle";
 
-  // Enrich cards with the latest run's number + branch from the loaded runs (the
-  // denormalized last_run_* intentionally omits these — runs are newest-first).
-  const latestByRepo = new Map<string, WorkflowRun>();
-  for (const r of runs) if (!latestByRepo.has(r.repo_full_name)) latestByRepo.set(r.repo_full_name, r);
-
   function setFilter(key: "repo" | "conclusion", value: string) {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
@@ -160,7 +157,6 @@ export default function ReposIndex() {
           <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {repoCards.map((card) => {
               const { value, failing } = cardState(card);
-              const latest = latestByRepo.get(card.full_name);
               const active = filters.repo === card.full_name;
               return (
                 <button
@@ -199,16 +195,16 @@ export default function ReposIndex() {
                     <Badge value={CARD_PILL_KEY[value] ?? value} variant="workflow-status" />
                   </div>
 
-                  {/* Last run: number + relative time + branch */}
+                  {/* Last run: number + relative time + branch (all off the repos row) */}
                   <div className="min-w-0 text-xs text-zinc-500">
-                    {latest?.run_number != null && (
-                      <span className="font-mono text-zinc-400">#{latest.run_number} </span>
+                    {card.last_run_number != null && (
+                      <span className="font-mono text-zinc-400">#{card.last_run_number} </span>
                     )}
                     <span>{card.last_run_at ? relativeTime(card.last_run_at) : "no runs yet"}</span>
-                    {latest?.head_branch && (
+                    {card.last_run_branch && (
                       <span className="ml-1.5 inline-flex items-center gap-1 text-zinc-600">
                         <GitBranch className="h-3 w-3" />
-                        <span className="truncate">{latest.head_branch}</span>
+                        <span className="truncate">{card.last_run_branch}</span>
                       </span>
                     )}
                   </div>

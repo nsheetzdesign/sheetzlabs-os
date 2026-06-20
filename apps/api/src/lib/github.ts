@@ -224,6 +224,8 @@ async function updateLastRun(
       last_run_conclusion: row.conclusion,
       last_run_at: row.run_started_at,
       last_run_url: row.html_url,
+      last_run_number: row.run_number,
+      last_run_branch: row.head_branch,
     })
     .eq("full_name", repoFullName);
 }

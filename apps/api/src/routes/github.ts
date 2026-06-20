@@ -108,12 +108,15 @@ github.get("/runs", async (c) => {
  */
 github.get("/repos", async (c) => {
   const supabase = db(c.env);
+  // CI-active repos only (hooked_at not null) — workflow-less repos don't show as
+  // grey cards; they auto-surface once discovery hooks them.
   const { data, error } = await supabase
     .from("repos")
     .select(
       "full_name, last_run_status, last_run_conclusion, last_run_at, last_run_url, " +
-        "open_issues, open_prs, counts_synced_at, hooked_at",
-    );
+        "last_run_number, last_run_branch, open_issues, open_prs, counts_synced_at, hooked_at",
+    )
+    .not("hooked_at", "is", null);
   if (error) return c.json({ error: error.message }, 500);
 
   const FAILING = new Set(["failure", "timed_out", "cancelled"]);

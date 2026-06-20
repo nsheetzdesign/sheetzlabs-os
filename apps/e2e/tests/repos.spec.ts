@@ -19,16 +19,38 @@ const RUN_ID = 999000777; // fixed, unlikely to collide with a real GitHub run i
 const REPO = "nsheetzdesign/e2e-actions-repo";
 const WORKFLOW = "E2E Smoke Workflow";
 
+// A CI-active card repo seeded directly on `repos` (hooked, denormalized last_run_*)
+// with NO workflow_runs rows — so a ?repo= filter on it leaves the runs table empty,
+// proving the card reads only the repos row. Plus a workflow-less (unhooked) repo
+// that must NOT appear as a card.
+const CARD_REPO = "nsheetzdesign/e2e-card-repo";
+const CARD_REPO_SHORT = "e2e-card-repo";
+const CARD_RUN_NUMBER = 4242;
+const CARD_BRANCH = "e2e-card-branch";
+const UNHOOKED_REPO = "nsheetzdesign/e2e-unhooked-repo";
+
 interface RunRow {
   run_id: number;
   workflow_name: string;
   conclusion: string | null;
 }
 
+interface CardRow {
+  full_name: string;
+  last_run_conclusion: string | null;
+  last_run_number: number | null;
+  last_run_branch: string | null;
+  hooked_at: string | null;
+}
+
 test.describe("repos & actions module", () => {
   test.beforeAll(async () => {
-    // Clean any prior leftover, then seed one failed run.
+    const now = new Date().toISOString();
+    // Clean any prior leftovers.
     await admin().from("workflow_runs").delete().eq("run_id", RUN_ID);
+    await admin().from("repos").delete().in("full_name", [CARD_REPO, UNHOOKED_REPO]);
+
+    // Seed one failed run for the table test.
     const { error } = await admin().from("workflow_runs").insert({
       run_id: RUN_ID,
       repo_full_name: REPO,
@@ -41,14 +63,34 @@ test.describe("repos & actions module", () => {
       conclusion: "failure",
       actor: "nsheetzdesign",
       html_url: "https://github.com/nsheetzdesign/e2e-actions-repo/actions/runs/999000777",
-      run_started_at: new Date().toISOString(),
-      run_updated_at: new Date().toISOString(),
+      run_started_at: now,
+      run_updated_at: now,
     });
-    if (error) throw new Error(`seed failed: ${error.message}`);
+    if (error) throw new Error(`run seed failed: ${error.message}`);
+
+    // Seed the CI-active card repo (hooked, denormalized) + a workflow-less repo.
+    const { error: repoErr } = await admin().from("repos").insert([
+      {
+        full_name: CARD_REPO,
+        hooked_at: now,
+        webhook_id: 999111222,
+        last_run_status: "completed",
+        last_run_conclusion: "failure",
+        last_run_at: now,
+        last_run_url: "https://github.com/nsheetzdesign/e2e-card-repo/actions/runs/1",
+        last_run_number: CARD_RUN_NUMBER,
+        last_run_branch: CARD_BRANCH,
+        open_prs: 3,
+        open_issues: 5,
+      },
+      { full_name: UNHOOKED_REPO, hooked_at: null }, // workflow-less → excluded from cards
+    ]);
+    if (repoErr) throw new Error(`repo seed failed: ${repoErr.message}`);
   });
 
   test.afterAll(async () => {
     await admin().from("workflow_runs").delete().eq("run_id", RUN_ID);
+    await admin().from("repos").delete().in("full_name", [CARD_REPO, UNHOOKED_REPO]);
   });
 
   test("renders the seeded run with its conclusion badge", async ({ page }) => {
@@ -64,19 +106,40 @@ test.describe("repos & actions module", () => {
     await expect(page.getByTestId("repo-card").first()).toBeVisible();
   });
 
-  test("GET /github/repos returns overview cards ordered failing-first", async () => {
-    const res = await api<{ repos: Array<{ full_name: string; last_run_conclusion: string | null }> }>(
-      "/github/repos",
-    );
+  test("GET /github/repos: failing-first, denormalized run#/branch, excludes workflow-less repos", async () => {
+    const res = await api<{ repos: CardRow[] }>("/github/repos");
     expect(res.ok).toBeTruthy();
     expect(Array.isArray(res.body.repos)).toBeTruthy();
-    // If any repo is failing, the first card must be a failing one (failing-first sort).
+
+    // Only CI-active (hooked) repos are returned.
+    expect(res.body.repos.every((r) => r.hooked_at)).toBeTruthy();
+    expect(res.body.repos.some((r) => r.full_name === UNHOOKED_REPO)).toBeFalsy();
+
+    // The seeded card carries its denormalized run number + branch off the repos row.
+    const card = res.body.repos.find((r) => r.full_name === CARD_REPO);
+    expect(card).toBeTruthy();
+    expect(card?.last_run_number).toBe(CARD_RUN_NUMBER);
+    expect(card?.last_run_branch).toBe(CARD_BRANCH);
+
+    // Failing-first: no passing/none card precedes a failing one.
     const failing = new Set(["failure", "timed_out", "cancelled"]);
     const firstFailingIdx = res.body.repos.findIndex((r) => failing.has(r.last_run_conclusion ?? ""));
     const firstPassingIdx = res.body.repos.findIndex((r) => !failing.has(r.last_run_conclusion ?? ""));
     if (firstFailingIdx !== -1 && firstPassingIdx !== -1) {
       expect(firstFailingIdx).toBeLessThan(firstPassingIdx);
     }
+  });
+
+  test("cards stay fully populated (run#/branch) while a ?repo= filter is active", async ({ page }) => {
+    // Filter the table to CARD_REPO, which has a card row but NO workflow_runs — so if
+    // the card depended on the runs list it would be blank. It must still show #num + branch.
+    await page.goto(`/dashboard/repos?repo=${encodeURIComponent(CARD_REPO)}`, {
+      waitUntil: "networkidle",
+    });
+    const card = page.getByTestId("repo-card").filter({ hasText: CARD_REPO_SHORT });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText(`#${CARD_RUN_NUMBER}`);
+    await expect(card).toContainText(CARD_BRANCH);
   });
 
   test("GET /github/runs returns the run and honors the conclusion filter", async () => {
